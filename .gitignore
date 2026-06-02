@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+
+# Data (keep directory, ignore contents)
+data/                   # 所有数据文件（SQLite / ChromaDB / 模型）
+data/models/            # embedding 模型文件 (~400MB)
+data/chroma/             # ChromaDB 向量库
+*.log                    # 日志文件
+
+# Environment
+.env
+*.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

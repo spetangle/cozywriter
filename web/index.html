@@ -1,0 +1,1044 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CozyWriter - 小说编写助手</title>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div id="app" x-data="app()" x-init="init()">
+
+    <!-- ═══ Setup Wizard ═══ -->
+    <template x-if="showSetupWizard">
+      <div class="wizard-overlay">
+        <div class="wizard-container">
+          <h1>欢迎使用 CozyWriter</h1>
+          <p class="subtitle">智能小说编写助手 — LLM + RAG 知识管理 + 智能评审</p>
+          <template x-if="setupStep === 2">
+            <div class="wizard-step">
+              <h2>第 1 步：选择大模型服务商</h2>
+              <div class="provider-list">
+                <label class="provider-option">
+                  <input type="radio" name="provider" value="anthropic" x-model="selectedProvider">
+                  <span class="provider-name">Anthropic (Claude)</span>
+                  <span class="provider-desc">能力强，支持长上下文</span>
+                </label>
+                <label class="provider-option">
+                  <input type="radio" name="provider" value="openai" x-model="selectedProvider">
+                  <span class="provider-name">OpenAI (GPT)</span>
+                  <span class="provider-desc">GPT-4o 系列</span>
+                </label>
+                <label class="provider-option">
+                  <input type="radio" name="provider" value="ollama" x-model="selectedProvider">
+                  <span class="provider-name">Ollama (本地模型)</span>
+                  <span class="provider-desc">本地运行开源模型，完全离线</span>
+                </label>
+              </div>
+              <button class="btn-primary" @click="nextSetupStep()" :disabled="!selectedProvider">下一步</button>
+            </div>
+          </template>
+          <template x-if="setupStep === 3">
+            <div class="wizard-step">
+              <h2>第 2 步：配置 API Key</h2>
+              <template x-if="selectedProvider === 'ollama'">
+                <div>
+                  <label>Ollama 服务地址</label>
+                  <input type="text" x-model="providerConfig.baseUrl" placeholder="http://localhost:11434">
+                  <p class="hint">默认: http://localhost:11434</p>
+                </div>
+              </template>
+              <template x-if="selectedProvider !== 'ollama'">
+                <div>
+                  <label x-text="selectedProvider === 'anthropic' ? 'Anthropic API Key' : 'OpenAI API Key'"></label>
+                  <input type="password" x-model="providerConfig.apiKey" placeholder="sk-ant-..." style="width:100%">
+                  <p class="hint">从官网获取</p>
+                </div>
+              </template>
+              <div class="wizard-nav">
+                <button class="btn-secondary" @click="setupStep = 2">上一步</button>
+                <button class="btn-primary" @click="saveProvider()">保存并继续</button>
+              </div>
+            </div>
+          </template>
+          <template x-if="setupStep === 4">
+            <div class="wizard-step">
+              <h2>第 3 步：下载 Embedding 模型</h2>
+              <div class="model-info">
+                <p><strong>模型:</strong> <span x-text="modelStatus.model_name"></span></p>
+                <p><strong>用途:</strong> 中文语义 embedding，用于 RAG 知识检索</p>
+                <p><strong>大小:</strong> ~400MB | <strong>加速:</strong> HuggingFace 镜像</p>
+              </div>
+              <template x-if="!modelStatus.downloaded">
+                <template x-if="!downloading">
+                  <button class="btn-primary" @click="downloadModel()">下载模型</button>
+                </template>
+              </template>
+              <template x-if="modelStatus.downloaded">
+                <p class="success">✅ 模型已就绪</p>
+              </template>
+              <div class="wizard-nav">
+                <button class="btn-secondary" @click="setupStep = 3">上一步</button>
+                <button class="btn-primary" @click="finishSetup()" :disabled="!modelStatus.downloaded">完成初始化</button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+
+    <!-- ═══ 主界面 ═══ -->
+    <template x-if="!showSetupWizard">
+      <div class="main-layout">
+
+        <!-- 顶部导航 -->
+        <header class="topbar">
+          <div class="topbar-left">
+            <span class="logo">🏠 CozyWriter</span>
+          </div>
+          <div class="topbar-center">
+            <template x-if="currentProject">
+              <span class="project-title" x-text="currentProject.title"></span>
+            </template>
+          </div>
+          <div class="topbar-right">
+            <button class="btn-icon" @click="showProjectSettings = true" title="项目设置">⚙️</button>
+            <button class="btn-icon" @click="showSettings = true" title="全局设置">🔧</button>
+          </div>
+        </header>
+
+        <div class="content-area">
+
+          <!-- 左侧边栏 -->
+          <aside class="sidebar" x-show="currentProject">
+            <div class="sidebar-section">
+              <div class="sidebar-header">
+                <span>章节</span>
+                <button class="btn-icon" @click="createChapter()" title="新建章节">➕</button>
+              </div>
+              <ul class="chapter-list">
+                <template x-for="chapter in chapters" :key="chapter.id">
+                  <li :class="{ active: currentChapter && currentChapter.id === chapter.id }" @click="selectChapter(chapter)">
+                    <span x-text="`${chapter.order + 1}. ${chapter.title}`"></span>
+                    <span class="word-count" :style="getWordCountStyle(chapter)" x-text="`${chapter.word_count}字`"></span>
+                  </li>
+                </template>
+              </ul>
+            </div>
+
+            <div class="sidebar-section">
+              <div class="sidebar-header"><span>工具</span></div>
+              <div class="tool-buttons">
+                <button @click="activePanel = 'writing'" :class="{ active: activePanel === 'writing' }">✍️ 写作</button>
+                <button @click="activePanel = 'outline-plan'" :class="{ active: activePanel === 'outline-plan' }">📋 大纲</button>
+                <button @click="activePanel = 'theme'" :class="{ active: activePanel === 'theme' }">🎯 主题/伏笔</button>
+                <button @click="activePanel = 'character-matrix'" :class="{ active: activePanel === 'character-matrix' }">👥 角色</button>
+                <button @click="activePanel = 'consistency'" :class="{ active: activePanel === 'consistency' }">🔍 一致性</button>
+                <button @click="activePanel = 'review'" :class="{ active: activePanel === 'review' }">📝 评审</button>
+                <button @click="activePanel = 'inspirations'" :class="{ active: activePanel === 'inspirations' }">💡 灵感</button>
+              </div>
+            </div>
+
+            <!-- 字数目标进度 -->
+            <div class="sidebar-section" x-show="currentProject">
+              <div class="sidebar-header"><span>字数进度</span></div>
+              <div class="word-progress">
+                <div class="wp-bar">
+                  <div class="wp-fill" :style="`width: ${wordProgressPercent}%`"></div>
+                </div>
+                <div class="wp-text">
+                  <span x-text="`${currentProject.word_count} / ${currentProject.target_word_count} 字`"></span>
+                  <span x-text="`${chapters.length} 章`"></span>
+                </div>
+                <div class="wp-range" x-text="`目标: ${currentProject.word_count_min}～${currentProject.word_count_max}字/章`"></div>
+              </div>
+            </div>
+          </aside>
+
+          <!-- 中间：写作台 / 各面板 -->
+          <main class="editor-area">
+
+            <!-- 无项目时 -->
+            <template x-if="!currentProject">
+              <div class="welcome-screen">
+                <h2>欢迎使用 CozyWriter</h2>
+                <div class="welcome-actions">
+                  <button class="btn-primary" @click="createProject()">创建空白小说</button>
+                  <button class="btn-secondary" @click="startQuestionnaire()">🎯 从创意问卷开始</button>
+                  <template x-if="savedQuestionnaires.length > 0">
+                    <button class="btn-secondary" @click="activePanel = 'questionnaire'">📋 继续问卷</button>
+                  </template>
+                </div>
+                <template x-if="projects.length > 0">
+                  <div class="project-list">
+                    <h3>已有项目</h3>
+                    <template x-for="p in projects" :key="p.id">
+                      <div class="project-card" @click="openProject(p)">
+                        <h4 x-text="p.title"></h4>
+                        <p x-text="p.description || '暂无描述'"></p>
+                        <div class="project-meta">
+                          <span x-text="`${p.word_count} 字`"></span>
+                          <span x-text="`风格: ${p.writing_style || '平实'}`"></span>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- 写作台 -->
+            <template x-if="currentProject && currentChapter">
+              <div class="writing-desk">
+                <div class="chapter-header">
+                  <input type="text" class="chapter-title-input" x-model="currentChapter.title" @change="saveChapter()">
+                  <div class="word-badge" :class="getWordCountBadgeClass(currentChapter)" x-text="`${currentChapter.word_count} 字`"></div>
+                </div>
+                <textarea class="content-editor" x-model="currentChapter.content" @input="onContentChange()" placeholder="开始写作..."></textarea>
+                <div class="editor-footer">
+                  <div class="footer-left">
+                    <span :class="getWordCountBadgeClass(currentChapter)" x-text="wordCountStatus(currentChapter)"></span>
+                    <span class="ai-hint" x-show="currentChapter.word_count > (currentProject.word_count_max || 5000)">⚠️ 字数超出上限</span>
+                  </div>
+                  <div class="footer-actions">
+                    <button class="btn-secondary" @click="saveChapter()">💾 保存</button>
+                    <button class="btn-primary" @click="showGenerateModal = true">✨ AI 续写</button>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <!-- 章节列表（无章节时） -->
+            <template x-if="currentProject && !currentChapter && chapters.length === 0">
+              <div class="empty-chapter">
+                <p>还没有章节</p>
+                <button class="btn-primary" @click="createChapter()">创建第一章</button>
+              </div>
+            </template>
+
+            <!-- ═══ 主题/伏笔面板 ═══ -->
+            <template x-if="activePanel === 'theme' && currentProject">
+              <div class="panel-page">
+                <div class="panel-page-header">
+                  <h2>🎯 主题与伏笔管理</h2>
+                  <div class="panel-tabs">
+                    <button :class="{ active: subPanel === 'themes' }" @click="subPanel = 'themes'">核心主旨</button>
+                    <button :class="{ active: subPanel === 'foreshadowings' }" @click="subPanel = 'foreshadowings'">伏笔</button>
+                  </div>
+                </div>
+
+                <!-- 核心主旨 -->
+                <template x-if="subPanel === 'themes'">
+                  <div class="panel-section">
+                    <button class="btn-primary" @click="showThemeForm = true">➕ 添加主旨</button>
+                    <div class="theme-list">
+                      <template x-for="t in themes" :key="t.id">
+                        <div class="theme-card">
+                          <div class="theme-type" x-text="t.theme_type"></div>
+                          <div class="theme-title" x-text="t.title"></div>
+                          <div class="theme-desc" x-text="t.description || '暂无描述'"></div>
+                        </div>
+                      </template>
+                    </div>
+                    <!-- 新增主题表单 -->
+                    <template x-if="showThemeForm">
+                      <div class="inline-form">
+                        <select x-model="themeForm.theme_type">
+                          <option value="core_theme">核心主题</option>
+                          <option value="author_intent">作者意图</option>
+                          <option value="motif">意象/母题</option>
+                          <option value="symbol">象征</option>
+                        </select>
+                        <input type="text" x-model="themeForm.title" placeholder="主旨标题，如：救赎">
+                        <textarea x-model="themeForm.description" placeholder="详细描述..."></textarea>
+                        <div class="form-actions">
+                          <button class="btn-secondary" @click="showThemeForm = false">取消</button>
+                          <button class="btn-primary" @click="saveTheme()">保存</button>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
+                <!-- 伏笔管理 -->
+                <template x-if="subPanel === 'foreshadowings'">
+                  <div class="panel-section">
+                    <button class="btn-primary" @click="showForeshadowingForm = true">➕ 添加伏笔</button>
+                    <div class="foreshadowing-list">
+                      <template x-for="f in foreshadowings" :key="f.id">
+                        <div class="foreshadowing-card" :class="`status-${f.status}`">
+                          <div class="fs-header">
+                            <span class="fs-title" x-text="f.title"></span>
+                            <span class="fs-status" :class="`badge-${f.status}`" x-text="f.status === 'active' ? '进行中' : f.status === 'resolved' ? '已回收' : '已废弃'"></span>
+                          </div>
+                          <div class="fs-content" x-text="f.content || '暂无内容'"></div>
+                          <div class="fs-actions">
+                            <button class="btn-small" @click="resolveForeshadowing(f)" x-show="f.status === 'active'">标记回收</button>
+                            <button class="btn-small" @click="abandonForeshadowing(f)" x-show="f.status === 'active'">废弃</button>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                    <template x-if="showForeshadowingForm">
+                      <div class="inline-form">
+                        <input type="text" x-model="foreshadowingForm.title" placeholder="伏笔标题">
+                        <textarea x-model="foreshadowingForm.content" placeholder="伏笔详细内容..."></textarea>
+                        <div class="form-actions">
+                          <button class="btn-secondary" @click="showForeshadowingForm = false">取消</button>
+                          <button class="btn-primary" @click="saveForeshadowing()">保存</button>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- ═══ 角色/弧光/关系矩阵面板 ═══ -->
+            <template x-if="activePanel === 'character-matrix' && currentProject">
+              <div class="panel-page">
+                <div class="panel-page-header">
+                  <h2>👥 角色与关系</h2>
+                  <div class="panel-tabs">
+                    <button :class="{ active: subPanel === 'characters' }" @click="subPanel = 'characters'">角色</button>
+                    <button :class="{ active: subPanel === 'arcs' }" @click="subPanel = 'arcs'">角色弧光</button>
+                    <button :class="{ active: subPanel === 'relations' }" @click="subPanel = 'relations'">关系矩阵</button>
+                  </div>
+                </div>
+
+                <!-- 角色列表 -->
+                <template x-if="subPanel === 'characters'">
+                  <div class="panel-section">
+                    <button class="btn-primary" @click="showCharacterForm = true">➕ 添加角色</button>
+                    <div class="character-grid">
+                      <template x-for="char in characters" :key="char.id">
+                        <div class="character-card-full">
+                          <div class="char-header">
+                            <span class="char-name" x-text="char.name"></span>
+                            <span class="char-role-badge" x-text="char.role"></span>
+                          </div>
+                          <div class="char-desc" x-text="char.description || '暂无描述'"></div>
+                          <div class="char-profile" x-show="char.profile && Object.keys(char.profile).length > 0">
+                            <template x-for="(val, key) in char.profile" :key="key">
+                              <div class="profile-item"><span x-text="key"></span>: <span x-text="val"></span></div>
+                            </template>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                    <template x-if="showCharacterForm">
+                      <div class="inline-form">
+                        <input type="text" x-model="characterForm.name" placeholder="角色名">
+                        <select x-model="characterForm.role">
+                          <option value="主角">主角</option>
+                          <option value="配角">配角</option>
+                          <option value="反派">反派</option>
+                          <option value="龙套">龙套</option>
+                        </select>
+                        <input type="text" x-model="characterForm.description" placeholder="角色描述">
+                        <div class="form-actions">
+                          <button class="btn-secondary" @click="showCharacterForm = false">取消</button>
+                          <button class="btn-primary" @click="saveCharacter()">保存</button>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
+                <!-- 角色弧光 -->
+                <template x-if="subPanel === 'arcs'">
+                  <div class="panel-section">
+                    <button class="btn-primary" @click="showArcForm = true">➕ 添加弧光</button>
+                    <div class="arc-list">
+                      <template x-for="arc in characterArcs" :key="arc.id">
+                        <div class="arc-card" :class="{ unstable: !arc.is_stable }">
+                          <div class="arc-header">
+                            <span x-text="getCharacterName(arc.character_id)"></span>
+                            <span class="arc-type" x-text="arc.arc_type"></span>
+                          </div>
+                          <div class="arc-states">
+                            <div>起始: <span x-text="arc.start_state"></span></div>
+                            <div>当前: <span x-text="arc.current_state"></span></div>
+                            <div>目标: <span x-text="arc.end_state"></span></div>
+                          </div>
+                          <div class="arc-stable" :class="{ 'is-unstable': !arc.is_stable }">
+                            <span x-text="arc.is_stable ? '✅ 稳定' : '⚠️ 不稳定'"></span>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                    <template x-if="showArcForm">
+                      <div class="inline-form">
+                        <select x-model="arcForm.character_id">
+                          <template x-for="char in characters" :key="char.id">
+                            <option :value="char.id" x-text="char.name"></option>
+                          </template>
+                        </select>
+                        <select x-model="arcForm.arc_type">
+                          <option value="growth">成长型</option>
+                          <option value="decline">堕落型</option>
+                          <option value="flat">平线型</option>
+                          <option value="circular">循环型</option>
+                        </select>
+                        <input type="text" x-model="arcForm.start_state" placeholder="起始状态">
+                        <input type="text" x-model="arcForm.current_state" placeholder="当前状态">
+                        <input type="text" x-model="arcForm.end_state" placeholder="目标结束状态">
+                        <div class="form-actions">
+                          <button class="btn-secondary" @click="showArcForm = false">取消</button>
+                          <button class="btn-primary" @click="saveArc()">保存</button>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
+                <!-- 关系矩阵 -->
+                <template x-if="subPanel === 'relations'">
+                  <div class="panel-section">
+                    <button class="btn-primary" @click="showRelationForm = true">➕ 添加关系</button>
+                    <div class="relation-matrix">
+                      <template x-for="rel in characterRelations" :key="rel.id">
+                        <div class="relation-card">
+                          <div class="rel-names">
+                            <span x-text="getCharacterName(rel.from_character_id)"></span>
+                            <span class="rel-arrow">→</span>
+                            <span x-text="getCharacterName(rel.to_character_id)"></span>
+                          </div>
+                          <div class="rel-type" x-text="rel.relation_type"></div>
+                          <div class="rel-desc" x-text="rel.description || ''"></div>
+                          <div class="rel-strength">
+                            <span>关系强度: </span>
+                            <span x-text="rel.strength + '/10'"></span>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                    <template x-if="showRelationForm">
+                      <div class="inline-form">
+                        <select x-model="relationForm.from_character_id">
+                          <template x-for="char in characters" :key="char.id">
+                            <option :value="char.id" x-text="char.name"></option>
+                          </template>
+                        </select>
+                        <select x-model="relationForm.to_character_id">
+                          <template x-for="char in characters" :key="char.id">
+                            <option :value="char.id" x-text="char.name"></option>
+                          </template>
+                        </select>
+                        <select x-model="relationForm.relation_type">
+                          <option value="友情">友情</option>
+                          <option value="爱情">爱情</option>
+                          <option value="亲情">亲情</option>
+                          <option value="敌对">敌对</option>
+                          <option value="竞争">竞争</option>
+                          <option value="师生">师生</option>
+                        </select>
+                        <input type="text" x-model="relationForm.description" placeholder="关系描述">
+                        <input type="range" min="1" max="10" x-model="relationForm.strength">
+                        <div class="form-actions">
+                          <button class="btn-secondary" @click="showRelationForm = false">取消</button>
+                          <button class="btn-primary" @click="saveRelation()">保存</button>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- ═══ 一致性检查面板 ═══ -->
+            <template x-if="activePanel === 'consistency' && currentProject">
+              <div class="panel-page">
+                <div class="panel-page-header">
+                  <h2>🔍 一致性检查</h2>
+                  <button class="btn-primary" @click="runConsistencyCheck()">🔄 运行检查</button>
+                </div>
+                <template x-if="!consistencyResult">
+                  <div class="empty-state">
+                    <p>点击「运行检查」对该小说进行一致性审查</p>
+                    <p class="hint">检查内容：人物性格、物品数量、能力设定、资源消耗、字数波动、伏笔回收</p>
+                  </div>
+                </template>
+                <template x-if="consistencyResult">
+                  <div class="consistency-result">
+                    <div class="consistency-summary" :class="{ 'has-issues': consistencyResult.has_issues }">
+                      <span x-text="consistencyResult.has_issues ? '⚠️ 发现 ' + consistencyResult.issues.length + ' 个问题' : '✅ 未发现问题'"></span>
+                    </div>
+                    <div class="issue-list">
+                      <template x-for="(issue, idx) in consistencyResult.issues" :key="idx">
+                        <div class="issue-card" :class="`severity-${issue.severity}`">
+                          <div class="issue-type">
+                            <span class="issue-badge" x-text="issue.type"></span>
+                            <span class="severity-badge" x-text="issue.severity === 'high' ? '严重' : issue.severity === 'medium' ? '中等' : '轻微'"></span>
+                          </div>
+                          <div class="issue-message" x-text="issue.message"></div>
+                          <template x-if="issue.chapter">
+                            <div class="issue-chapter" x-text="issue.chapter"></div>
+                          </template>
+                        </div>
+                      </template>
+                    </div>
+                    <!-- 综合报告 -->
+                    <template x-if="consistencyReport">
+                      <div class="consistency-report">
+                        <h3>📊 项目综合报告</h3>
+                        <div class="report-grid">
+                          <div class="report-item"><span>章节数</span><strong x-text="consistencyReport.chapters.total"></strong></div>
+                          <div class="report-item"><span>平均字数</span><strong x-text="consistencyReport.chapters.avg_word_count + ' 字'"></strong></div>
+                          <div class="report-item"><span>伏笔总数</span><strong x-text="consistencyReport.foreshadowing.total"></strong></div>
+                          <div class="report-item"><span>进行中</span><strong x-text="consistencyReport.foreshadowing.active"></strong></div>
+                          <div class="report-item"><span>已回收</span><strong x-text="consistencyReport.foreshadowing.resolved"></strong></div>
+                          <div class="report-item"><span>角色弧光</span><strong x-text="consistencyReport.character_arc.total"></strong></div>
+                          <div class="report-item"><span>稳定</span><strong x-text="consistencyReport.character_arc.stable"></strong></div>
+                          <div class="report-item"><span>不稳定</span><strong x-text="consistencyReport.character_arc.unstable"></strong></div>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- ═══ 大纲/细纲面板 ═══ -->
+            <template x-if="activePanel === 'outline-plan' && currentProject">
+              <div class="panel-page">
+                <div class="panel-page-header">
+                  <h2>📋 大纲与细纲</h2>
+                  <div class="panel-tabs">
+                    <button :class="{ active: outlineSubPanel === 'overview' }" @click="outlineSubPanel = 'overview'">总览</button>
+                    <button :class="{ active: outlineSubPanel === 'plotlines' }" @click="outlineSubPanel = 'plotlines'">剧情线</button>
+                    <button :class="{ active: outlineSubPanel === 'structure' }" @click="outlineSubPanel = 'structure'">结构</button>
+                    <button :class="{ active: outlineSubPanel === 'chapters' }" @click="outlineSubPanel = 'chapters'">章节细纲</button>
+                  </div>
+                </div>
+
+                <!-- 总览 -->
+                <template x-if="outlineSubPanel === 'overview'">
+                  <div class="panel-section">
+                    <div class="outline-meta">
+                      <div class="meta-item">
+                        <span>预设总章节</span>
+                        <strong x-text="currentProject.total_chapters || '未设定'"></strong>
+                      </div>
+                      <div class="meta-item">
+                        <span>章节字数目标</span>
+                        <strong x-text="`${currentProject.target_word_count}字`"></strong>
+                      </div>
+                      <div class="meta-item">
+                        <span>字数范围</span>
+                        <strong x-text="`${currentProject.word_count_min}～${currentProject.word_count_max}字`"></strong>
+                      </div>
+                      <div class="meta-item">
+                        <span>已规划章节</span>
+                        <strong x-text="chapterOutlines.length"></strong>
+                      </div>
+                    </div>
+                    <div class="outline-progress">
+                      <p class="section-desc">小说进度总览</p>
+                      <div class="chapter-track">
+                        <template x-for="(ch, idx) in chapters" :key="ch.id">
+                          <div class="track-chapter" :class="getChapterTrackClass(ch)" :title="ch.title">
+                            <div class="track-num" x-text="idx + 1"></div>
+                            <div class="track-status"></div>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- 剧情线 -->
+                <template x-if="outlineSubPanel === 'plotlines'">
+                  <div class="panel-section">
+                    <button class="btn-primary" @click="showPlotlineForm = true">+ 添加剧情线</button>
+                    <div class="plotline-list">
+                      <template x-for="(pl, idx) in projectOutline.plot_lines" :key="idx">
+                        <div class="plotline-card">
+                          <div class="pl-header">
+                            <strong x-text="pl.title"></strong>
+                            <span class="pl-range" x-text="`第${pl.from_chapter}章 → 第${pl.to_chapter}章`"></span>
+                          </div>
+                          <div class="pl-desc" x-text="pl.description || '暂无描述'"></div>
+                        </div>
+                      </template>
+                    </div>
+                    <template x-if="showPlotlineForm">
+                      <div class="inline-form">
+                        <input type="text" x-model="plotlineForm.title" placeholder="剧情线标题">
+                        <textarea x-model="plotlineForm.description" placeholder="剧情线描述..."></textarea>
+                        <div class="form-row">
+                          <label>起始章节</label>
+                          <input type="number" x-model.number="plotlineForm.from_chapter" min="1">
+                          <label>结束章节</label>
+                          <input type="number" x-model.number="plotlineForm.to_chapter" min="1">
+                        </div>
+                        <div class="form-actions">
+                          <button class="btn-secondary" @click="showPlotlineForm = false">取消</button>
+                          <button class="btn-primary" @click="savePlotline()">保存</button>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
+                <!-- 结构 -->
+                <template x-if="outlineSubPanel === 'structure'">
+                  <div class="panel-section">
+                    <div class="structure-builder">
+                      <div class="act-list">
+                        <template x-for="(act, idx) in (projectOutline.structure.acts || [])" :key="idx">
+                          <div class="act-card">
+                            <div class="act-name" x-text="act.name"></div>
+                            <div class="act-range" x-text="`第${act.from_chapter}章 → 第${act.to_chapter}章`"></div>
+                          </div>
+                        </template>
+                      </div>
+                      <button class="btn-primary" @click="addAct()">+ 添加段落/幕</button>
+                    </div>
+                    <div class="pacing-notes">
+                      <h4>节奏规划</h4>
+                      <textarea x-model="projectOutline.pacing_notes" @change="saveProjectOutline()" placeholder="整体节奏说明..."></textarea>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- 章节细纲 -->
+                <template x-if="outlineSubPanel === 'chapters'">
+                  <div class="panel-section">
+                    <div class="chapter-outline-list">
+                      <template x-for="ch in chapters" :key="ch.id">
+                        <div class="co-chapter-card" :class="{ expanded: expandedChapterId === ch.id }" @click="toggleChapterOutline(ch.id)">
+                          <div class="co-ch-header">
+                            <span class="co-num" x-text="`第${ch.order + 1}章`"></span>
+                            <span class="co-title" x-text="ch.title"></span>
+                            <span class="co-status" :class="`status-${getChapterOutlineStatus(ch.id)}`" x-text="getChapterOutlineStatus(ch.id)"></span>
+                          </div>
+                          <template x-if="expandedChapterId === ch.id">
+                            <div class="co-ch-body" @click.stop>
+                              <template x-if="!chapterOutlinesMap[ch.id]">
+                                <div class="co-empty">
+                                  <p>暂无细纲</p>
+                                  <button class="btn-small" @click="createChapterOutline(ch)">创建细纲</button>
+                                </div>
+                              </template>
+                              <template x-if="chapterOutlinesMap[ch.id]">
+                                <div class="co-detail">
+                                  <div class="co-row">
+                                    <label>定位</label>
+                                    <select x-model="chapterOutlinesMap[ch.id].chapter_position" @change="saveChapterOutline(ch.id)">
+                                      <option value="">未设定</option>
+                                      <option value="开局">开局</option>
+                                      <option value="发展">发展</option>
+                                      <option value="高潮">高潮</option>
+                                      <option value="回落">回落</option>
+                                      <option value="结局">结局</option>
+                                    </select>
+                                  </div>
+                                  <div class="co-row">
+                                    <label>节奏</label>
+                                    <select x-model="chapterOutlinesMap[ch.id].pacing" @change="saveChapterOutline(ch.id)">
+                                      <option value="铺垫">铺垫</option>
+                                      <option value="推进">推进</option>
+                                      <option value="高潮">高潮</option>
+                                      <option value="回落">回落</option>
+                                      <option value="平稳">平稳</option>
+                                    </select>
+                                  </div>
+                                  <div class="co-row">
+                                    <label>目标字数</label>
+                                    <input type="number" x-model.number="chapterOutlinesMap[ch.id].target_word_count" @change="saveChapterOutline(ch.id)">
+                                  </div>
+                                  <div class="co-field">
+                                    <label>本章重点内容</label>
+                                    <textarea x-model="chapterOutlinesMap[ch.id].key_content" @change="saveChapterOutline(ch.id)" placeholder=""></textarea>
+                                  </div>
+                                  <div class="co-field">
+                                    <label>剧情推进</label>
+                                    <textarea x-model="chapterOutlinesMap[ch.id].plot_advance" @change="saveChapterOutline(ch.id)" placeholder=""></textarea>
+                                  </div>
+                                  <div class="co-field">
+                                    <label>伏笔埋设</label>
+                                    <textarea x-model="chapterOutlinesMap[ch.id].foreshadow_notes" @change="saveChapterOutline(ch.id)" placeholder=""></textarea>
+                                  </div>
+                                  <div class="co-field">
+                                    <label>冲突与看点</label>
+                                    <textarea x-model="chapterOutlinesMap[ch.id].highlights" @change="saveChapterOutline(ch.id)" placeholder="用换行分隔各看点"></textarea>
+                                  </div>
+                                  <div class="co-row">
+                                    <label>状态</label>
+                                    <select x-model="chapterOutlinesMap[ch.id].status" @change="saveChapterOutline(ch.id)">
+                                      <option value="planning">规划中</option>
+                                      <option value="written">已写</option>
+                                      <option value="revised">已修订</option>
+                                    </select>
+                                  </div>
+                                </div>
+                              </template>
+                            </div>
+                          </template>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- ═══ 评审面板 ═══ -->
+            <template x-if="activePanel === 'review' && currentProject">
+              <div class="panel-page">
+                <div class="panel-page-header">
+                  <h2>📝 智能评审</h2>
+                  <div class="panel-tabs">
+                    <button :class="{ active: reviewSubPanel === 'new' }" @click="reviewSubPanel = 'new'">新建评审</button>
+                    <button :class="{ active: reviewSubPanel === 'history' }" @click="reviewSubPanel = 'history'">评审历史</button>
+                  </div>
+                </div>
+
+                <!-- 新建评审 -->
+                <template x-if="reviewSubPanel === 'new'">
+                  <div class="panel-section">
+                    <template x-if="!activeReviewSession">
+                      <div class="review-new">
+                        <p>选择评审对象：</p>
+                        <div class="review-targets">
+                          <template x-for="ch in chapters" :key="ch.id">
+                            <div class="review-target-card" @click="startReview(ch)">
+                              <span x-text="`${ch.order + 1}. ${ch.title}`"></span>
+                              <span class="hint" x-text="`${ch.word_count} 字`"></span>
+                            </div>
+                          </template>
+                        </div>
+                      </div>
+                    </template>
+
+                    <!-- 评审进行中 -->
+                    <template x-if="activeReviewSession && !reviewResult">
+                      <div class="review-loading">
+                        <p>🔄 AI 正在评审中，请稍候...</p>
+                        <div class="review-progress">
+                          <div class="review-dimensions">
+                            <span>一致性</span><span>节奏</span><span>文笔</span><span>去AI味</span>
+                            <span>字数</span><span>伏笔</span><span>角色弧光</span><span>主旨</span>
+                          </div>
+                        </div>
+                      </div>
+                    </template>
+
+                    <!-- 评审结果 -->
+                    <template x-if="reviewResult">
+                      <div class="review-result">
+                        <h3>📊 评审结果 — <span x-text="reviewResult.chapter_id ? getChapterTitle(reviewResult.chapter_id) : '独立文本'"></span></h3>
+                        <!-- 雷达图 -->
+                        <div class="review-scores">
+                          <div class="score-item"><span>一致性</span><div class="score-bar"><div class="score-fill" :style="`width:${reviewResult.score_consistency * 10}%`"></div></div><strong x-text="reviewResult.score_consistency.toFixed(1)"></strong></div>
+                          <div class="score-item"><span>节奏</span><div class="score-bar"><div class="score-fill" :style="`width:${reviewResult.score_pacing * 10}%`"></div></div><strong x-text="reviewResult.score_pacing.toFixed(1)"></strong></div>
+                          <div class="score-item"><span>文笔风格</span><div class="score-bar"><div class="score-fill" :style="`width:${reviewResult.score_style * 10}%`"></div></div><strong x-text="reviewResult.score_style.toFixed(1)"></strong></div>
+                          <div class="score-item"><span>去AI味</span><div class="score-bar"><div class="score-fill" :style="`width:${reviewResult.score_ai_removal * 10}%`"></div></div><strong x-text="reviewResult.score_ai_removal.toFixed(1)"></strong></div>
+                          <div class="score-item"><span>字数合规</span><div class="score-bar"><div class="score-fill" :style="`width:${reviewResult.score_word_count * 10}%`"></div></div><strong x-text="reviewResult.score_word_count.toFixed(1)"></strong></div>
+                          <div class="score-item"><span>伏笔管理</span><div class="score-bar"><div class="score-fill" :style="`width:${reviewResult.score_foreshadowing * 10}%`"></div></div><strong x-text="reviewResult.score_foreshadowing.toFixed(1)"></strong></div>
+                          <div class="score-item"><span>角色弧光</span><div class="score-bar"><div class="score-fill" :style="`width:${reviewResult.score_character_arc * 10}%`"></div></div><strong x-text="reviewResult.score_character_arc.toFixed(1)"></strong></div>
+                          <div class="score-item"><span>主旨契合</span><div class="score-bar"><div class="score-fill" :style="`width:${reviewResult.score_thematic * 10}%`"></div></div><strong x-text="reviewResult.score_thematic.toFixed(1)"></strong></div>
+                        </div>
+                        <div class="overall-score">
+                          <span>综合评分</span>
+                          <strong x-text="reviewResult.overall_score.toFixed(1) + ' / 10'"></strong>
+                        </div>
+                        <div class="critique">
+                          <h4>评审意见</h4>
+                          <p x-text="reviewResult.critique"></p>
+                        </div>
+                        <template x-if="reviewResult.suggestions && reviewResult.suggestions.length > 0">
+                          <div class="suggestions">
+                            <h4>修改建议</h4>
+                            <ul>
+                              <template x-for="(s, i) in reviewResult.suggestions" :key="i">
+                                <li x-text="s"></li>
+                              </template>
+                            </ul>
+                          </div>
+                        </template>
+                        <div class="review-actions">
+                          <button class="btn-secondary" @click="reviseFromReview()">🔧 根据评审修订</button>
+                          <button class="btn-secondary" @click="activeReviewSession = null; reviewResult = null">返回</button>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
+                <!-- 评审历史 -->
+                <template x-if="reviewSubPanel === 'history'">
+                  <div class="panel-section">
+                    <div class="review-history">
+                      <template x-for="rev in reviewHistory" :key="rev.id">
+                        <div class="review-history-card" @click="showReviewDetail(rev)">
+                          <div class="rh-header">
+                            <span x-text="rev.chapter_id ? getChapterTitle(rev.chapter_id) : '独立文本'"></span>
+                            <strong x-text="rev.overall_score.toFixed(1) + ' 分'"></strong>
+                          </div>
+                          <div class="rh-meta">
+                            <span x-text="new Date(rev.created_at).toLocaleString()"></span>
+                            <span x-show="rev.revised">✅ 已修订</span>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+          </main>
+        </div>
+      </div>
+    </template>
+
+    <!-- ═══ 灵感面板 ═══ -->
+    <template x-if="activePanel === 'inspirations' && currentProject">
+      <div class="panel-page">
+        <div class="panel-page-header">
+          <h2>💡 灵感收集</h2>
+          <div class="panel-tabs">
+            <button :class="{ active: inspirationSubPanel === 'list' }" @click="inspirationSubPanel = 'list'">全部</button>
+            <button :class="{ active: inspirationSubPanel === 'tags' }" @click="inspirationSubPanel = 'tags'">标签</button>
+          </div>
+        </div>
+        <div class="panel-section">
+          <!-- 灵感输入 -->
+          <div class="inspiration-input">
+            <textarea x-model="newInspiration.content" placeholder="记录一个灵感..."></textarea>
+            <div class="inspiration-meta">
+              <input type="text" x-model="newInspiration.source" placeholder="来源（脑洞/阅读/梦境...）" class="source-input">
+              <input type="text" x-model="newInspiration.tagInput" placeholder="标签（逗号分隔）" class="tag-input">
+              <button class="btn-primary" @click="saveInspiration()">保存灵感</button>
+            </div>
+          </div>
+          <!-- 灵感列表 -->
+          <template x-if="inspirationSubPanel === 'list'">
+            <div class="inspiration-list">
+              <template x-for="insp in inspirations" :key="insp.id">
+                <div class="insp-card">
+                  <div class="insp-header">
+                    <span class="insp-content" x-text="insp.content"></span>
+                    <button class="btn-icon" @click="deleteInspiration(insp.id)">🗑</button>
+                  </div>
+                  <div class="insp-tags">
+                    <template x-for="tag in (insp.tags || [])" :key="tag">
+                      <span class="insp-tag" x-text="tag"></span>
+                    </template>
+                    <span class="insp-source" x-show="insp.source" x-text="insp.source"></span>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
+          <!-- 标签视图 -->
+          <template x-if="inspirationSubPanel === 'tags'">
+            <div class="tag-cloud">
+              <template x-for="tag in allInspirationTags" :key="tag">
+                <div class="tag-chip" :class="{ active: selectedTag === tag }" @click="selectedTag = selectedTag === tag ? null : tag">
+                  <span x-text="tag"></span>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+
+    <!-- ═══ 创意问卷面板 ═══ -->
+    <template x-if="activePanel === 'questionnaire'">
+      <div class="panel-page questionnaire-page">
+        <div class="panel-page-header">
+          <h2>🎯 创意问卷</h2>
+        </div>
+        <!-- 问卷选择/列表 -->
+        <template x-if="!activeQuestionnaire">
+          <div class="panel-section">
+            <button class="btn-primary" @click="createNewQuestionnaire()">➕ 新建问卷</button>
+            <div class="q-list">
+              <template x-for="q in allQuestionnaires" :key="q.id">
+                <div class="q-card" :class="{ done: q.status === 'completed' }" @click="openQuestionnaire(q)">
+                  <div class="q-title" x-text="q.title"></div>
+                  <div class="q-meta">
+                    <span x-text="q.status === 'completed' ? '✅ 已完成' : '📝 进行中'"></span>
+                    <span x-show="q.created_project_id" x-text="`→ 已生成项目`"></span>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+        <!-- 问卷进行中 -->
+        <template x-if="activeQuestionnaire">
+          <div class="q-wizard">
+            <div class="q-progress">
+              <div class="q-progress-bar" :style="`width: ${(qStep / qQuestions.length) * 100}%`"></div>
+            </div>
+            <div class="q-step" x-show="qStep < qQuestions.length">
+              <div class="q-number" x-text="`${qStep + 1} / ${qQuestions.length}`"></div>
+              <div class="q-question" x-text="qQuestions[qStep].question"></div>
+              <!-- select 类型 -->
+              <template x-if="qQuestions[qStep].type === 'select'">
+                <div class="q-options">
+                  <template x-for="opt in qQuestions[qStep].options" :key="opt">
+                    <div class="q-option" :class="{ selected: qAnswers[qQuestions[qStep].id] === opt }" @click="answerQuestion(qQuestions[qStep].id, opt)">
+                      <span x-text="opt"></span>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <!-- textarea 类型 -->
+              <template x-if="qQuestions[qStep].type === 'textarea'">
+                <div class="q-textarea">
+                  <textarea x-model="qAnswers[qQuestions[qStep].id]" :placeholder="qQuestions[qStep].placeholder || ''"></textarea>
+                </div>
+              </template>
+              <!-- text 类型 -->
+              <template x-if="qQuestions[qStep].type === 'text'">
+                <div class="q-text">
+                  <input type="text" x-model="qAnswers[qQuestions[qStep].id]" :placeholder="qQuestions[qStep].placeholder || ''">
+                </div>
+              </template>
+              <div class="q-nav">
+                <button class="btn-secondary" @click="qStep--" :disabled="qStep === 0">上一步</button>
+                <button class="btn-primary" @click="nextQuestion()" x-show="qStep < qQuestions.length - 1">下一步</button>
+                <button class="btn-primary" @click="submitQuestionnaire()" x-show="qStep === qQuestions.length - 1">完成问卷</button>
+              </div>
+            </div>
+            <!-- 完成问卷后：创建项目 -->
+            <template x-if="qStep === qQuestions.length && activeQuestionnaire">
+              <div class="q-done">
+                <h3>问卷填写完毕！</h3>
+                <p>点击下方按钮，根据问卷创建小说项目</p>
+                <button class="btn-primary" @click="buildProjectFromQuestionnaire()">🎯 创建小说项目</button>
+                <button class="btn-secondary" @click="activeQuestionnaire = null; qStep = 0">返回问卷列表</button>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+    </template>
+
+    <!-- ═══ AI 生成弹窗 ═══ -->
+    <template x-if="showGenerateModal">
+      <div class="modal-overlay" @click.self="showGenerateModal = false">
+        <div class="modal modal-wide">
+          <h3>✨ AI 续写</h3>
+          <div class="generate-options">
+            <div class="gen-option">
+              <label>模式</label>
+              <select x-model="generateMode">
+                <option value="continue">续写</option>
+                <option value="polish">润色</option>
+                <option value="expand">扩展</option>
+              </select>
+            </div>
+            <div class="gen-option">
+              <label>字数</label>
+              <select x-model="generateWordCount">
+                <option value="500">500字</option>
+                <option value="1000">1000字</option>
+                <option value="2000">2000字</option>
+                <option value="3000">3000字（标准）</option>
+              </select>
+            </div>
+          </div>
+          <textarea x-model="generatePrompt" placeholder="描述你想要写的内容...（续写模式请描述接下来应该发生什么）"></textarea>
+          <template x-if="generating">
+            <p class="hint generating-hint">✍️ AI 正在创作中，请稍候...</p>
+          </template>
+          <template x-if="!generating && generatedText">
+            <div class="generated-result">
+              <p>✍️ 生成结果：</p>
+              <div class="generated-text" x-text="generatedText"></div>
+              <div class="result-actions">
+                <button class="btn-primary" @click="insertGenerated()">📥 插入到正文</button>
+                <button class="btn-secondary" @click="generatedText = null">重新生成</button>
+              </div>
+            </div>
+          </template>
+          <div class="modal-actions">
+            <button class="btn-secondary" @click="showGenerateModal = false">关闭</button>
+            <button class="btn-primary" @click="generateText()" :disabled="generating || !generatePrompt">✨ 生成</button>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ═══ 项目设置弹窗 ═══ -->
+    <template x-if="showProjectSettings">
+      <div class="modal-overlay" @click.self="showProjectSettings = false">
+        <div class="modal modal-wide">
+          <h3>⚙️ 项目设置</h3>
+          <template x-if="currentProject">
+            <div class="settings-form">
+              <div class="setting-row">
+                <label>写作风格</label>
+                <select x-model="currentProject.writing_style">
+                  <option value="优美">优美</option>
+                  <option value="幽默">幽默</option>
+                  <option value="冷峻">冷峻</option>
+                  <option value="平实">平实</option>
+                  <option value="诗意">诗意</option>
+                </select>
+              </div>
+              <div class="setting-row">
+                <label>去 AI 味程度</label>
+                <div class="slider-row">
+                  <input type="range" min="1" max="10" x-model="currentProject.ai味去除程度">
+                  <span x-text="currentProject.ai味去除程度"></span>
+                </div>
+                <p class="hint">1=轻微去AI味，10=最强去AI味</p>
+              </div>
+              <div class="setting-row">
+                <label>每章目标字数</label>
+                <input type="number" x-model="currentProject.target_word_count">
+              </div>
+              <div class="setting-row">
+                <label>字数下限</label>
+                <input type="number" x-model="currentProject.word_count_min">
+              </div>
+              <div class="setting-row">
+                <label>字数上限</label>
+                <input type="number" x-model="currentProject.word_count_max">
+              </div>
+            </div>
+          </template>
+          <div class="modal-actions">
+            <button class="btn-secondary" @click="showProjectSettings = false">取消</button>
+            <button class="btn-primary" @click="saveProjectSettings()">保存</button>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ═══ 全局设置弹窗 ═══ -->
+    <template x-if="showSettings">
+      <div class="modal-overlay" @click.self="showSettings = false">
+        <div class="modal">
+          <h3>🔧 全局设置</h3>
+          <div class="settings-content">
+            <div class="setting-row">
+              <label>默认 LLM Provider</label>
+              <select x-model="settings.defaultProvider">
+                <option value="anthropic">Anthropic (Claude)</option>
+                <option value="openai">OpenAI (GPT)</option>
+                <option value="ollama">Ollama (本地)</option>
+              </select>
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button class="btn-secondary" @click="showSettings = false">关闭</button>
+          </div>
+        </div>
+      </div>
+    </template>
+
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
