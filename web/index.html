@@ -31,6 +31,11 @@
                   <span class="provider-desc">GPT-4o 系列</span>
                 </label>
                 <label class="provider-option">
+                  <input type="radio" name="provider" value="MiniMax" x-model="selectedProvider">
+                  <span class="provider-name">MiniMax (MiniMax)</span>
+                  <span class="provider-desc">M2.7 文本 / M3 多模态 1M · Anthropic 兼容 API</span>
+                </label>
+                <label class="provider-option">
                   <input type="radio" name="provider" value="ollama" x-model="selectedProvider">
                   <span class="provider-name">Ollama (本地模型)</span>
                   <span class="provider-desc">本地运行开源模型，完全离线</span>
@@ -74,6 +79,28 @@
                 <template x-if="!downloading">
                   <button class="btn-primary" @click="downloadModel()">下载模型</button>
                 </template>
+                <template x-if="downloading">
+                  <div class="download-progress">
+                    <div class="progress-stage" x-text="{
+                      started: '准备下载...',
+                      migrating: '迁移旧缓存...',
+                      downloading: '下载模型文件中...',
+                      finished: '完成',
+                      error: '出错'
+                    }[downloadProgress.stage] || downloadProgress.message"></div>
+                    <div class="progress-bar-wrap">
+                      <div class="progress-bar-track">
+                        <div class="progress-bar-fill" :style="`width: ${downloadProgress.percent}%`"></div>
+                      </div>
+                      <div class="progress-percent" x-text="`${downloadProgress.percent}%`"></div>
+                    </div>
+                    <div class="progress-detail">
+                      <span x-text="`${formatBytes(downloadProgress.current)} / ${formatBytes(downloadProgress.total)}`"></span>
+                      <span x-show="downloadProgress.speed_mbps > 0" x-text="`${downloadProgress.speed_mbps.toFixed(1)} MB/s`"></span>
+                      <span x-text="`耗时 ${downloadProgress.elapsed_s}s`"></span>
+                    </div>
+                  </div>
+                </template>
               </template>
               <template x-if="modelStatus.downloaded">
                 <p class="success">✅ 模型已就绪</p>
@@ -103,6 +130,12 @@
             </template>
           </div>
           <div class="topbar-right">
+            <button class="btn-icon" @click="openTaskManager()" title="任务管理">
+              📋
+              <template x-if="activeTaskCount > 0">
+                <span class="badge" x-text="activeTaskCount"></span>
+              </template>
+            </button>
             <button class="btn-icon" @click="showProjectSettings = true" title="项目设置">⚙️</button>
             <button class="btn-icon" @click="showSettings = true" title="全局设置">🔧</button>
           </div>
@@ -164,7 +197,7 @@
               <div class="welcome-screen">
                 <h2>欢迎使用 CozyWriter</h2>
                 <div class="welcome-actions">
-                  <button class="btn-primary" @click="createProject()">创建空白小说</button>
+                  <button class="btn-primary" @click="openCreateProjectModal()">创建小说</button>
                   <button class="btn-secondary" @click="startQuestionnaire()">🎯 从创意问卷开始</button>
                   <template x-if="savedQuestionnaires.length > 0">
                     <button class="btn-secondary" @click="activePanel = 'questionnaire'">📋 继续问卷</button>
@@ -185,6 +218,32 @@
                     </template>
                   </div>
                 </template>
+              </div>
+            </template>
+
+            <!-- 写作台之前的 AI 补全 banner -->
+            <template x-if="currentProject && bootstrapBanner.visible">
+              <div class="ai-bootstrap-banner" :class="`banner-${bootstrapBanner.kind}`">
+                <span class="banner-icon" x-text="{
+                  in_flight: '⏳',
+                  awaiting_commit: '✅',
+                  partial_failed: '⚠️'
+                }[bootstrapBanner.kind] || '🤖'"></span>
+                <div class="banner-text">
+                  <strong x-text="{
+                    in_flight: 'AI 补全进行中：',
+                    awaiting_commit: 'AI 补全完成：',
+                    partial_failed: 'AI 补全部分失败：'
+                  }[bootstrapBanner.kind] || 'AI 补全：'"></strong>
+                  <span x-text="bootstrapBanner.message"></span>
+                </div>
+                <button class="btn-small" @click="openBootstrapWizard(bootstrapBanner.projectId, bootstrapBanner.runId)"
+                        x-text="{
+                          in_flight: '查看进度',
+                          awaiting_commit: '提交入库',
+                          partial_failed: '查看/重跑'
+                        }[bootstrapBanner.kind] || '查看'"></button>
+                <button class="btn-small btn-dismiss" @click="dismissBootstrapBanner()">×</button>
               </div>
             </template>
 
@@ -1010,6 +1069,62 @@
           <div class="modal-actions">
             <button class="btn-secondary" @click="showProjectSettings = false">取消</button>
             <button class="btn-primary" @click="saveProjectSettings()">保存</button>
+            <template x-if="currentProject">
+              <button class="btn-danger" @click="deleteCurrentProject()">🗑️ 删除项目</button>
+            </template>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ═══ 任务管理弹窗 ═══ -->
+    <template x-if="showTaskManager">
+      <div class="modal-overlay" @click.self="showTaskManager = false">
+        <div class="modal modal-wide">
+          <h2>📋 任务管理</h2>
+          <div class="task-manager-summary">
+            <span>共 <strong x-text="allTasks.length"></strong> 个任务</span>
+            <span>进行中 <strong x-text="activeTaskCount"></strong></span>
+            <span>已完成 <strong x-text="completedTaskCount"></strong></span>
+          </div>
+          <div class="task-manager-actions">
+            <button class="btn-primary" @click="refreshAllTasks()">🔄 刷新</button>
+            <button class="btn-danger" @click="terminateAllTasks()"
+                    :disabled="activeTaskCount === 0">
+              ⛔ 终止全部任务
+            </button>
+            <button class="btn-secondary" @click="showTaskManager = false">关闭</button>
+          </div>
+          <div class="task-list">
+            <template x-if="allTasks.length === 0">
+              <p class="empty-hint">暂无任务</p>
+            </template>
+            <template x-for="t in allTasks" :key="t.id">
+              <div class="task-item" :class="`task-${t.status}`">
+                <div class="task-info">
+                  <div class="task-desc" x-text="t.description"></div>
+                  <div class="task-meta">
+                    <span class="task-type" x-text="t.task_type"></span>
+                    <span class="task-id" x-text="t.id"></span>
+                    <span class="task-duration" x-text="`${t.duration_s}s`"></span>
+                  </div>
+                  <template x-if="t.error">
+                    <div class="task-error" x-text="t.error"></div>
+                  </template>
+                </div>
+                <div class="task-status">
+                  <span class="status-pill" :class="`status-${t.status}`" x-text="{
+                    pending: '等待',
+                    running: '运行中',
+                    completed: '完成',
+                    failed: '失败',
+                    cancelled: '已取消'
+                  }[t.status] || t.status"></span>
+                  <button class="btn-small" x-show="['pending','running'].includes(t.status)"
+                          @click="terminateOneTask(t.id)">⛔ 终止</button>
+                </div>
+              </div>
+            </template>
           </div>
         </div>
       </div>
@@ -1033,6 +1148,245 @@
           <div class="modal-actions">
             <button class="btn-secondary" @click="showSettings = false">关闭</button>
           </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ═══ 创建项目表单（4 必填 + 8 选填） ═══ -->
+    <template x-if="showCreateProjectModal">
+      <div class="modal-overlay" @click.self="showCreateProjectModal = false">
+        <div class="modal modal-wide">
+          <h2>📖 创建新项目</h2>
+          <p class="modal-hint">仅 4 项必填，其余 8 项留空可由 AI 智能补全（推荐）</p>
+
+          <form @submit.prevent="submitCreateProject(true)">
+            <!-- 必填区块 -->
+            <fieldset class="form-section required">
+              <legend>必填（4 项）</legend>
+
+              <div class="form-row">
+                <label>
+                  <span class="req">*</span> 书名
+                  <input type="text" x-model="newProjectForm.title" placeholder="例如：无名" required>
+                </label>
+                <label>
+                  <span class="req">*</span> 章节字数（千字）
+                  <select x-model.number="newProjectForm.chapter_word_count" required>
+                    <template x-for="n in createFormOptions.chapter_word_options" :key="n">
+                      <option :value="n" x-text="n + ' 千字（约 ' + (n*1000) + ' 字/章）'"></option>
+                    </template>
+                  </select>
+                </label>
+              </div>
+
+              <div class="form-row">
+                <label>
+                  <span class="req">*</span> 题材
+                  <select x-model="newProjectForm.genre" required>
+                    <option value="">-- 请选择 --</option>
+                    <template x-for="g in createFormOptions.genres" :key="g">
+                      <option :value="g" x-text="g"></option>
+                    </template>
+                  </select>
+                </label>
+              </div>
+
+              <label>
+                <span class="req">*</span> 创意信息（一句话描述故事）
+                <textarea x-model="newProjectForm.description" rows="3"
+                          placeholder="例如：一个少年寻找失踪妹妹的玄幻冒险故事..."
+                          required></textarea>
+              </label>
+            </fieldset>
+
+            <!-- 选填区块 -->
+            <fieldset class="form-section optional">
+              <legend>选填（8 项 · 未填将由 AI 补全）</legend>
+
+              <div class="form-row">
+                <label>
+                  <span class="ai-tag" title="AI 补全">🤖</span> 核心主题
+                  <input type="text" x-model="newProjectForm.theme" placeholder="如：救赎、成长、复仇...">
+                </label>
+                <label>
+                  <span class="ai-tag" title="AI 补全">🤖</span> 基调
+                  <select x-model="newProjectForm.tone">
+                    <option value="">-- AI 补全 --</option>
+                    <template x-for="t in createFormOptions.tones" :key="t">
+                      <option :value="t" x-text="t"></option>
+                    </template>
+                  </select>
+                </label>
+              </div>
+
+              <div class="form-row">
+                <label>
+                  <span class="ai-tag" title="AI 补全">🤖</span> 文风
+                  <select x-model="newProjectForm.style">
+                    <option value="">-- AI 补全 --</option>
+                    <template x-for="s in createFormOptions.styles" :key="s">
+                      <option :value="s" x-text="s"></option>
+                    </template>
+                  </select>
+                </label>
+                <label>
+                  <span class="ai-tag" title="AI 补全">🤖</span> 节奏
+                  <select x-model="newProjectForm.pacing">
+                    <option value="">-- AI 补全 --</option>
+                    <template x-for="p in createFormOptions.pacings" :key="p">
+                      <option :value="p" x-text="p"></option>
+                    </template>
+                  </select>
+                </label>
+              </div>
+
+              <label>
+                <span class="ai-tag" title="AI 补全">🤖</span> 世界观 / 背景
+                <textarea x-model="newProjectForm.premise" rows="2"
+                          placeholder="时代 / 世界 / 社会规则 / 势力等..."></textarea>
+              </label>
+
+              <div class="form-row">
+                <label>
+                  <span class="ai-tag" title="AI 补全">🤖</span> 主角（名字/性格/目标）
+                  <textarea x-model="newProjectForm.protagonist" rows="2"
+                            placeholder="例：江寻，16岁少年，性格倔强..."></textarea>
+                </label>
+                <label>
+                  <span class="ai-tag" title="AI 补全">🤖</span> 反派
+                  <textarea x-model="newProjectForm.antagonist" rows="2"
+                            placeholder="目标、核心矛盾..."></textarea>
+                </label>
+              </div>
+
+              <label>
+                <span class="ai-tag" title="AI 补全">🤖</span> 配角
+                <textarea x-model="newProjectForm.supporting" rows="2"
+                          placeholder="重要配角及与主角的关系..."></textarea>
+              </label>
+
+              <label>
+                <span class="ai-tag" title="AI 补全">🤖</span> 其他备注
+                <textarea x-model="newProjectForm.notes" rows="2"
+                          placeholder="独特设定、脑洞、想表达的主旨..."></textarea>
+              </label>
+            </fieldset>
+
+            <div class="modal-actions">
+              <button type="button" class="btn-secondary" @click="showCreateProjectModal = false">取消</button>
+              <button type="submit" class="btn-primary">🚀 开始创建（AI 补全未填项）</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </template>
+
+    <!-- ═══ 必填缺失时弹出的"问卷补全" ═══ -->
+    <template x-if="showMissingFieldsModal">
+      <div class="modal-overlay" @click.self="showMissingFieldsModal = false">
+        <div class="modal">
+          <h2>📝 补全必填信息</h2>
+          <p class="modal-hint">以下信息必填，请补全后继续创建</p>
+          <form @submit.prevent="fillMissingFromModal()">
+            <template x-for="q in missingQuestionnaire" :key="q.id">
+              <label class="missing-field">
+                <span class="req">*</span>
+                <span x-text="q.question"></span>
+                <template x-if="q.type === 'text'">
+                  <input type="text" :id="'miss-' + q.id" required>
+                </template>
+                <template x-if="q.type === 'textarea'">
+                  <textarea :id="'miss-' + q.id" rows="3" required></textarea>
+                </template>
+                <template x-if="q.type === 'select'">
+                  <select :id="'miss-' + q.id" required>
+                    <option value="">-- 请选择 --</option>
+                    <template x-for="opt in q.options" :key="opt">
+                      <option :value="opt" x-text="opt"></option>
+                    </template>
+                  </select>
+                </template>
+              </label>
+            </template>
+            <div class="modal-actions">
+              <button type="button" class="btn-secondary" @click="showMissingFieldsModal = false">取消</button>
+              <button type="submit" class="btn-primary">✓ 补全完成，继续创建</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </template>
+
+    <!-- ═══ 引导补全 Wizard（覆盖整个工作区） ═══ -->
+    <template x-if="bootstrapWizard.visible">
+      <div class="wizard-overlay">
+        <div class="wizard-container">
+          <header class="wizard-header">
+            <h2>🤖 AI 正在为你的项目补全设定...</h2>
+            <button class="btn-small" @click="closeBootstrapWizard()">×</button>
+          </header>
+
+          <div class="wizard-progress">
+            <div class="progress-bar">
+              <div class="progress-fill" :style="`width: ${bootstrapProgressPct()}%`"></div>
+            </div>
+            <div class="progress-text">
+              <span x-text="`${bootstrapProgressPct()}% · ${bootstrapDurationText()}`"></span>
+              <span class="status-pill" :class="`status-${bootstrapWizard.status}`"
+                    x-text="{
+                      running: '执行中',
+                      completed: '已完成，待提交',
+                      committed: '已写入数据库',
+                      failed: '部分失败'
+                    }[bootstrapWizard.status] || bootstrapWizard.status"></span>
+            </div>
+          </div>
+
+          <div class="wizard-stages">
+            <template x-for="stage in bootstrapWizard.stages" :key="stage.id">
+              <div class="wizard-stage" :class="`stage-${stage.status}`">
+                <div class="stage-head" @click="bootstrapWizard.expandedStageId = bootstrapWizard.expandedStageId === stage.id ? null : stage.id">
+                  <span class="stage-icon" x-text="bootstrapStageIcon(stage.status)"></span>
+                  <div class="stage-info">
+                    <div class="stage-name" x-text="stage.name"></div>
+                    <div class="stage-desc" x-text="stage.description"></div>
+                    <div class="stage-meta">
+                      <span class="meta-tag" x-show="stage.needs_llm">需要 LLM</span>
+                      <span class="meta-tag" x-show="!stage.needs_llm">用户已填</span>
+                      <template x-for="dep in stage.depends_on" :key="dep">
+                        <span class="meta-dep" x-text="`依赖: ${dep}`"></span>
+                      </template>
+                    </div>
+                  </div>
+                  <button class="btn-small" x-show="stage.status === 'ok'"
+                          @click.stop="rerunBootstrapStage(stage.id)">🔄 重跑</button>
+                </div>
+                <div class="stage-body" x-show="bootstrapWizard.expandedStageId === stage.id">
+                  <pre x-text="JSON.stringify(
+                    bootstrapWizard.stages.find(s => s.id === stage.id),
+                    null, 2)"></pre>
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <footer class="wizard-footer">
+            <template x-if="bootstrapWizard.status === 'completed'">
+              <button class="btn-primary" @click="commitBootstrap()">✓ 全部完成，写入数据库</button>
+            </template>
+            <template x-if="bootstrapWizard.status === 'committed'">
+              <button class="btn-primary" @click="closeBootstrapWizard()">进入写作台 →</button>
+            </template>
+            <template x-if="bootstrapWizard.status === 'failed'">
+              <div class="error-msg">
+                ⚠️ 部分 stage 失败，可单独重跑失败项。
+                <button class="btn-secondary" @click="closeBootstrapWizard()">稍后处理</button>
+              </div>
+            </template>
+            <template x-if="bootstrapWizard.status === 'running'">
+              <span class="running-hint">⏳ 正在调用 LLM 完成补全，请稍候...</span>
+            </template>
+          </footer>
         </div>
       </div>
     </template>

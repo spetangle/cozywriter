@@ -84,7 +84,7 @@ python main.py
 # 或双击 run.bat
 ```
 
-访问 **http://localhost:8000**
+访问 **http://localhost:13567**
 
 ### 首次运行引导
 
@@ -227,6 +227,33 @@ cozywriter/
 
 ---
 
+## 数据存储
+
+所有数据全部存放在项目内 `data/` 目录下，**不依赖系统 `~/.cache/huggingface`**：
+
+```
+data/
+├── cozywriter.db              # SQLite 主数据库
+├── chroma/                    # ChromaDB 向量库
+├── logs/                      # 日志（按天滚动）
+└── models/                    # Embedding 模型（项目内扁平目录）
+    └── moka-ai/
+        └── m3e-base/
+            ├── config.json
+            ├── tokenizer.json
+            ├── tokenizer_config.json
+            ├── vocab.txt
+            ├── modules.json
+            └── sentencepiece.bpe.model
+```
+
+首次启动会下载 `moka-ai/m3e-base`（约 400MB）到 `data/models/moka-ai/m3e-base/`。
+
+如果之前用过 `cache_dir` 嵌套结构（`data/models/models--moka-ai--m3e-base/snapshots/...`），
+启动时会自动迁移到扁平目录。
+
+---
+
 ## 环境变量
 
 ```bash
@@ -246,7 +273,7 @@ HF_ENDPOINT=https://hf-mirror.com
 # 存储路径
 DATA_DIR=./data
 CHROMA_PERSIST_DIR=./data/chroma
-DATABASE_URL=sqlite+aiosqlite:///./data/cozywriter.db
+DATABASE_URL=sqlite:///./data/cozywriter.db
 ```
 
 ---

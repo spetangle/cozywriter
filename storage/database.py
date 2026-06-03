@@ -7,7 +7,7 @@ from pathlib import Path
 # 确保 data 目录存在
 Path("./data").mkdir(exist_ok=True)
 
-# SQLite 方言使用 aiosqlite 需同步兼容
+# 同步 SQLite（项目全用同步 Session，无需 aiosqlite）
 engine = create_engine(
     settings.database_url,
     connect_args={"check_same_thread": False} if "sqlite" in settings.database_url else {},

@@ -34,4 +34,5 @@ class Project(Base):
     review_sessions = relationship("ReviewSession", back_populates="project", cascade="all, delete-orphan")
     project_outline = relationship("ProjectOutline", back_populates="project", uselist=False, cascade="all, delete-orphan")
     inspirations = relationship("Inspiration", back_populates="project", cascade="all, delete-orphan")
+    workflow_runs = relationship("WorkflowRun", back_populates="project", cascade="all, delete-orphan")
 

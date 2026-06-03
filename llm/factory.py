@@ -3,6 +3,7 @@ from llm.base import LLMProvider
 from llm.anthropic_provider import AnthropicProvider
 from llm.openai_provider import OpenAIProvider
 from llm.ollama_provider import OllamaProvider
+from llm.minimax_provider import MiniMaxProvider
 from config import settings
 
 
@@ -11,6 +12,7 @@ class LLMFactory:
         "anthropic": AnthropicProvider,
         "openai": OpenAIProvider,
         "ollama": OllamaProvider,
+        "MiniMax": MiniMaxProvider,
     }
 
     @classmethod

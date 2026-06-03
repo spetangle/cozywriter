@@ -454,7 +454,7 @@ EMBEDDING_MODEL=moka-ai/m3e-base
 HF_ENDPOINT=https://hf-mirror.com
 DATA_DIR=./data
 CHROMA_PERSIST_DIR=./data/chroma
-DATABASE_URL=sqlite+aiosqlite:///./data/cozywriter.db
+DATABASE_URL=sqlite:///./data/cozywriter.db
 ```
 
 ```python

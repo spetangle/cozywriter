@@ -2,22 +2,23 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from pathlib import Path
-import os
 
 
 router = APIRouter(prefix="/api/config", tags=["配置"])
 
 
 class SaveProviderRequest(BaseModel):
-    provider: str  # anthropic / openai / ollama
+    provider: str  # anthropic / openai / ollama / MiniMax
     api_key: str | None = None
-    base_url: str | None = None  # 仅 ollama 需要
+    base_url: str | None = None  # 仅 ollama / MiniMax 可选
+    model: str | None = None     # MiniMax 可选
 
 
 class ConfigStatusResponse(BaseModel):
     anthropic_configured: bool
     openai_configured: bool
     ollama_configured: bool
+    MiniMax_configured: bool
     default_provider: str
 
 
@@ -58,6 +59,7 @@ async def get_config_status():
         anthropic_configured=bool(env_vars.get("ANTHROPIC_API_KEY", "")),
         openai_configured=bool(env_vars.get("OPENAI_API_KEY", "")),
         ollama_configured=bool(env_vars.get("OLLAMA_BASE_URL", "")),
+        MiniMax_configured=bool(env_vars.get("MINIMAX_API_KEY", "")),
         default_provider=env_vars.get("DEFAULT_LLM_PROVIDER", "anthropic"),
     )
 
@@ -85,6 +87,18 @@ async def save_provider(req: SaveProviderRequest):
             "OLLAMA_BASE_URL": base_url,
             "DEFAULT_LLM_PROVIDER": "ollama",
         })
+    elif req.provider == "MiniMax":
+        if not req.api_key:
+            raise HTTPException(status_code=400, detail="MINIMAX_API_KEY is required")
+        updates = {
+            "MINIMAX_API_KEY": req.api_key,
+            "DEFAULT_LLM_PROVIDER": "MiniMax",
+        }
+        if req.base_url:
+            updates["MINIMAX_BASE_URL"] = req.base_url
+        if req.model:
+            updates["MINIMAX_MODEL"] = req.model
+        _save_env(updates)
     else:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {req.provider}")
 

@@ -1,6 +1,7 @@
 """Character 相关模型"""
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON, Boolean
+from sqlalchemy.orm import relationship
 from storage.models.base import Base
 
 

@@ -79,6 +79,43 @@ def get_project_tasks(project_id: int) -> list[Task]:
         return [t for t in _tasks.values() if str(project_id) in t.description]
 
 
+def terminate_all_tasks() -> dict:
+    """终止所有 pending/running 任务
+    Returns:
+        {"terminated": int, "skipped": int, "total": int}
+    """
+    with _tasks_lock:
+        terminated = 0
+        skipped = 0
+        for t in _tasks.values():
+            if t.status in ("pending", "running"):
+                t.status = "cancelled"
+                t.error = "用户终止"
+                t.completed_at = time.time()
+                terminated += 1
+            else:
+                skipped += 1
+        return {
+            "terminated": terminated,
+            "skipped": skipped,
+            "total": len(_tasks),
+        }
+
+
+def terminate_task(task_id: str) -> bool:
+    """终止单个任务"""
+    with _tasks_lock:
+        t = _tasks.get(task_id)
+        if not t:
+            return False
+        if t.status in ("pending", "running"):
+            t.status = "cancelled"
+            t.error = "用户终止"
+            t.completed_at = time.time()
+            return True
+        return False
+
+
 def run_task_async(task_id: str, fn: Callable, *args, **kwargs):
     """
     在线程池中运行任务，不阻塞 FastAPI 事件循环
@@ -89,37 +126,53 @@ def run_task_async(task_id: str, fn: Callable, *args, **kwargs):
         return
 
     def _run():
+        # 启动前检查是否已被标记取消（极小概率：submit 后立即终止）
+        if task.status == "cancelled":
+            return
+
         task.status = "running"
         task.started_at = time.time()
         task.progress = 10
 
+        # 超时机制：用 threading.Timer 跨平台兼容（Windows 没有 Unix 的 alarm 信号）
+        timeout_holder = {"hit": False}
+        timer = None
         try:
-            # 设置超时
-            import signal
-            def timeout_handler(signum, frame):
-                raise TimeoutError(f"Task {task_id} timed out")
-
-            # 默认超时 180 秒
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(180)
+            import threading
+            def _on_timeout():
+                timeout_holder["hit"] = True
+                # 不能从 timer 线程里 raise（不会传到主线程），仅标记
+            timer = threading.Timer(180.0, _on_timeout)
+            timer.daemon = True
+            timer.start()
 
             result = fn(*args, **kwargs)
 
-            signal.alarm(0)
+            # LLM 调用结束后再次检查：用户是否在调用期间点了"终止"
+            if task.status == "cancelled":
+                logger.info(f"[Task {task_id}] user-cancelled during LLM call; discarding result")
+                return
+
+            # 检查超时
+            if timeout_holder["hit"]:
+                task.status = "failed"
+                task.error = "任务超时（180秒）"
+                task.completed_at = time.time()
+                return
+
             task.progress = 100
             task.status = "completed"
             task.result = result
             task.completed_at = time.time()
 
-        except TimeoutError as e:
-            task.status = "failed"
-            task.error = f"任务超时（180秒）: {str(e)}"
-            task.completed_at = time.time()
-
         except Exception as e:
-            task.status = "failed"
-            task.error = str(e)
-            task.completed_at = time.time()
+            if task.status != "cancelled":
+                task.status = "failed"
+                task.error = str(e)
+                task.completed_at = time.time()
+        finally:
+            if timer is not None:
+                timer.cancel()
 
     _executor.submit(_run)
 

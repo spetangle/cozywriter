@@ -6,13 +6,29 @@ function app() {
     showSetupWizard: false,
     setupStep: 2,
     selectedProvider: null,
-    providerConfig: { apiKey: '', baseUrl: 'http://localhost:11434' },
+    providerConfig: { apiKey: '', baseUrl: 'http://localhost:11434', model: '' },
     modelStatus: { model_name: '', downloaded: false, cache_size_mb: null },
     downloading: false,
 
     showSettings: false,
     showProjectSettings: false,
     settings: { defaultProvider: 'anthropic' },
+
+    // 任务管理
+    showTaskManager: false,
+    allTasks: [],
+    _taskPollHandle: null,
+
+    // 模型下载进度（SSE）
+    downloadProgress: {
+      stage: 'idle',     // idle / started / migrating / downloading / finished / error
+      current: 0,
+      total: 0,
+      message: '',
+      elapsed_s: 0,
+      percent: 0,
+      speed_mbps: 0,
+    },
 
     // 项目 & 章节
     projects: [],
@@ -36,6 +52,50 @@ function app() {
     foreshadowings: [],
     showForeshadowingForm: false,
     foreshadowingForm: { title: '', content: '' },
+
+    // ─── 项目引导补全（Bootstrap Workflow） ───
+    showCreateProjectModal: false,         // 主创建表单 modal
+    showMissingFieldsModal: false,         // 必填缺失时弹出的"补全问卷" modal
+    missingFields: [],                     // 后端返回的缺失字段
+    missingQuestionnaire: [],              // 后端返回的问卷题目
+    bootstrapWizard: {                     // 引导向导页状态
+      visible: false,
+      projectId: null,
+      runId: null,
+      status: 'idle',                       // idle / running / completed / committed / failed
+      stages: [],                           // stage 列表
+      expandedStageId: null,                // 展开预览的 stage
+      pollHandle: null,                     // 轮询句柄
+      errorMsg: '',
+      startedAt: null,
+      completedAt: null,
+    },
+    // 创建项目表单（12 字段：4 必填 + 8 选填）
+    newProjectForm: {
+      // 4 必填
+      title: '',
+      chapter_word_count: 3,
+      genre: '',
+      description: '',
+      // 8 选填
+      theme: '',
+      tone: '',
+      style: '',
+      pacing: '',
+      premise: '',
+      protagonist: '',
+      antagonist: '',
+      supporting: '',
+      notes: '',
+    },
+    // ── 选题静态选项（与后端 MISSING_QUESTIONNAIRE / STAGE_PROMPTS 对齐） ──
+    createFormOptions: {
+      chapter_word_options: [2, 3, 4, 5],
+      genres: ['玄幻', '都市', '科幻', '武侠', '仙侠', '历史', '悬疑', '现实主义', '奇幻', '其他'],
+      tones: ['热血', '治愈', '黑暗', '轻松', '史诗', '悬疑紧张', '浪漫', '幽默', '冷峻'],
+      styles: ['优美', '平实', '诗意', '幽默', '冷峻'],
+      pacings: ['快节奏', '中等节奏', '慢热型', '起伏型'],
+    },
 
     // 角色弧光
     characterArcs: [],
@@ -101,11 +161,28 @@ function app() {
         this.showSetupWizard = data.needs_setup;
         if (!data.needs_setup) {
           await this.loadProjects();
+          // 检查是否有进行中的 workflow run，有则自动恢复 wizard
+          await this._rehydrateBootstrapIfNeeded();
         } else {
           await this.refreshModelStatus();
         }
       } catch (e) {
         console.error('初始化检查失败:', e);
+      }
+    },
+
+    async _rehydrateBootstrapIfNeeded() {
+      try {
+        const res = await fetch('/api/workflow/in-flight');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data.run) return;
+        // 有进行中的 run → 自动重开 wizard
+        const run = data.run;
+        console.log('[Bootstrap] rehydrating in-flight run:', run.run_id, 'project', run.project_id);
+        this.openBootstrapWizard(run.project_id, run.run_id);
+      } catch (e) {
+        console.warn('[Bootstrap] rehydrate check failed:', e);
       }
     },
 
@@ -136,17 +213,196 @@ function app() {
     },
 
     async downloadModel() {
+      if (this.downloading) return;
       this.downloading = true;
+      this.downloadProgress = {
+        stage: 'started',
+        current: 0,
+        total: 0,
+        message: '准备下载...',
+        elapsed_s: 0,
+        percent: 0,
+        speed_mbps: 0,
+      };
       try {
-        await fetch('/api/models/download', { method: 'POST' });
+        const res = await fetch('/api/models/download', { method: 'POST' });
+        if (!res.ok || !res.body) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        // 解析 SSE 流
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          // SSE 事件以 \n\n 分隔
+          let sepIdx;
+          while ((sepIdx = buffer.indexOf('\n\n')) !== -1) {
+            const block = buffer.slice(0, sepIdx);
+            buffer = buffer.slice(sepIdx + 2);
+            for (const line of block.split('\n')) {
+              if (line.startsWith('data: ')) {
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  this._onDownloadProgress(data);
+                } catch (e) {
+                  console.warn('bad SSE chunk', e);
+                }
+              }
+            }
+          }
+        }
         await this.refreshModelStatus();
-      } catch (e) { alert('下载失败: ' + e.message); }
-      finally { this.downloading = false; }
+      } catch (e) {
+        this.downloadProgress = {
+          ...this.downloadProgress,
+          stage: 'error',
+          message: '下载失败: ' + e.message,
+        };
+        setTimeout(() => alert('下载失败: ' + e.message), 100);
+      } finally {
+        this.downloading = false;
+      }
+    },
+
+    _onDownloadProgress(data) {
+      // 计算百分比和速度
+      let percent = 0;
+      if (data.total > 0) {
+        percent = Math.min(100, Math.round((data.current / data.total) * 100));
+      }
+      let speed_mbps = 0;
+      if (data.elapsed_s > 0 && data.current > 0 && data.stage === 'downloading') {
+        const bytes_per_s = data.current / data.elapsed_s;
+        speed_mbps = bytes_per_s / 1024 / 1024;
+      }
+      this.downloadProgress = {
+        stage: data.stage,
+        current: data.current,
+        total: data.total,
+        message: data.message || '',
+        elapsed_s: data.elapsed_s || 0,
+        percent,
+        speed_mbps,
+        cache_size_mb: data.cache_size_mb,
+      };
+    },
+
+    formatBytes(n) {
+      if (n < 1024) return n + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+      if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+      return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
     },
 
     finishSetup() {
       this.showSetupWizard = false;
       this.loadProjects();
+    },
+
+    // ─── 任务管理 ───
+
+    async openTaskManager() {
+      this.showTaskManager = true;
+      await this.refreshAllTasks();
+      // 每 3s 刷新（任务管理 UI 主动轮询）
+      if (this._taskPollHandle) clearInterval(this._taskPollHandle);
+      this._taskPollHandle = setInterval(() => {
+        if (this.showTaskManager) this.refreshAllTasks();
+      }, 3000);
+    },
+
+    async refreshAllTasks() {
+      try {
+        const res = await fetch('/api/tasks/all');
+        if (!res.ok) {
+          // 后端没这个接口时回退：聚合 in-flight + 项目任务
+          const all = [];
+          if (this.currentProject) {
+            const r2 = await fetch(`/api/tasks/project/${this.currentProject.id}`);
+            if (r2.ok) all.push(...(await r2.json()));
+          }
+          this.allTasks = all;
+          return;
+        }
+        this.allTasks = await res.json();
+      } catch (e) {
+        console.warn('refreshAllTasks failed:', e);
+      }
+    },
+
+    async terminateAllTasks() {
+      if (!confirm('确定终止所有正在运行的任务？\n这会打断 LLM 调用，可能导致部分 stage 不完整。')) return;
+      try {
+        const res = await fetch('/api/tasks/terminate-all', { method: 'POST' });
+        if (res.ok) {
+          const data = await res.json();
+          alert(`已终止 ${data.terminated} 个任务，跳过 ${data.skipped} 个`);
+          await this.refreshAllTasks();
+        } else {
+          alert('终止失败: HTTP ' + res.status);
+        }
+      } catch (e) {
+        alert('终止失败: ' + e.message);
+      }
+    },
+
+    async terminateOneTask(taskId) {
+      if (!confirm('确定终止任务 ' + taskId + ' ？')) return;
+      try {
+        const res = await fetch(`/api/tasks/${taskId}/terminate`, { method: 'POST' });
+        if (res.ok) {
+          await this.refreshAllTasks();
+        } else {
+          const err = await res.json().catch(() => ({}));
+          alert('终止失败: ' + (err.detail || res.status));
+        }
+      } catch (e) {
+        alert('终止失败: ' + e.message);
+      }
+    },
+
+    get activeTaskCount() {
+      return this.allTasks.filter((t) => ['pending', 'running'].includes(t.status)).length;
+    },
+
+    get completedTaskCount() {
+      return this.allTasks.filter((t) => ['completed', 'failed', 'cancelled'].includes(t.status)).length;
+    },
+
+    // ─── 项目删除 ───
+
+    async deleteCurrentProject() {
+      if (!this.currentProject) return;
+      const p = this.currentProject;
+      const ok = confirm(
+        `⚠️ 即将永久删除项目《${p.title}》\n\n` +
+        `将删除：所有章节 / 角色 / 世界观 / 伏笔 / 大纲 / 灵感 / 工作流记录\n` +
+        `（Embedding 模型 / Chroma 向量索引 等公共资源不受影响）\n\n` +
+        `此操作不可撤销！\n\n确定删除？`
+      );
+      if (!ok) return;
+      try {
+        const res = await fetch(`/api/projects/${p.id}`, { method: 'DELETE' });
+        if (res.ok) {
+          // 从本地列表移除
+          this.projects = this.projects.filter((x) => x.id !== p.id);
+          this.currentProject = null;
+          this.chapters = [];
+          this.characters = [];
+          this.themes = [];
+          this.foreshadowings = [];
+          this.showProjectSettings = false;
+          alert('项目已删除');
+        } else {
+          const err = await res.json().catch(() => ({}));
+          alert('删除失败: ' + (err.detail || res.status));
+        }
+      } catch (e) {
+        alert('删除失败: ' + e.message);
+      }
     },
 
     // ─── 项目管理 ───
@@ -172,6 +428,375 @@ function app() {
       } catch (e) { alert('创建失败: ' + e.message); }
     },
 
+    // ─── 项目引导补全：新版创建流程 ───
+
+    openCreateProjectModal() {
+      // 重置表单
+      this.newProjectForm = {
+        title: '',
+        chapter_word_count: 3,
+        genre: '',
+        description: '',
+        theme: '',
+        tone: '',
+        style: '',
+        pacing: '',
+        premise: '',
+        protagonist: '',
+        antagonist: '',
+        supporting: '',
+        notes: '',
+      };
+      this.showCreateProjectModal = true;
+    },
+
+    _stripEmptyFields(obj) {
+      // 把空字符串 / null 字段剔除，提交时只发有值的字段
+      const out = {};
+      for (const [k, v] of Object.entries(obj)) {
+        if (v === '' || v === null || v === undefined) continue;
+        out[k] = v;
+      }
+      return out;
+    },
+
+    async submitCreateProject(autoCommit = true) {
+      // 前端二次校验 4 必填
+      const f = this.newProjectForm;
+      const missing = [];
+      if (!(f.title || '').trim()) missing.push('title');
+      if (!f.chapter_word_count) missing.push('chapter_word_count');
+      if (!(f.genre || '').trim()) missing.push('genre');
+      if (!(f.description || '').trim()) missing.push('description');
+      if (missing.length > 0) {
+        // 前端检测到缺失，不发请求，直接弹补全 modal
+        this.missingFields = missing;
+        this.missingQuestionnaire = missing.map((field) => ({
+          id: field,
+          question: this._fieldLabel(field),
+          type: this._fieldType(field),
+          options: this._fieldOptions(field),
+          required: true,
+        }));
+        this.showMissingFieldsModal = true;
+        return;
+      }
+
+      const payload = this._stripEmptyFields({
+        ...f,
+        auto_commit: autoCommit,
+        async_mode: true,
+      });
+
+      try {
+        const res = await fetch('/api/projects', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+
+        if (data.status === 'missing_required') {
+          // 后端二次校验发现缺失
+          this.missingFields = data.missing || [];
+          this.missingQuestionnaire = data.questionnaire || [];
+          this.showMissingFieldsModal = true;
+          return;
+        }
+
+        // 创建成功 + 启动 workflow
+        this.showCreateProjectModal = false;
+        this.projects.unshift({
+          id: data.project_id,
+          title: f.title,
+          description: f.description,
+        });
+        this.openBootstrapWizard(data.project_id, data.run_id);
+      } catch (e) {
+        alert('创建失败: ' + e.message);
+      }
+    },
+
+    _fieldLabel(field) {
+      return {
+        title: '请输入书名',
+        chapter_word_count: '每章目标字数（千字）？',
+        genre: '小说题材？',
+        description: '用一句话描述你的故事',
+      }[field] || field;
+    },
+
+    _fieldType(field) {
+      if (field === 'title') return 'text';
+      if (field === 'description') return 'textarea';
+      return 'select';
+    },
+
+    _fieldOptions(field) {
+      const o = this.createFormOptions;
+      if (field === 'chapter_word_count') return o.chapter_word_options;
+      if (field === 'genre') return o.genres;
+      return [];
+    },
+
+    fillMissingFromModal() {
+      // 从 missingFieldsModal 取值回写到 newProjectForm
+      for (const q of this.missingQuestionnaire) {
+        const fid = q.id;
+        const el = document.getElementById('miss-' + fid);
+        if (!el) continue;
+        const val = el.value;
+        if (val !== '' && val !== null) {
+          if (fid === 'chapter_word_count') {
+            this.newProjectForm.chapter_word_count = parseInt(val) || 0;
+          } else {
+            this.newProjectForm[fid] = val;
+          }
+        }
+      }
+      this.showMissingFieldsModal = false;
+      this.missingFields = [];
+      this.missingQuestionnaire = [];
+      // 重新提交
+      this.submitCreateProject(true);
+    },
+
+    // ─── 项目首页 AI 补全 banner ───
+    bootstrapBanner: {
+      visible: false,
+      projectId: null,
+      kind: '',           // 'in_flight' | 'awaiting_commit' | 'partial_failed'
+      runId: null,
+      message: '',
+    },
+    _bannerDismissed: new Set(),
+
+    dismissBootstrapBanner() {
+      this.bootstrapBanner.visible = false;
+      if (this.bootstrapBanner.projectId) {
+        this._bannerDismissed.add(this.bootstrapBanner.projectId);
+      }
+    },
+
+    async _maybeShowBootstrapBanner(projectId) {
+      // 如果用户已 dismiss 过这个项目，跳过
+      if (this._bannerDismissed.has(projectId)) {
+        this.bootstrapBanner.visible = false;
+        return;
+      }
+      try {
+        const res = await fetch(`/api/workflow/project/${projectId}/latest`);
+        if (!res.ok) {
+          this.bootstrapBanner.visible = false;
+          return;
+        }
+        const data = await res.json();
+        const status = data.status;
+        const stages = data.stages || [];
+        const results = data.stage_results || {};
+
+        // 1) 已 committed → 完全完成，不显示
+        if (status === 'committed') {
+          this.bootstrapBanner.visible = false;
+          return;
+        }
+
+        // 2) pending / running → 任务在进行中（包括用户杀了进程后 run 仍卡在这状态）
+        if (status === 'pending' || status === 'running') {
+          const total = stages.length;
+          const done = stages.filter((s) =>
+            ['ok', 'user_filled', 'skipped'].includes(s.status)
+          ).length;
+          this.bootstrapBanner = {
+            visible: true,
+            projectId,
+            runId: data.run_id,
+            kind: 'in_flight',
+            message: `AI 补全进行中 ${done}/${total} 步。点击查看实时进度。`,
+          };
+          return;
+        }
+
+        // 3) completed → 所有 stage 跑过但未 commit（待用户确认入库）
+        if (status === 'completed') {
+          this.bootstrapBanner = {
+            visible: true,
+            projectId,
+            runId: data.run_id,
+            kind: 'awaiting_commit',
+            message: 'AI 补全已完成，等待你确认写入数据库。',
+          };
+          return;
+        }
+
+        // 4) failed → 部分失败
+        if (status === 'failed' || status === 'partial') {
+          const failedCount = stages.filter((s) => s.status === 'failed').length;
+          this.bootstrapBanner = {
+            visible: true,
+            projectId,
+            runId: data.run_id,
+            kind: 'partial_failed',
+            message: `AI 补全部分失败（${failedCount} 个 stage）。可重跑失败项或继续。`,
+          };
+          return;
+        }
+
+        this.bootstrapBanner.visible = false;
+      } catch (e) {
+        console.warn('[Bootstrap banner] check failed:', e);
+        this.bootstrapBanner.visible = false;
+      }
+    },
+
+    // ─── Bootstrap Wizard ───
+
+    async openBootstrapWizard(projectId, runId) {
+      this.bootstrapWizard = {
+        visible: true,
+        projectId,
+        runId,
+        status: 'running',
+        stages: [],
+        expandedStageId: null,
+        pollHandle: null,
+        errorMsg: '',
+        startedAt: Date.now(),
+        completedAt: null,
+      };
+      // 立即拉一次
+      await this._pollBootstrapStatus();
+      // 启动轮询（5s 一次，LLM 慢，给后端留够时间）
+      this.bootstrapWizard.pollHandle = setInterval(
+        () => this._pollBootstrapStatus(),
+        5000
+      );
+    },
+
+    async _pollBootstrapStatus() {
+      const wiz = this.bootstrapWizard;
+      if (!wiz.visible || !wiz.projectId) return;
+      try {
+        const res = await fetch(`/api/workflow/project/${wiz.projectId}/latest`);
+        if (!res.ok) return;
+        const data = await res.json();
+        wiz.runId = data.run_id;
+        wiz.stages = data.stages || [];
+        const statuses = wiz.stages.map((s) => s.status);
+        const allDone = statuses.every((s) =>
+          ['ok', 'user_filled', 'skipped', 'failed'].includes(s)
+        );
+        if (data.status === 'committed') {
+          wiz.status = 'committed';
+          wiz.completedAt = Date.now();
+          this._stopBootstrapPolling();
+        } else if (data.status === 'failed') {
+          wiz.status = 'failed';
+          wiz.errorMsg = '有 stage 执行失败';
+          this._stopBootstrapPolling();
+        } else if (allDone && data.status === 'completed') {
+          wiz.status = 'completed';
+          wiz.completedAt = Date.now();
+          this._stopBootstrapPolling();
+        }
+      } catch (e) {
+        console.error('[Bootstrap poll] failed:', e);
+      }
+    },
+
+    _stopBootstrapPolling() {
+      const wiz = this.bootstrapWizard;
+      if (wiz.pollHandle) {
+        clearInterval(wiz.pollHandle);
+        wiz.pollHandle = null;
+      }
+    },
+
+    async rerunBootstrapStage(stageId) {
+      const wiz = this.bootstrapWizard;
+      if (!wiz.runId) return;
+      if (!confirm(`确定重新生成 stage「${stageId}」吗？将覆盖之前的结果。`)) return;
+      try {
+        const res = await fetch(`/api/workflow/run/${wiz.runId}/rerun`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ stage_id: stageId }),
+        });
+        const data = await res.json();
+        if (data.status === 'ok') {
+          // 重新拉一次
+          await this._pollBootstrapStatus();
+        } else {
+          alert('重跑失败: ' + (data.error || 'unknown'));
+        }
+      } catch (e) {
+        alert('重跑失败: ' + e.message);
+      }
+    },
+
+    async commitBootstrap() {
+      const wiz = this.bootstrapWizard;
+      if (!wiz.runId) return;
+      try {
+        const res = await fetch(`/api/workflow/run/${wiz.runId}/commit`, {
+          method: 'POST',
+        });
+        const data = await res.json();
+        if (data.status === 'committed' || data.status === 'already_committed') {
+          wiz.status = 'committed';
+          wiz.completedAt = Date.now();
+          this._stopBootstrapPolling();
+          // 刷新当前项目数据
+          if (this.currentProject) {
+            await this.openProject(this.currentProject);
+          }
+        } else {
+          alert('提交失败: ' + (data.error || 'unknown'));
+        }
+      } catch (e) {
+        alert('提交失败: ' + e.message);
+      }
+    },
+
+    closeBootstrapWizard() {
+      this._stopBootstrapPolling();
+      this.bootstrapWizard.visible = false;
+      // 跳转到项目首页
+      if (this.bootstrapWizard.projectId) {
+        const proj = this.projects.find((p) => p.id === this.bootstrapWizard.projectId);
+        if (proj) this.openProject(proj);
+      }
+    },
+
+    bootstrapStageIcon(status) {
+      return {
+        pending: '⏳',
+        running: '🔄',
+        ok: '✅',
+        user_filled: '👤',
+        skipped: '⏭️',
+        failed: '❌',
+      }[status] || '⏳';
+    },
+
+    bootstrapProgressPct() {
+      const wiz = this.bootstrapWizard;
+      if (!wiz.stages || wiz.stages.length === 0) return 0;
+      const done = wiz.stages.filter((s) =>
+        ['ok', 'user_filled', 'skipped'].includes(s.status)
+      ).length;
+      return Math.round((done / wiz.stages.length) * 100);
+    },
+
+    bootstrapDurationText() {
+      const wiz = this.bootstrapWizard;
+      if (!wiz.startedAt) return '';
+      const end = wiz.completedAt || Date.now();
+      const sec = Math.round((end - wiz.startedAt) / 1000);
+      if (sec < 60) return `${sec} 秒`;
+      return `${Math.floor(sec / 60)} 分 ${sec % 60} 秒`;
+    },
+
     async openProject(project) {
       this.currentProject = { ...project };
       this.activePanel = 'writing';
@@ -187,6 +812,8 @@ function app() {
         this.loadProjectOutline(project.id),
         this.loadChapterOutlines(project.id),
       ]);
+      // 检查是否需要显示 AI 补全 banner
+      this._maybeShowBootstrapBanner(project.id);
     },
 
     async saveProjectSettings() {

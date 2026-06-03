@@ -19,7 +19,11 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     openai_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
-    default_llm_provider: str = "anthropic"
+    # MiniMax 配置
+    minimax_api_key: str = ""
+    minimax_model: str = "MiniMax-M2.7"
+    minimax_base_url: str = "https://api.minimaxi.com"
+    default_llm_provider: str = "MiniMax"
 
     # Embedding 配置
     embedding_model: str = "moka-ai/m3e-base"
@@ -28,7 +32,8 @@ class Settings(BaseSettings):
     # 存储路径
     data_dir: str = "./data"
     chroma_persist_dir: str = "./data/chroma"
-    database_url: str = "sqlite+aiosqlite:///./data/cozywriter.db"
+    # 同步 SQLite（项目全用同步 Session，无需 aiosqlite）
+    database_url: str = "sqlite:///./data/cozywriter.db"
 
 
 # 设置 HuggingFace 镜像（国内加速）

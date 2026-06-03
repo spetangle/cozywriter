@@ -1,20 +1,37 @@
 #!/bin/bash
+set -e
 echo "========================================"
 echo "  CozyWriter - 小说编写助手"
 echo "========================================"
 echo ""
 
-# 检查虚拟环境
+# ─── Step 1: virtual environment ───
 if [ ! -d ".venv" ]; then
-    echo "[INFO] 正在创建虚拟环境..."
-    python -m venv .venv
+    echo "[1/4] 创建虚拟环境 .venv ..."
+    python3 -m venv .venv
+    echo "      完成。"
+else
+    echo "[1/4] 虚拟环境已就绪。"
 fi
-
-echo "[INFO] 安装依赖（如需要）..."
-.venv/bin/pip install -r requirements.txt > /dev/null 2>&1
-
-echo "[INFO] 启动服务..."
-echo "[INFO] 访问 http://localhost:8000"
 echo ""
 
-.venv/bin/python main.py
+# ─── Step 2: pip upgrade ───
+echo "[2/4] 升级 pip ..."
+.venv/bin/python -m pip install --upgrade pip --disable-pip-version-check 2>/dev/null
+echo "      完成。"
+echo ""
+
+# ─── Step 3: install requirements ───
+echo "[3/4] 安装依赖（首次运行可能需要几分钟）..."
+echo ""
+.venv/bin/python -m pip install -r requirements.txt --disable-pip-version-check
+echo ""
+echo "      所有依赖安装完成。"
+echo ""
+
+# ─── Step 4: launch server ───
+echo "[4/4] 启动 CozyWriter 服务 ..."
+echo "      浏览器打开 http://localhost:13567"
+echo "      按 Ctrl+C 停止。"
+echo ""
+exec .venv/bin/python main.py

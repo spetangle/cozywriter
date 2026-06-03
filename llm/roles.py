@@ -314,6 +314,65 @@ ROLE_REVISION = Role(
 
 
 # ═══════════════════════════════════════════════════════════════
+# Role 8: 项目引导补全设计器（Bootstrap Designer）
+# ═══════════════════════════════════════════════════════════════
+
+# 通用系统提示（强调已锁定字段、JSON 输出、用户优先）
+BOOTSTRAP_SYSTEM = """你是一位专业的小说设定设计师，正在为用户补全小说项目的设定。
+
+【已锁定的硬约束（用户输入，禁止修改）】
+{locked_inputs}
+
+【上一阶段产物（参考上下文，不要与之矛盾）】
+{prev_outputs}
+
+【本任务目标】
+{task_description}
+
+【输出要求】
+1. 已锁定字段保持原样，绝不覆盖
+2. 严格按 JSON schema 输出，不要任何解释
+3. 字段命名用 snake_case；中文文本字段保留中文
+4. 保持与已锁定输入的剧情一致性
+5. 填补用户未填的部分时，参考类型/题材的主流惯例
+"""
+
+
+def build_bootstrap_role(task_description: str, locked_inputs: dict,
+                         prev_outputs: dict, max_tokens: int = 2048,
+                         temperature: float = 0.5) -> Role:
+    """为单个 bootstrap stage 动态构造 Role"""
+    system = BOOTSTRAP_SYSTEM.format(
+        locked_inputs=_format_locked(locked_inputs),
+        prev_outputs=_format_prev(prev_outputs),
+        task_description=task_description,
+    )
+    return Role(
+        name="bootstrap",
+        system_prompt=system,
+        user_prompt_template="请按 system 中的 JSON schema 输出：",
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+
+
+def _format_locked(locked: dict) -> str:
+    if not locked:
+        return "（无）"
+    lines = []
+    for k, v in locked.items():
+        lines.append(f"- {k}: {v}")
+    return "\n".join(lines)
+
+
+def _format_prev(prev: dict) -> str:
+    if not prev:
+        return "（无）"
+    import json as _json
+    return _json.dumps(prev, ensure_ascii=False, indent=2)
+
+
+# ═══════════════════════════════════════════════════════════════
 # Role 7: 大纲生成
 # ═══════════════════════════════════════════════════════════════
 
@@ -377,6 +436,7 @@ ROLES = {
     "outline": ROLE_OUTLINE,
     "revision": ROLE_REVISION,
     "plot": ROLE_PLOT,
+    "bootstrap": None,  # 由 build_bootstrap_role 动态生成
 }
 
 

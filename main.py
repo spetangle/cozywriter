@@ -11,7 +11,7 @@ from api.routes import (
     init, config, models, projects, chapters, characters,
     worldbuilding, outline, generate, theme, review,
     consistency, outline_detail, tasks, inspirations,
-    creative_questionnaire,
+    creative_questionnaire, workflow,
 )
 
 app = FastAPI(
@@ -37,6 +37,7 @@ app.include_router(outline_detail.router)       # 大纲 / 细纲
 app.include_router(tasks.router)               # 异步任务状态轮询
 app.include_router(inspirations.router)         # 灵感收集
 app.include_router(creative_questionnaire.router) # 创意问卷
+app.include_router(workflow.router)             # 工作流管理（重跑/提交）
 
 
 # 确保 data 目录存在
@@ -64,4 +65,4 @@ if web_static.exists():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=13567, reload=True)
