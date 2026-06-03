@@ -425,6 +425,370 @@ ROLE_PLOT = Role(
 
 
 # ═══════════════════════════════════════════════════════════════
+# Role 9: 章节生成流水线专用 Roles
+# ═══════════════════════════════════════════════════════════════
+
+# 9.1 章节准备信息聚合（一般不需要 LLM，仅作为 system 占位）
+ROLE_CHAPTER_PREP = Role(
+    name="chapter_prep",
+    system_prompt="""你是小说辅助系统。已为你准备好本章的上下文信息（设定/大纲/前文/人物/伏笔），
+请基于这些信息直接开始细纲生成。不要补充额外信息""",
+    user_prompt_template="{context}",
+    max_tokens=512,
+    temperature=0.3,
+)
+
+
+# 9.2 细纲生成（在已有 prep info 上）
+CHAPTER_OUTLINE_GEN_SYSTEM = """你是一位专业的小说架构师。
+
+【本章定位】{chapter_position} · 节奏：{pacing}
+【关键内容】{key_content}
+【剧情推进】{plot_advance}
+
+【章节准备信息】
+{prep_info}
+
+请生成本章细纲（JSON）：
+{{
+  "scenes": [
+    {{"name": "场景名", "summary": "场景概要", "characters": ["登场人物"], "conflict": "冲突点"}}
+  ],
+  "key_beats": ["关键节拍 1", "关键节拍 2"],
+  "foreshadow_actions": [{{"title": "伏笔标题", "action": "plant|resolve|tie"}}, ...],
+  "character_developments": [{{"name": "角色名", "change": "本章变化 1 句"}}, ...],
+  "target_word_count": {target_word_count}
+}}
+"""
+ROLE_CHAPTER_OUTLINE_GEN = Role(
+    name="chapter_outline_gen",
+    system_prompt=CHAPTER_OUTLINE_GEN_SYSTEM,
+    user_prompt_template="请生成第 {chapter_num} 章细纲：",
+    max_tokens=2048,
+    temperature=0.6,
+)
+
+
+# 9.3 细纲评审（关键：只过滤严重性漏洞）
+OUTLINE_REVIEW_SYSTEM = """你是一位细纲评审专家，专门审查小说章节细纲的**严重性漏洞**。
+
+【严重性问题】(score=high)
+- 角色行为与已确认的人物弧光严重冲突
+- 关键伏笔的时间线矛盾（与已规划回收章节矛盾）
+- 与世界观的硬规则冲突
+- 关键情节设置与项目大纲冲突
+- 关键人物 OOC（out of character）
+
+【非严重性】(score=low/medium) - 不需要修订
+- 文字细节、文笔润色
+- 节奏微调
+- 创意建议
+
+【细纲】
+{outline}
+
+【判定标准】
+- high: 必须修订
+- medium: 建议修订（仅当有具体修复方案时）
+- low: 不修订
+
+返回 JSON：
+{{
+  "issues": [
+    {{
+      "severity": "high|medium|low",
+      "type": "character_trait_conflict | foreshadow_timeline | world_rule_violation | plot_inconsistency | ooc",
+      "description": "具体问题",
+      "suggestion": "具体修复建议"
+    }}
+  ],
+  "verdict": "pass" | "needs_revision",
+  "summary": "1 句话总评"
+}}
+"""
+ROLE_OUTLINE_REVIEWER = Role(
+    name="outline_reviewer",
+    system_prompt=OUTLINE_REVIEW_SYSTEM,
+    user_prompt_template="审查本章细纲：",
+    max_tokens=2048,
+    temperature=0.3,
+)
+
+
+# 9.4 缩写（字数过多时）
+COMPRESS_SYSTEM = """你是小说缩写专家。
+
+【目标字数】{target_word_count}
+【当前字数】{current_word_count}
+【保留要求】所有 plot_advance / key_beats / 关键场景冲突点
+
+【细纲】(保留剧情核心)
+{outline}
+
+【原文】
+{content}
+
+请压缩原文至目标字数范围，保留所有必要情节。
+返回 JSON：
+{{
+  "compressed_text": "压缩后的正文",
+  "removed_summary": "删除了哪些次要内容（1 句话）"
+}}
+"""
+ROLE_COMPRESSOR = Role(
+    name="compressor",
+    system_prompt=COMPRESS_SYSTEM,
+    user_prompt_template="压缩本章正文：",
+    max_tokens=4096,
+    temperature=0.4,
+)
+
+
+# 9.5 扩写（字数过少时）
+EXPAND_SYSTEM = """你是小说扩写专家。
+
+【目标字数】{target_word_count}
+【当前字数】{current_word_count}
+【扩写方向】根据细纲补充：环境描写 / 心理活动 / 对话 / 动作细节
+
+【细纲】
+{outline}
+
+【原文】
+{content}
+
+请扩写原文至目标字数范围，**不要**添加与细纲冲突的新情节。
+返回 JSON：
+{{
+  "expanded_text": "扩写后的正文",
+  "added_summary": "补充了哪些内容（1 句话）"
+}}
+"""
+ROLE_EXPANDER = Role(
+    name="expander",
+    system_prompt=EXPAND_SYSTEM,
+    user_prompt_template="扩写本章正文：",
+    max_tokens=4096,
+    temperature=0.7,
+)
+
+
+# 9.6 修订决策
+REVISION_DECISION_SYSTEM = """你是质量决策系统。
+
+【章节评审 8 维度分数】
+{scores}
+
+【总评均分】{avg_score}
+【修订阈值】6.5 (低于此分必须修订；6.5-7.0 看情况；7.0+ 不修订)
+
+【章节细纲】(保持一致)
+{outline}
+
+【章节正文】(若修订)
+{content}
+
+返回 JSON：
+{{
+  "decision": "no_revision" | "revise",
+  "reason": "1 句理由",
+  "focus_areas": ["重点关注 1", "重点关注 2"]
+}}
+"""
+ROLE_REVISION_DECIDER = Role(
+    name="revision_decider",
+    system_prompt=REVISION_DECISION_SYSTEM,
+    user_prompt_template="决定是否修订：",
+    max_tokens=1024,
+    temperature=0.3,
+)
+
+
+# 9.7 角色弧光 + 关系更新（章节后处理）
+POST_CHAPTER_SYSTEM = """你是小说剧情推演系统。根据刚写完的章节，更新人物状态和关系。
+
+【本章正文】
+{content}
+
+【当前人物状态】
+{current_state}
+
+【当前关系】
+{current_relations}
+
+【返回 JSON】
+{{
+  "arc_updates": [
+    {{
+      "character_name": "角色名",
+      "current_state": "更新后的当前状态（1-2 句）",
+      "key_behavior": "本章体现的关键行为（1 句）",
+      "arc_type": "成长|堕落|平线|循环"
+    }}
+  ],
+  "relation_updates": [
+    {{
+      "from": "角色A", "to": "角色B",
+      "new_type": "关系类型（可与原关系不同）",
+      "description": "本章体现（1 句）",
+      "strength_delta": -3 到 +3,
+      "status": "stable|developing|tense|broken"
+    }}
+  ],
+  "new_characters": [
+    {{
+      "name": "新角色名", "role": "配角",
+      "identity": "身份", "personality": "性格",
+      "first_appearance_note": "首次登场描述（1 句）"
+    }}
+  ]
+}}
+
+【规则】
+- 不更新未出场的角色
+- strength_delta 累加到当前值
+- 关系变化需与正文证据一致
+"""
+ROLE_POST_CHAPTER = Role(
+    name="post_chapter",
+    system_prompt=POST_CHAPTER_SYSTEM,
+    user_prompt_template="处理本章人物状态：",
+    max_tokens=2048,
+    temperature=0.4,
+)
+
+
+# 9.8 伏笔状态管理
+FORESHADOW_UPDATE_SYSTEM = """你是伏笔管理系统。
+
+【本章正文】
+{content}
+
+【活跃伏笔列表】
+{active_foreshadowings}
+
+【返回 JSON】
+{{
+  "foreshadow_updates": [
+    {{
+      "title": "伏笔标题",
+      "new_status": "active|planted|resolved|abandoned",
+      "evidence": "本章中的相关文本（1-2 句引用或描述）"
+    }}
+  ],
+  "new_foreshadowings": [
+    {{
+      "title": "新伏笔", "content": "内容", "suggested_resolve_chapter": 数字
+    }}
+  ]
+}}
+
+【规则】
+- 只列出本章正文中有明确证据的状态变化
+- 埋设（planted）vs 回收（resolved）vs 推进（active）
+- 主动放弃（abandoned）：剧情已经偏离，无意再回收
+"""
+ROLE_FORESHADOW_UPDATER = Role(
+    name="foreshadow_updater",
+    system_prompt=FORESHADOW_UPDATE_SYSTEM,
+    user_prompt_template="更新伏笔状态：",
+    max_tokens=2048,
+    temperature=0.4,
+)
+
+
+# 9.9 黄金三章检查（前 3 章写完后）
+GOLDEN_3_SYSTEM = """你是新书开局诊断专家。
+
+【3 章正文摘要】
+{chapters_summary}
+
+【项目大纲】(开局部分)
+{opening_outline}
+
+【核心主旨】
+{themes}
+
+【诊断维度】
+1. 钩子强度：第 1 章是否在前 1000 字抓住读者？
+2. 人物立体度：主角在前 3 章是否展现了复杂动机？
+3. 设定揭示节奏：世界观/能力体系是否自然展开？
+4. 冲突递进：3 章之间冲突是否逐步升级？
+5. 风格一致：文风是否与项目定位一致？
+
+返回 JSON：
+{{
+  "verdict": "excellent" | "good" | "needs_adjustment" | "poor",
+  "score": 0-10,
+  "issues": [{{"dimension": "...", "severity": "high|medium|low", "description": "..."}}],
+  "recommendations": ["具体建议 1", "建议 2"],
+  "summary": "1 句话诊断"
+}}
+"""
+ROLE_GOLDEN_3_CHECKER = Role(
+    name="golden_3_checker",
+    system_prompt=GOLDEN_3_SYSTEM,
+    user_prompt_template="诊断黄金三章：",
+    max_tokens=2048,
+    temperature=0.3,
+)
+
+
+# 9.10 全书级大纲规划（统筹情节/伏笔/人物弧光）
+PLOT_DIRECTOR_SYSTEM = """你是全本小说统筹规划师。
+
+【用户输入】
+{user_input}
+
+【任务】
+设计完整大纲，**统筹规划**：
+1. 情节：四幕结构 + 关键转折点
+2. 伏笔：长/中/短周期分布，回收节奏合理
+3. 人物弧光：主角/反派/重要配角的成长曲线在每幕中的关键节点
+
+返回 JSON：
+{{
+  "plot_lines": [
+    {{"title": "...", "description": "...", "from_chapter": 1, "to_chapter": N, "priority": 1}}
+  ],
+  "foreshadowing_plan": [
+    {{
+      "title": "...",
+      "type": "short|mid|long",
+      "plant_chapter": 1,
+      "resolve_chapter": N,
+      "setup": "埋设思路",
+      "payoff": "回收效果"
+    }}
+  ],
+  "character_arc_plan": [
+    {{
+      "character_name": "...",
+      "arc_type": "成长|堕落|平线|循环",
+      "key_beats": [
+        {{"chapter": N, "state": "本章状态", "trigger": "驱动事件"}}
+      ]
+    }}
+  ],
+  "structure": {{
+    "acts": [
+      {{"name": "第一幕", "from_chapter": 1, "to_chapter": N, "goal": "本幕核心目标"}}
+    ]
+  }},
+  "pacing_notes": "整体节奏规划",
+  "outline_text": "完整大纲文本描述（300-500 字）"
+}}
+"""
+ROLE_CHAPTER_DIRECTOR = Role(
+    name="chapter_director",
+    system_prompt=PLOT_DIRECTOR_SYSTEM,
+    user_prompt_template="规划全本小说：",
+    max_tokens=4096,
+    temperature=0.6,
+)
+
+
+# ═══════════════════════════════════════════════════════════════
 # Role 注册表
 # ═══════════════════════════════════════════════════════════════
 
@@ -437,6 +801,17 @@ ROLES = {
     "revision": ROLE_REVISION,
     "plot": ROLE_PLOT,
     "bootstrap": None,  # 由 build_bootstrap_role 动态生成
+    # 章节流水线
+    "chapter_prep": ROLE_CHAPTER_PREP,
+    "chapter_outline_gen": ROLE_CHAPTER_OUTLINE_GEN,
+    "outline_reviewer": ROLE_OUTLINE_REVIEWER,
+    "compressor": ROLE_COMPRESSOR,
+    "expander": ROLE_EXPANDER,
+    "revision_decider": ROLE_REVISION_DECIDER,
+    "post_chapter": ROLE_POST_CHAPTER,
+    "foreshadow_updater": ROLE_FORESHADOW_UPDATER,
+    "golden_3_checker": ROLE_GOLDEN_3_CHECKER,
+    "chapter_director": ROLE_CHAPTER_DIRECTOR,
 }
 
 

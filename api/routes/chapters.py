@@ -203,3 +203,106 @@ async def rollback_chapter(project_id: int, chapter_id: int, version_num: int, d
     db.commit()
     db.refresh(chapter)
     return chapter
+
+
+# ═══════════════════════════════════════════════════════════════
+# 章节生成流水线 API
+# ═══════════════════════════════════════════════════════════════
+
+class PipelineRequest(BaseModel):
+    project_id: int
+    chapter_id: int
+    provider: str | None = None
+    auto_revise: bool = True
+    revision_threshold: float = 6.5
+    async_mode: bool = True
+
+
+class PipelineResponse(BaseModel):
+    status: str
+    task_id: str | None = None
+    run_id: int | None = None
+    project_id: int | None = None
+    chapter_id: int | None = None
+    final_word_count: int | None = None
+    stages: dict = {}
+    post_processing: dict = {}
+    error: str | None = None
+    total_duration_ms: float | None = None
+    notifications: list = []
+
+
+# 复用此路由的 generator 路径
+pipeline_router = APIRouter(prefix="/api/chapters", tags=["章节生成"])
+
+
+@pipeline_router.post("/generate-pipeline", response_model=PipelineResponse)
+async def run_pipeline(req: PipelineRequest, db: Session = Depends(get_db)):
+    """
+    一键章节生成（9 步流水线）
+
+    同步模式：立即返回完整结果
+    异步模式：返回 task_id，前端轮询 /api/tasks/{task_id}
+    """
+    from llm.chapter_pipeline import run_chapter_generation_pipeline
+
+    if not req.async_mode:
+        try:
+            result = run_chapter_generation_pipeline(
+                db, req.project_id, req.chapter_id, req.provider,
+                auto_revise=req.auto_revise,
+                revision_threshold=req.revision_threshold,
+            )
+            return PipelineResponse(
+                status=result["status"],
+                project_id=req.project_id,
+                chapter_id=req.chapter_id,
+                final_word_count=result.get("final_word_count"),
+                stages=result.get("stages", {}),
+                post_processing=result.get("post_processing", {}),
+                error=result.get("error"),
+                total_duration_ms=result.get("total_duration_ms"),
+                notifications=result.get("post_processing", {}).get("notifications", []),
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"生成失败: {str(e)}")
+
+    # 异步模式
+    from api.tasks import submit_llm_task
+    task = submit_llm_task(
+        task_type="chapter_pipeline",
+        llm_call_fn=_async_pipeline_task,
+        project_id=req.project_id,
+        description=f"生成章节 [{req.chapter_id}]",
+        req=req,
+    )
+    return PipelineResponse(
+        status="submitted",
+        task_id=task.id,
+        project_id=req.project_id,
+        chapter_id=req.chapter_id,
+    )
+
+
+def _async_pipeline_task(task_id: str, req: PipelineRequest):
+    from storage.database import SessionLocal
+    from llm.chapter_pipeline import run_chapter_generation_pipeline
+    from api.tasks import get_task
+
+    db = SessionLocal()
+    try:
+        task = get_task(task_id)
+        result = run_chapter_generation_pipeline(
+            db, req.project_id, req.chapter_id, req.provider,
+            auto_revise=req.auto_revise,
+            revision_threshold=req.revision_threshold,
+        )
+        if task:
+            task.result = {
+                "final_word_count": result.get("final_word_count"),
+                "stages": {k: v.get("status") for k, v in result.get("stages", {}).items()},
+                "post_processing": result.get("post_processing", {}),
+            }
+        return result
+    finally:
+        db.close()

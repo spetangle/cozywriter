@@ -13,6 +13,7 @@ from api.routes import (
     consistency, outline_detail, tasks, inspirations,
     creative_questionnaire, workflow,
 )
+from api.routes.chapters import pipeline_router
 
 app = FastAPI(
     title="CozyWriter",
@@ -38,6 +39,7 @@ app.include_router(tasks.router)               # 异步任务状态轮询
 app.include_router(inspirations.router)         # 灵感收集
 app.include_router(creative_questionnaire.router) # 创意问卷
 app.include_router(workflow.router)             # 工作流管理（重跑/提交）
+app.include_router(pipeline_router)            # 章节生成 9 步流水线
 
 
 # 确保 data 目录存在
