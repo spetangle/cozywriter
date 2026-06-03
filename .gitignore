@@ -11,15 +11,20 @@ env/
 dist/
 build/
 
-# Data (keep directory, ignore contents)
-data/                   # 所有数据文件（SQLite / ChromaDB / 模型）
-data/models/            # embedding 模型文件 (~400MB)
+# Data - 用户项目数据 / 模型 / 向量库 / 日志（绝不入版本控制）
+# 注意：data/ 本身（目录）需要保留，递归忽略其内容用 data/**
+data/**
+!data/.gitkeep
+data/models/             # embedding 模型文件 (~400MB)
 data/chroma/             # ChromaDB 向量库
-*.log                    # 日志文件
+data/logs/               # 日志文件
+data/*.db                # SQLite 主数据库
+*.log                    # 全局日志
 
-# Environment
+# Environment - 真实 API Key 等敏感信息
 .env
-*.env.local
+.env.*
+!.env.example
 
 # IDE
 .vscode/
