@@ -199,3 +199,69 @@ def submit_llm_task(
     task = create_task(task_type, f"[P{project_id}] {description}")
     run_task_async(task.id, llm_call_fn, *args, **kwargs)
     return task
+
+
+# ═══════════════════════════════════════════════════════════════
+# 孤儿任务清理（启动时 / 手动）
+# ═══════════════════════════════════════════════════════════════
+
+def reap_orphan_tasks(reason: str = "服务重启") -> dict:
+    """清理内存中的 pending/running 任务（标 cancelled）
+    启动时调用，因为重启后内存是新进程的，这些是上个进程的"假活"任务。
+    Returns: {"reaped": int, "kept": int}
+    """
+    with _tasks_lock:
+        reaped = 0
+        for t in _tasks.values():
+            if t.status in ("pending", "running"):
+                t.status = "cancelled"
+                t.error = reason
+                t.completed_at = time.time()
+                reaped += 1
+        return {"reaped": reaped, "kept": len(_tasks) - reaped}
+
+
+def reap_orphan_workflow_runs(reason: str = "服务重启") -> dict:
+    """清理 DB 中所有 pending/running 的 WorkflowRun（bootstrap 流程）
+    启动时调用。返回: {"reaped": int, "kept": int, "ids": [...]}
+    """
+    from storage.models.workflow import WorkflowRun
+    from storage.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        stale = (
+            db.query(WorkflowRun)
+            .filter(WorkflowRun.status.in_(["pending", "running"]))
+            .all()
+        )
+        ids = []
+        for run in stale:
+            run.status = "cancelled"
+            run.updated_at = datetime.utcnow()
+            # 把 stage_results 里的 running stage 标成 cancelled
+            sr = dict(run.stage_results or {})
+            for stage_id, info in sr.items():
+                if isinstance(info, dict) and info.get("status") == "running":
+                    sr[stage_id] = {
+                        **info,
+                        "status": "cancelled",
+                        "error": reason,
+                        "cancelled_at": time.time(),
+                    }
+            run.stage_results = sr
+            ids.append(run.id)
+        db.commit()
+        return {"reaped": len(ids), "kept": 0, "ids": ids, "reason": reason}
+    finally:
+        db.close()
+
+
+def reap_all_orphans() -> dict:
+    """一站式清理：内存 + DB"""
+    mem = reap_orphan_tasks("服务重启")
+    db = reap_orphan_workflow_runs("服务重启")
+    return {
+        "memory_tasks": mem,
+        "workflow_runs": db,
+    }

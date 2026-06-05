@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
-  <div id="app" x-data="app()" x-init="init()">
+  <div id="app" x-data="cozywriterApp" x-init="init()">
 
     <!-- ═══ Setup Wizard ═══ -->
     <template x-if="showSetupWizard">
@@ -122,7 +122,14 @@
         <!-- 顶部导航 -->
         <header class="topbar">
           <div class="topbar-left">
-            <span class="logo">🏠 CozyWriter</span>
+            <template x-if="!currentProject">
+              <span class="logo">🏠 CozyWriter</span>
+            </template>
+            <template x-if="currentProject">
+              <button class="btn-icon back-btn" @click="backToHome()" title="返回项目列表">
+                ← 返回
+              </button>
+            </template>
           </div>
           <div class="topbar-center">
             <template x-if="currentProject">
@@ -130,6 +137,12 @@
             </template>
           </div>
           <div class="topbar-right">
+            <button class="btn-icon" @click="openInspirationHub()" title="灵感池">
+              💡
+              <template x-if="inspirationCount > 0">
+                <span class="badge" x-text="inspirationCount"></span>
+              </template>
+            </button>
             <button class="btn-icon" @click="openTaskManager()" title="任务管理">
               📋
               <template x-if="activeTaskCount > 0">
@@ -227,13 +240,17 @@
                 <span class="banner-icon" x-text="{
                   in_flight: '⏳',
                   awaiting_commit: '✅',
-                  partial_failed: '⚠️'
+                  partial_failed: '⚠️',
+                  aborted: '🔌',
+                  cancelled: '⛔'
                 }[bootstrapBanner.kind] || '🤖'"></span>
                 <div class="banner-text">
                   <strong x-text="{
                     in_flight: 'AI 补全进行中：',
                     awaiting_commit: 'AI 补全完成：',
-                    partial_failed: 'AI 补全部分失败：'
+                    partial_failed: 'AI 补全部分失败：',
+                    aborted: '服务重启导致中断：',
+                    cancelled: 'AI 补全被取消：'
                   }[bootstrapBanner.kind] || 'AI 补全：'"></strong>
                   <span x-text="bootstrapBanner.message"></span>
                 </div>
@@ -241,7 +258,9 @@
                         x-text="{
                           in_flight: '查看进度',
                           awaiting_commit: '提交入库',
-                          partial_failed: '查看/重跑'
+                          partial_failed: '查看/重跑',
+                          aborted: '重新启动',
+                          cancelled: '查看详情'
                         }[bootstrapBanner.kind] || '查看'"></button>
                 <button class="btn-small btn-dismiss" @click="dismissBootstrapBanner()">×</button>
               </div>
@@ -1154,8 +1173,9 @@
 
     <!-- ═══ 创建项目表单（4 必填 + 8 选填） ═══ -->
     <template x-if="showCreateProjectModal">
-      <div class="modal-overlay" @click.self="showCreateProjectModal = false">
+      <div class="modal-overlay modal-locked">
         <div class="modal modal-wide">
+          <button class="modal-close-x" @click="confirmCloseCreateProject()" title="关闭">×</button>
           <h2>📖 创建新项目</h2>
           <p class="modal-hint">仅 4 项必填，其余 8 项留空可由 AI 智能补全（推荐）</p>
 
@@ -1181,13 +1201,32 @@
 
               <div class="form-row">
                 <label>
-                  <span class="req">*</span> 题材
-                  <select x-model="newProjectForm.genre" required>
-                    <option value="">-- 请选择 --</option>
-                    <template x-for="g in createFormOptions.genres" :key="g">
-                      <option :value="g" x-text="g"></option>
+                  <span class="req">*</span> 题材（可多选，至少 1 个）
+                  <!-- 已选题材 chips -->
+                  <div class="genre-chips" x-show="newProjectForm.genres.length > 0">
+                    <template x-for="(g, i) in newProjectForm.genres" :key="g + '-' + i">
+                      <span class="genre-chip">
+                        <span x-text="g"></span>
+                        <button class="chip-x" @click="newProjectForm.genres.splice(i, 1)">×</button>
+                      </span>
                     </template>
-                  </select>
+                  </div>
+                  <!-- 候选下拉（系统 + 用户自定义） -->
+                  <div class="genre-picker">
+                    <select @change="addGenreToNewProject($event)">
+                      <option value="">+ 添加题材...</option>
+                      <template x-for="g in genreList" :key="g.id">
+                        <option :value="g.name" x-text="g.name + (g.is_system ? '' : ' (自定义)')"></option>
+                      </template>
+                    </select>
+                    <!-- 用户自添加 -->
+                    <div class="genre-custom-row">
+                      <input type="text" x-model="newGenreInput"
+                             @keydown.enter.prevent="submitNewGenre()"
+                             placeholder="自定义新题材后回车">
+                      <button class="btn-small" @click="submitNewGenre()">+</button>
+                    </div>
+                  </div>
                 </label>
               </div>
 
@@ -1273,7 +1312,7 @@
             </fieldset>
 
             <div class="modal-actions">
-              <button type="button" class="btn-secondary" @click="showCreateProjectModal = false">取消</button>
+              <button type="button" class="btn-secondary" @click="confirmCloseCreateProject()">取消</button>
               <button type="submit" class="btn-primary">🚀 开始创建（AI 补全未填项）</button>
             </div>
           </form>
@@ -1283,8 +1322,9 @@
 
     <!-- ═══ 必填缺失时弹出的"问卷补全" ═══ -->
     <template x-if="showMissingFieldsModal">
-      <div class="modal-overlay" @click.self="showMissingFieldsModal = false">
+      <div class="modal-overlay modal-locked">
         <div class="modal">
+          <button class="modal-close-x" @click="confirmCloseMissingFields()" title="关闭">×</button>
           <h2>📝 补全必填信息</h2>
           <p class="modal-hint">以下信息必填，请补全后继续创建</p>
           <form @submit.prevent="fillMissingFromModal()">
@@ -1309,7 +1349,7 @@
               </label>
             </template>
             <div class="modal-actions">
-              <button type="button" class="btn-secondary" @click="showMissingFieldsModal = false">取消</button>
+              <button type="button" class="btn-secondary" @click="confirmCloseMissingFields()">取消</button>
               <button type="submit" class="btn-primary">✓ 补全完成，继续创建</button>
             </div>
           </form>
@@ -1393,6 +1433,241 @@
 
   </div>
 
-  <script src="/static/js/app.js"></script>
+  <script src="/static/js/app.js?v=2"></script>
 </body>
 </html>
+
+
+
+    <!-- ═══ 灵感主界面（1 级功能：全屏 modal） ═══ -->
+    <template x-if="showInspirationHub">
+      <div class="modal-overlay">
+        <div class="modal modal-fullscreen">
+          <header class="inspiration-hub-header">
+            <h2>💡 灵感池 <span class="hint">搜索 / 标签 / 融合到项目 / 创建新小说</span></h2>
+            <button class="modal-close-x" @click="showInspirationHub = false">×</button>
+          </header>
+
+          <div class="inspiration-toolbar">
+            <input type="text" class="search-input" x-model="inspSearch.q"
+                   @input.debounce.300ms="loadInspirationHub()"
+                   placeholder="🔍 搜索灵感（标题/内容）...">
+
+            <select x-model="inspSearch.projectScope" @change="loadInspirationHub()">
+              <option value="global">🌍 全局灵感池</option>
+              <option value="current">📂 当前项目</option>
+              <option value="all">📚 全局 + 当前项目</option>
+            </select>
+
+            <select x-model="inspSearch.source" @change="loadInspirationHub()">
+              <option value="">来源（全部）</option>
+              <template x-for="s in inspSources" :key="s">
+                <option :value="s" x-text="s"></option>
+              </template>
+            </select>
+
+            <label class="checkbox-inline">
+              <input type="checkbox" x-model="inspSearch.includeConsumed" @change="loadInspirationHub()">
+              含已融合
+            </label>
+
+            <button class="btn-primary" @click="openInspirationEditor()">+ 新建灵感</button>
+          </div>
+
+          <div class="tag-cloud" x-show="inspTagCloud.length > 0">
+            <span class="tag-label">标签：</span>
+            <button class="tag-chip" :class="{ active: !inspSearch.tag }"
+                    @click="inspSearch.tag = ''; loadInspirationHub()">全部</button>
+            <template x-for="t in inspTagCloud" :key="t.name">
+              <button class="tag-chip" :class="{ active: inspSearch.tag === t.name }"
+                      @click="inspSearch.tag = inspSearch.tag === t.name ? '' : t.name; loadInspirationHub()">
+                <span x-text="t.name"></span>
+                <span class="tag-count" x-text="t.count"></span>
+              </button>
+            </template>
+          </div>
+
+          <div class="inspiration-grid">
+            <template x-if="inspLoading">
+              <p class="empty-hint">加载中...</p>
+            </template>
+            <template x-if="!inspLoading && inspirations.length === 0">
+              <p class="empty-hint">暂无灵感。点击"+ 新建灵感"开始记录。</p>
+            </template>
+            <template x-for="insp in inspirations" :key="insp.id">
+              <div class="inspiration-card" :class="{ consumed: insp.is_consumed }">
+                <div class="insp-card-head">
+                  <h3 x-text="insp.title || '(无标题)'"></h3>
+                  <span class="insp-source" x-show="insp.source" x-text="insp.source"></span>
+                  <span class="insp-consumed-badge" x-show="insp.is_consumed">✓ 已融合</span>
+                </div>
+                <p class="insp-content" x-text="insp.content"></p>
+                <div class="insp-tags" x-show="insp.tags && insp.tags.length">
+                  <template x-for="t in insp.tags" :key="t">
+                    <span class="insp-tag" x-text="'#' + t"></span>
+                  </template>
+                </div>
+                <div class="insp-meta">
+                  <span x-text="new Date(insp.created_at).toLocaleDateString()"></span>
+                  <span x-show="insp.consumed_into" x-text="'→ ' + insp.consumed_into"></span>
+                </div>
+                <div class="insp-actions">
+                  <button class="btn-small" @click="openInspirationEditor(insp)">✏️ 编辑</button>
+                  <button class="btn-small btn-primary" @click="openCreateProjectFromInspiration(insp)">📖 创建小说</button>
+                  <button class="btn-small" @click="openFuseInspiration(insp)">🔀 融合</button>
+                  <button class="btn-small btn-danger" @click="deleteInspirationById(insp.id)">🗑</button>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+    </template>
+
+
+    <!-- ═══ 灵感编辑（新建/编辑） ═══ -->
+    <template x-if="showInspirationEditor">
+      <div class="modal-overlay">
+        <div class="modal modal-wide">
+          <button class="modal-close-x" @click="showInspirationEditor = false">×</button>
+          <h2 x-text="editingInspiration.id ? '✏️ 编辑灵感' : '💡 新建灵感'"></h2>
+          <form @submit.prevent="saveInspirationFromEditor()">
+            <label>
+              标题（一句话）
+              <input type="text" x-model="editingInspiration.title" placeholder="例：主角在镜中看到自己老了 30 岁">
+            </label>
+            <label>
+              内容 *
+              <textarea x-model="editingInspiration.content" rows="6" required
+                        placeholder="详细描述灵感..."></textarea>
+            </label>
+            <div class="form-row">
+              <label>
+                来源
+                <input type="text" x-model="editingInspiration.source" list="insp-source-list"
+                       placeholder="脑洞 / 阅读 / 梦境 / 生活">
+                <datalist id="insp-source-list">
+                  <template x-for="s in inspSources" :key="s">
+                    <option :value="s"></option>
+                  </template>
+                </datalist>
+              </label>
+              <label>
+                标签（逗号分隔）
+                <input type="text" x-model="editingInspiration.tagInput"
+                       placeholder="例: 伏笔, 人物弧光, 反转">
+              </label>
+            </div>
+            <label>
+              关联项目（可选）
+              <select x-model="editingInspiration.project_id">
+                <option :value="null">🌍 全局（不绑项目）</option>
+                <template x-for="p in projects" :key="p.id">
+                  <option :value="p.id" x-text="p.title"></option>
+                </template>
+              </select>
+            </label>
+            <div class="modal-actions">
+              <button type="button" class="btn-secondary" @click="showInspirationEditor = false">取消</button>
+              <button type="submit" class="btn-primary">保存</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </template>
+
+
+    <!-- ═══ 灵感 → 创建项目（弹窗） ═══ -->
+    <template x-if="showCreateFromInspiration">
+      <div class="modal-overlay">
+        <div class="modal">
+          <button class="modal-close-x" @click="showCreateFromInspiration = false">×</button>
+          <h2>📖 以灵感为种子创建项目</h2>
+          <p class="modal-hint">基于灵感《<span x-text="inspForCreateProject?.title || '(无标题)'"></span>》</p>
+          <form @submit.prevent="submitCreateProjectFromInspiration()">
+            <label>
+              书名
+              <input type="text" x-model="createFromInspForm.title" required>
+            </label>
+            <div class="form-row">
+              <label>
+                章节字数（千字）
+                <select x-model.number="createFromInspForm.chapter_word_count">
+                  <template x-for="n in [2,3,4,5]" :key="n">
+                    <option :value="n" x-text="n + ' 千字'"></option>
+                  </template>
+                </select>
+              </label>
+              <label>
+                主题材
+                <select x-model="createFromInspForm.genre">
+                  <template x-for="g in genreList" :key="g.id">
+                    <option :value="g.name" x-text="g.name"></option>
+                  </template>
+                </select>
+              </label>
+            </div>
+            <label>
+              一句话故事
+              <textarea x-model="createFromInspForm.description" rows="3" required></textarea>
+            </label>
+            <p class="hint">💡 灵感的全文会自动作为 premise（世界观/背景）补充</p>
+            <div class="modal-actions">
+              <button type="button" class="btn-secondary" @click="showCreateFromInspiration = false">取消</button>
+              <button type="submit" class="btn-primary">🚀 创建 + 启动引导补全</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </template>
+
+
+    <!-- ═══ 灵感 → 融合到项目（弹窗） ═══ -->
+    <template x-if="showFuseInspiration">
+      <div class="modal-overlay">
+        <div class="modal">
+          <button class="modal-close-x" @click="showFuseInspiration = false">×</button>
+          <h2>🔀 融合灵感到项目</h2>
+          <p class="modal-hint">灵感：<span x-text="inspForFuse?.title || '(无标题)'"></span></p>
+          <form @submit.prevent="submitFuseInspiration()">
+            <label>
+              目标项目
+              <select x-model="fuseForm.project_id" required>
+                <option value="">-- 请选择 --</option>
+                <template x-for="p in projects" :key="p.id">
+                  <option :value="p.id" x-text="p.title"></option>
+                </template>
+              </select>
+            </label>
+            <label x-show="fuseForm.project_id">
+              融合位置
+              <select x-model="fuseForm.target" required>
+                <option value="outline">📋 项目大纲（追加为段落）</option>
+                <option value="world">🌍 世界观（新增条目）</option>
+                <option value="character">👤 角色（新增配角）</option>
+                <option value="chapter">📖 章节细纲（追加到指定章节）</option>
+                <option value="chapter_content">✍️ 章节正文（追加到指定章节）</option>
+              </select>
+            </label>
+            <label x-show="fuseForm.target === 'chapter' || fuseForm.target === 'chapter_content'">
+              指定章节（不填则追加到最后一章）
+              <select x-model="fuseForm.chapterOrder">
+                <option :value="null">最后一章</option>
+                <template x-for="n in chapterSelectOptions" :key="n">
+                  <option :value="n" x-text="'第 ' + (n+1) + ' 章'"></option>
+                </template>
+              </select>
+            </label>
+            <label>
+              融合备注（可选）
+              <textarea x-model="fuseForm.note" rows="2"
+                        placeholder="比如：这个灵感应该作为第 5 章的反转伏笔..."></textarea>
+            </label>
+            <div class="modal-actions">
+              <button type="button" class="btn-secondary" @click="showFuseInspiration = false">取消</button>
+              <button type="submit" class="btn-primary">🔀 融合</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </template>

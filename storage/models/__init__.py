@@ -10,4 +10,5 @@ from storage.models.review import ReviewSession
 from storage.models.consistency import ConsistencyRecord
 from storage.models.project_outline import ProjectOutline, ChapterOutline
 from storage.models.inspiration import Inspiration
+from storage.models.custom_genre import CustomGenre
 from storage.models.creative_questionnaire import CreativeQuestionnaire

@@ -43,6 +43,19 @@ async def terminate_all():
     return terminate_all_tasks()
 
 
+@router.post("/cleanup")
+async def cleanup_orphans():
+    """清理孤儿任务（pending/running 但实际已死）
+
+    用场景：
+    - 浏览器看到 banner 一直显示"AI 补全进行中"但实际没在跑
+    - 怀疑有 stale 状态
+    - 正常服务重启时也会自动调用（不需要手动）
+    """
+    from api.tasks import reap_all_orphans
+    return reap_all_orphans()
+
+
 # 单 task 路径（放在最后，确保具体路径优先匹配）
 @router.get("/{task_id}", response_model=TaskStatusResponse)
 async def get_task_status(task_id: str):

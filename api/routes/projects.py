@@ -66,7 +66,8 @@ class ProjectCreate(BaseModel):
     # 4 必填
     title: str = ""
     chapter_word_count: int = Field(default=0, description="章节字数（千字单位）", ge=1, le=20)
-    genre: str = ""
+    # genre 支持多选：list[str] 或 str（逗号分隔），写入时存为逗号分隔字符串
+    genre: str | list[str] = ""
     description: str = ""
     # 8 选填
     theme: str | None = None
@@ -170,7 +171,13 @@ async def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
             filled_optional=[f for f in OPTIONAL_FIELDS if getattr(data, f, None)],
         )
 
-    # 2) 创建项目骨架（仅 4 必填 + 用户填的选填）
+    # 2) 归一化 genre：list[str] → "玄幻, 都市" 字符串
+    if isinstance(data.genre, list):
+        genre_str = ", ".join([g.strip() for g in data.genre if g and g.strip()])
+    else:
+        genre_str = (data.genre or "").strip()
+
+    # 3) 创建项目骨架（仅 4 必填 + 用户填的选填）
     project = Project(
         title=data.title.strip(),
         description=data.description.strip(),
@@ -183,19 +190,19 @@ async def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(project)
 
-    # 3) 收集用户已填选填
+    # 4) 收集用户已填选填
     user_filled = {
         f: getattr(data, f) for f in OPTIONAL_FIELDS
         if getattr(data, f, None)
     }
 
-    # 4) 规划 workflow stages
+    # 5) 规划 workflow stages
     from llm.workflow import plan_bootstrap_stages
     stages = plan_bootstrap_stages(
         required={
             "title": data.title,
             "chapter_word_count": data.chapter_word_count,
-            "genre": data.genre,
+            "genre": genre_str,
             "description": data.description,
         },
         user_filled=user_filled,

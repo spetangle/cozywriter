@@ -75,7 +75,8 @@ function app() {
       // 4 必填
       title: '',
       chapter_word_count: 3,
-      genre: '',
+      genre: '',          // 旧版字符串（兼容后端），提交时由 genres 数组覆盖
+      genres: [],         // 新版多选（≥1 个）
       description: '',
       // 8 选填
       theme: '',
@@ -88,6 +89,7 @@ function app() {
       supporting: '',
       notes: '',
     },
+    newGenreInput: '',   // 用户输入新题材
     // ── 选题静态选项（与后端 MISSING_QUESTIONNAIRE / STAGE_PROMPTS 对齐） ──
     createFormOptions: {
       chapter_word_options: [2, 3, 4, 5],
@@ -117,6 +119,35 @@ function app() {
     allInspirationTags: [],
     selectedTag: null,
     newInspiration: { content: '', source: '', tagInput: '' },
+
+    // ─── 灵感主界面（1 级功能） ───
+    showInspirationHub: false,
+    showInspirationEditor: false,
+    showCreateFromInspiration: false,
+    showFuseInspiration: false,
+    inspirations: [],
+    inspLoading: false,
+    inspSearch: {
+      q: '',
+      tag: '',
+      source: '',
+      projectScope: 'global',  // global / current / all
+      includeConsumed: false,
+    },
+    inspTagCloud: [],
+    inspSources: [],          // 所有 source 列表（去重）
+    inspirationCount: 0,      // topbar badge
+    editingInspiration: { id: null, title: '', content: '', source: '', tagInput: '', project_id: null },
+    inspForCreateProject: null,  // 当前"创建项目"操作绑定的灵感
+    inspForFuse: null,           // 当前"融合"操作绑定的灵感
+    createFromInspForm: { title: '', chapter_word_count: 3, genre: '其他', description: '' },
+    fuseForm: { project_id: '', target: 'outline', chapterOrder: null, note: '' },
+    chapterSelectOptions: [],  // 融合时可选的章节 order 列表
+    fuseTargetChapterId: null,  // 用于 chapter:N 格式
+
+    // ─── 题材（多选 + 自定义） ───
+    genreList: [],
+
 
     // 创意问卷
     activeQuestionnaire: null,
@@ -161,6 +192,9 @@ function app() {
         this.showSetupWizard = data.needs_setup;
         if (!data.needs_setup) {
           await this.loadProjects();
+          // 加载全局数据（不阻塞 wizard 恢复）
+          this.loadGenres();
+          this.loadInspirationCount();
           // 检查是否有进行中的 workflow run，有则自动恢复 wizard
           await this._rehydrateBootstrapIfNeeded();
         } else {
@@ -436,6 +470,7 @@ function app() {
         title: '',
         chapter_word_count: 3,
         genre: '',
+        genres: [],
         description: '',
         theme: '',
         tone: '',
@@ -447,7 +482,33 @@ function app() {
         supporting: '',
         notes: '',
       };
+      this.newGenreInput = '';
       this.showCreateProjectModal = true;
+    },
+
+    confirmCloseCreateProject() {
+      const f = this.newProjectForm;
+      const hasInput = (f.title || '').trim() || (f.description || '').trim() || (f.genre || '').trim();
+      // 简单提示：仅有 4 必填之一有内容才二次确认
+      if (hasInput) {
+        if (!confirm('关闭后已输入的信息将丢失，确定要关闭吗？')) return;
+      }
+      this.showCreateProjectModal = false;
+    },
+
+    confirmCloseMissingFields() {
+      // 检查用户是否已开始填写
+      let hasInput = false;
+      for (const q of this.missingQuestionnaire) {
+        const el = document.getElementById('miss-' + q.id);
+        if (el && (el.value || '').trim()) { hasInput = true; break; }
+      }
+      if (hasInput) {
+        if (!confirm('关闭后已填写的内容将丢失，确定要关闭吗？')) return;
+      }
+      this.showMissingFieldsModal = false;
+      this.missingFields = [];
+      this.missingQuestionnaire = [];
     },
 
     _stripEmptyFields(obj) {
@@ -466,7 +527,8 @@ function app() {
       const missing = [];
       if (!(f.title || '').trim()) missing.push('title');
       if (!f.chapter_word_count) missing.push('chapter_word_count');
-      if (!(f.genre || '').trim()) missing.push('genre');
+      // 题材：多选数组，至少 1 个
+      if (!Array.isArray(f.genres) || f.genres.length === 0) missing.push('genre');
       if (!(f.description || '').trim()) missing.push('description');
       if (missing.length > 0) {
         // 前端检测到缺失，不发请求，直接弹补全 modal
@@ -482,8 +544,10 @@ function app() {
         return;
       }
 
+      // 把 genres 数组作为 genre 字段（兼容后端 list/str 双重支持）
       const payload = this._stripEmptyFields({
         ...f,
+        genre: f.genres,  // 数组形式（后端会 join）
         auto_commit: autoCommit,
         async_mode: true,
       });
@@ -638,6 +702,25 @@ function app() {
             runId: data.run_id,
             kind: 'partial_failed',
             message: `AI 补全部分失败（${failedCount} 个 stage）。可重跑失败项或继续。`,
+          };
+          return;
+        }
+
+        // 5) cancelled → 可能是服务重启/崩溃导致
+        if (status === 'cancelled') {
+          // 检查 stage_results 里的错误是否含"服务重启"
+          const errMsgs = Object.values(data.stage_results || {})
+            .map((s) => (typeof s === 'object' ? (s.error || '') : ''))
+            .join(' ');
+          const isAborted = /服务重启|重启|Restart|aborted|orphan/i.test(errMsgs);
+          this.bootstrapBanner = {
+            visible: true,
+            projectId,
+            runId: data.run_id,
+            kind: isAborted ? 'aborted' : 'cancelled',
+            message: isAborted
+              ? 'AI 补全因服务重启被中断，可点击重新启动。'
+              : 'AI 补全任务已被取消。',
           };
           return;
         }
@@ -814,6 +897,307 @@ function app() {
       ]);
       // 检查是否需要显示 AI 补全 banner
       this._maybeShowBootstrapBanner(project.id);
+    },
+
+    backToHome() {
+      // 关闭 banner（避免在 home 页面也显示）
+      this.bootstrapBanner.visible = false;
+      this.currentProject = null;
+      this.currentChapter = null;
+      this.activePanel = 'writing';
+      this.chapters = [];
+      this.characters = [];
+      this.themes = [];
+      this.foreshadowings = [];
+      this.characterArcs = [];
+      this.characterRelations = [];
+      this.projectOutline = null;
+      this.chapterOutlines = [];
+      this.consistencyReport = null;
+      // 刷新项目列表（确保最新）
+      this.loadProjects();
+    },
+
+    // ─── 灵感主界面 ───
+
+    async openInspirationHub() {
+      this.showInspirationHub = true;
+      this.inspLoading = true;
+      await Promise.all([
+        this.loadInspirationHub(),
+        this.loadInspirationTags(),
+        this.loadInspirationSources(),
+        this.loadInspirationCount(),
+      ]);
+      this.inspLoading = false;
+    },
+
+    async loadInspirationHub() {
+      try {
+        const params = new URLSearchParams();
+        if (this.inspSearch.q) params.set('q', this.inspSearch.q);
+        if (this.inspSearch.tag) params.set('tag', this.inspSearch.tag);
+        if (this.inspSearch.source) params.set('source', this.inspSearch.source);
+        if (this.inspSearch.includeConsumed) params.set('include_consumed', 'true');
+        // 范围
+        if (this.inspSearch.projectScope === 'global') {
+          params.set('project_id', '0');
+        } else if (this.inspSearch.projectScope === 'current' && this.currentProject) {
+          params.set('project_id', String(this.currentProject.id));
+        } else if (this.inspSearch.projectScope === 'all') {
+          params.set('project_id', '-1');
+        }
+        const res = await fetch('/api/inspirations?' + params);
+        if (res.ok) this.inspirations = await res.json();
+      } catch (e) { console.error('loadInspirationHub:', e); }
+    },
+
+    async loadInspirationTags() {
+      try {
+        // 全局标签云（不指定 project_id）
+        const res = await fetch('/api/inspirations/tags');
+        if (res.ok) this.inspTagCloud = await res.json();
+      } catch (e) {}
+    },
+
+    async loadInspirationSources() {
+      try {
+        const res = await fetch('/api/inspirations/sources');
+        if (res.ok) this.inspSources = await res.json();
+      } catch (e) {}
+    },
+
+    async loadInspirationCount() {
+      try {
+        const res = await fetch('/api/inspirations?project_id=0');
+        if (res.ok) {
+          const list = await res.json();
+          this.inspirationCount = list.length;
+        }
+      } catch (e) {}
+    },
+
+    openInspirationEditor(insp = null) {
+      if (insp) {
+        this.editingInspiration = {
+          id: insp.id,
+          title: insp.title || '',
+          content: insp.content || '',
+          source: insp.source || '',
+          tagInput: (insp.tags || []).join(', '),
+          project_id: insp.project_id || null,
+        };
+      } else {
+        this.editingInspiration = {
+          id: null,
+          title: '',
+          content: '',
+          source: '',
+          tagInput: '',
+          project_id: null,
+        };
+      }
+      this.showInspirationEditor = true;
+    },
+
+    async saveInspirationFromEditor() {
+      const e = this.editingInspiration;
+      if (!e.content || !e.content.trim()) {
+        alert('内容不能为空');
+        return;
+      }
+      const tags = (e.tagInput || '').split(',').map((t) => t.trim()).filter(Boolean);
+      const payload = {
+        title: e.title,
+        content: e.content,
+        source: e.source,
+        tags,
+        project_id: e.project_id,
+      };
+      try {
+        const url = e.id ? `/api/inspirations/${e.id}` : '/api/inspirations';
+        const method = e.id ? 'PUT' : 'POST';
+        const res = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (res.ok) {
+          this.showInspirationEditor = false;
+          await this.openInspirationHub();
+        } else {
+          alert('保存失败: ' + res.status);
+        }
+      } catch (e) { alert('保存失败: ' + e.message); }
+    },
+
+    async deleteInspirationById(inspId) {
+      if (!confirm('确定删除此灵感？此操作不可撤销。')) return;
+      try {
+        const res = await fetch(`/api/inspirations/${inspId}`, { method: 'DELETE' });
+        if (res.ok) await this.openInspirationHub();
+      } catch (e) { alert('删除失败: ' + e.message); }
+    },
+
+    // ─── 以灵感创建项目 ───
+
+    openCreateProjectFromInspiration(insp) {
+      this.inspForCreateProject = insp;
+      this.createFromInspForm = {
+        title: insp.title || `灵感 #${insp.id} 衍生项目`,
+        chapter_word_count: 3,
+        genre: insp.tags?.[0] || '其他',
+        description: insp.content.substring(0, 200),
+      };
+      this.showCreateFromInspiration = true;
+    },
+
+    async submitCreateProjectFromInspiration() {
+      const insp = this.inspForCreateProject;
+      if (!insp) return;
+      const f = this.createFromInspForm;
+      try {
+        const res = await fetch(`/api/inspirations/${insp.id}/create-project`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: f.title,
+            chapter_word_count: f.chapter_word_count,
+            genre: f.genre,
+            description: f.description,
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          this.showCreateFromInspiration = false;
+          this.showInspirationHub = false;
+          alert(`已创建项目《${f.title}》！开始引导补全...`);
+          // 跳转到项目 + 打开 wizard
+          if (data.run_id) {
+            this.openBootstrapWizard(data.project_id, data.run_id);
+          } else {
+            // 兜底：直接进项目
+            await this.loadProjects();
+            const proj = this.projects.find((p) => p.id === data.project_id);
+            if (proj) await this.openProject(proj);
+          }
+        } else {
+          const err = await res.json().catch(() => ({}));
+          alert('创建失败: ' + (err.detail || res.status));
+        }
+      } catch (e) { alert('创建失败: ' + e.message); }
+    },
+
+    // ─── 融合灵感到项目 ───
+
+    async openFuseInspiration(insp) {
+      this.inspForFuse = insp;
+      this.fuseForm = { project_id: this.currentProject?.id || '', target: 'outline', chapterOrder: null, note: '' };
+      // 准备章节下拉选项
+      this.chapterSelectOptions = (this.chapters || []).map((c) => c.order);
+      this.showFuseInspiration = true;
+    },
+
+    async submitFuseInspiration() {
+      const insp = this.inspForFuse;
+      if (!insp) return;
+      const f = this.fuseForm;
+      if (!f.project_id) { alert('请选择目标项目'); return; }
+      // 把 chapter + chapterOrder 拼成 target
+      let target = f.target;
+      if ((f.target === 'chapter' || f.target === 'chapter_content') && f.chapterOrder != null) {
+        target = `${f.target === 'chapter' ? 'chapter' : 'chapter_content'}:${f.chapterOrder}`;
+      }
+      try {
+        const res = await fetch(`/api/inspirations/${insp.id}/fuse`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            project_id: parseInt(f.project_id),
+            target,
+            note: f.note,
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          this.showFuseInspiration = false;
+          this.showInspirationHub = false;
+          alert(`✅ ${data.message}\n（灵感已标记为"已融合"）`);
+          // 重新打开 hub 看到最新状态
+          await this.openInspirationHub();
+          // 如果融合到当前项目，刷新项目数据
+          if (this.currentProject && data.project_id === this.currentProject.id) {
+            await this.openProject(this.currentProject);
+          }
+        } else {
+          const err = await res.json().catch(() => ({}));
+          alert('融合失败: ' + (err.detail || res.status));
+        }
+      } catch (e) { alert('融合失败: ' + e.message); }
+    },
+
+    // ─── 题材 ───
+
+    async loadGenres() {
+      try {
+        const res = await fetch('/api/genres');
+        if (res.ok) this.genreList = await res.json();
+      } catch (e) {}
+    },
+
+    async addCustomGenre(name) {
+      name = (name || '').trim();
+      if (!name) return null;
+      // 已经在列表里
+      if (this.genreList.find((g) => g.name === name)) return null;
+      try {
+        const res = await fetch('/api/genres', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+        if (res.ok) {
+          const g = await res.json();
+          this.genreList.push(g);
+          return g;
+        }
+      } catch (e) {}
+      return null;
+    },
+
+    addGenreToNewProject(evt) {
+      const name = evt.target.value;
+      if (!name) return;
+      if (!this.newProjectForm.genres.includes(name)) {
+        this.newProjectForm.genres.push(name);
+      }
+      evt.target.value = '';
+    },
+
+    async submitNewGenre() {
+      const name = (this.newGenreInput || '').trim();
+      if (!name) return;
+      const g = await this.addCustomGenre(name);
+      if (g) {
+        // 自动加到当前表单的已选
+        if (!this.newProjectForm.genres.includes(g.name)) {
+          this.newProjectForm.genres.push(g.name);
+        }
+        this.newGenreInput = '';
+      } else {
+        alert('题材已存在或添加失败');
+      }
+    },
+
+    // ─── 旧版灵感 API 兼容（项目内右侧面板还引用） ───
+
+    async saveInspiration() {
+      // 兼容旧版（项目内右侧面板用）→ 跳到新版 hub
+      this.openInspirationHub();
+    },
+
+    async deleteInspiration(inspId) {
+      return this.deleteInspirationById(inspId);
     },
 
     async saveProjectSettings() {
@@ -1389,4 +1773,13 @@ function app() {
     },
   };
 
+}
+
+// Alpine.data() 注册（比 x-data="app()" 字符串求值更可靠）
+if (window.Alpine) {
+  window.Alpine.data('cozywriterApp', app);
+} else {
+  document.addEventListener('alpine:init', () => {
+    window.Alpine.data('cozywriterApp', app);
+  });
 }
