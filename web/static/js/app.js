@@ -935,15 +935,24 @@ function app() {
         const allDone = statuses.every((s) =>
           ['ok', 'user_filled', 'skipped', 'failed'].includes(s)
         );
+        const failedCount = wiz.stages.filter((s) => s.status === 'failed').length;
         if (data.status === 'committed') {
           wiz.status = 'committed';
           wiz.completedAt = Date.now();
           this._stopBootstrapPolling();
-        } else if (data.status === 'failed') {
+        } else if (data.status === 'failed' && failedCount > 0) {
+          // run.status='failed' 且实际有 stage failed → 真正的失败
           wiz.status = 'failed';
           wiz.errorMsg = '有 stage 执行失败';
           this._stopBootstrapPolling();
         } else if (allDone && data.status === 'completed') {
+          wiz.status = 'completed';
+          wiz.completedAt = Date.now();
+          this._stopBootstrapPolling();
+        } else if (allDone && failedCount === 0) {
+          // 透中 _maybeShowBootstrapBanner 同款兑底：run.status='partial'/'failed'
+          // 但所有 stage 实际都 ok/user_filled/skipped → 降级为 completed，
+          // 交谁总不能堵住 commit 按钮
           wiz.status = 'completed';
           wiz.completedAt = Date.now();
           this._stopBootstrapPolling();
