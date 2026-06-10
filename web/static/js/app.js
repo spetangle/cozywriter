@@ -1142,6 +1142,7 @@ function app() {
       try {
         const res = await fetch(`/api/workflow/run/${wiz.runId}/commit`, {
           method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
         });
         const data = await res.json();
         if (data.status === 'committed' || data.status === 'already_committed') {
@@ -1152,6 +1153,17 @@ function app() {
           if (this.currentProject) {
             await this.openProject(this.currentProject);
           }
+          // 修复反馈 bug：之前提交成功后没有任何提示，用户会以为是卡住
+          const summary = data.summary || {};
+          const msg = '✅ AI 补全已成功写入数据库！\n\n' +
+            `主题: ${summary.themes || 0} 条\n` +
+            `世界观: ${summary.world_entries || 0} 条\n` +
+            `角色: ${summary.characters || 0} 个\n` +
+            `角色关系: ${summary.relations || 0} 条\n` +
+            `角色弧光: ${summary.arcs || 0} 条\n` +
+            `伏笔: ${summary.foreshadowings || 0} 条\n\n` +
+            '点\u786e定后可进入写作台开始创作！';
+          alert(msg);
         } else {
           alert('提交失败: ' + (data.error || 'unknown'));
         }

@@ -13,7 +13,9 @@ router = APIRouter(prefix="/api", tags=["章节"])
 # ─── Schemas ───
 
 class ChapterCreate(BaseModel):
-    project_id: int
+    # 修复：project_id 改为可选（从 URL 路径中取，避免 422）
+    # 之前这里必填， 但前端只发 {title, order}，后端验证 project_id 缺失 → 422
+    project_id: int | None = None
     title: str
     order: int = 0
     content: str = ""
