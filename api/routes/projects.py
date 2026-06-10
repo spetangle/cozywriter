@@ -81,7 +81,6 @@ class ProjectCreate(BaseModel):
     notes: str | None = None
     # 行为开关
     auto_commit: bool = Field(default=True, description="stage 全过后是否自动入库")
-    async_mode: bool = Field(default=True, description="是否异步执行 workflow")
 
 
 class ProjectUpdate(BaseModel):
@@ -219,47 +218,26 @@ async def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(run)
 
-    # 6) 提交执行
+    # 6) 提交执行（异步：提交到线程池，立即返回 run_id）
     user_input = data.model_dump()
-    if data.async_mode:
-        from api.tasks import submit_llm_task
-        submit_llm_task(
-            task_type="bootstrap",
-            llm_call_fn=_run_bootstrap_task,
-            project_id=project.id,
-            description=f"项目引导补全 [{data.title}]",
-            run_id=run.id,
-            user_input=user_input,
-        )
-        return BootstrapResponse(
-            project_id=project.id,
-            run_id=run.id,
-            status="submitted",
-            stages=[BootstrapStageInfo(**s) for s in stages],
-            filled_required=REQUIRED_FIELDS,
-            filled_optional=list(user_filled.keys()),
-            llm_filled_count=sum(1 for s in stages if s["needs_llm"]),
-        )
-    else:
-        # 同步模式
-        from llm.workflow import run_bootstrap_sync
-        result = run_bootstrap_sync(run.id, user_input, db=db)
-        committed = False
-        if result["status"] == "completed" and data.auto_commit:
-            from llm.workflow import commit_bootstrap
-            commit_result = commit_bootstrap(project.id, run.id, db)
-            committed = commit_result["status"] == "committed"
-        return BootstrapResponse(
-            project_id=project.id,
-            run_id=run.id,
-            status="committed" if committed else ("completed" if result["status"] == "completed" else result["status"]),
-            stages=[BootstrapStageInfo(**_merge_stage_status(s, run.stage_results or {})) for s in stages],
-            filled_required=REQUIRED_FIELDS,
-            filled_optional=list(user_filled.keys()),
-            llm_filled_count=sum(1 for s in stages if s["needs_llm"]),
-            auto_committed=committed,
-            error=result.get("error") if result["status"] == "failed" else None,
-        )
+    from api.tasks import submit_llm_task
+    submit_llm_task(
+        task_type="bootstrap",
+        llm_call_fn=_run_bootstrap_task,
+        project_id=project.id,
+        description=f"项目引导补全 [{data.title}]",
+        run_id=run.id,
+        user_input=user_input,
+    )
+    return BootstrapResponse(
+        project_id=project.id,
+        run_id=run.id,
+        status="submitted",
+        stages=[BootstrapStageInfo(**s) for s in stages],
+        filled_required=REQUIRED_FIELDS,
+        filled_optional=list(user_filled.keys()),
+        llm_filled_count=sum(1 for s in stages if s["needs_llm"]),
+    )
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
@@ -326,7 +304,12 @@ def _check_required(data: ProjectCreate) -> list[str]:
         missing.append("title")
     if not (data.chapter_word_count and data.chapter_word_count > 0):
         missing.append("chapter_word_count")
-    if not (data.genre or "").strip():
+    # genre 支持 str 或 list[str]（多选题材）
+    if isinstance(data.genre, list):
+        genre_str = " / ".join(str(g) for g in data.genre)
+    else:
+        genre_str = str(data.genre or "")
+    if not genre_str.strip():
         missing.append("genre")
     if not (data.description or "").strip():
         missing.append("description")

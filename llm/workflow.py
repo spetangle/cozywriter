@@ -7,8 +7,7 @@ LLM 补全分多个 stage，按依赖关系调度：
   Stage 2A/B/C  创意外延（3 子 stage 并行，按需跳过）
   Stage 3A/B/C/D  角色体系
   Stage 4A/B  大纲 + 伏笔
-  Stage 5    章节细纲
-  Stage 6    汇总入库（事务写入 + RAG 索引）
+  Stage 5    汇总入库（事务写入 + RAG 索引）
 
 每个 stage 一次 LLM 调用，JSON 输出，失败可重跑。
 """
@@ -116,15 +115,6 @@ STAGE_DEFS = {
         "outputs": ["foreshadowings"],
         "max_tokens": 2048,
         "temperature": 0.5,
-    },
-    "stage_5_chapters": {
-        "name": "章节细纲",
-        "description": "每章 ChapterOutline + Chapter 记录",
-        "needs_llm": True,
-        "depends_on": ["stage_4a_outline", "stage_4b_foreshadow"],
-        "outputs": ["chapter_outlines"],
-        "max_tokens": 4096,
-        "temperature": 0.6,
     },
 }
 
@@ -345,42 +335,6 @@ STAGE_PROMPTS = {
             ]
         },
     },
-    "stage_5_chapters": {
-        "task": (
-            "为整本小说生成每章的细纲。\n"
-            "要求：\n"
-            "1. 总章数 = project.total_chapters（参见 locked_inputs）\n"
-            "2. 每章字数参考 = chapter_word_count * 1000，min = 0.7x, max = 1.3x\n"
-            "3. chapter_position：开局/发展/高潮/回落/结局\n"
-            "4. pacing：铺垫/推进/高潮/回落/平稳\n"
-            "5. key_content：核心内容（1-2 句）\n"
-            "6. plot_advance：剧情推进（1 句）\n"
-            "7. foreshadow_notes：埋设/回收伏笔说明\n"
-            "8. conflicts：冲突列表（每项 {type, desc}）\n"
-            "9. highlights：看点列表（2-3 个）\n"
-            "10. notes：备注（可选）\n"
-        ),
-        "json_schema": {
-            "chapters": [
-                {
-                    "order": 1,
-                    "title": "第一章 xxx",
-                    "chapter_position": "开局",
-                    "act_name": "第一幕",
-                    "pacing": "铺垫",
-                    "key_content": "...",
-                    "plot_advance": "...",
-                    "foreshadow_notes": "...",
-                    "conflicts": [{"type": "...", "desc": "..."}],
-                    "highlights": ["..."],
-                    "target_word_count": 3000,
-                    "min_word_count": 2100,
-                    "max_word_count": 3900,
-                    "notes": "...",
-                }
-            ]
-        },
-    },
 }
 
 
@@ -492,6 +446,8 @@ def run_bootstrap_sync(run_id: int, user_input: dict, db=None) -> dict:
                 stage_results[stage_id] = {
                     "status": "failed",
                     "error": f"Dependency not satisfied: {stage['depends_on']}",
+                    "started_at": time.time(),  # 占位，前端能稳定算"已耗时"
+                    "completed_at": time.time(),
                 }
                 llm_logs.append({
                     "stage": stage_id,
@@ -540,6 +496,7 @@ def run_bootstrap_sync(run_id: int, user_input: dict, db=None) -> dict:
                     locked=locked,
                     user_filled=user_filled,
                     prev_outputs=prev_outputs,
+                    db=db,
                 )
 
                 stage_results[stage_id] = {
@@ -558,7 +515,14 @@ def run_bootstrap_sync(run_id: int, user_input: dict, db=None) -> dict:
 
             except Exception as e:
                 logger.error(f"[Bootstrap] stage {stage_id} failed: {e}")
-                stage_results[stage_id] = {"status": "failed", "error": str(e)}
+                # 保留之前的 started_at（如果有），避免覆盖已记录的起始时间
+                prev = stage_results.get(stage_id) or {}
+                stage_results[stage_id] = {
+                    "status": "failed",
+                    "error": str(e),
+                    "started_at": prev.get("started_at") or time.time(),
+                    "completed_at": time.time(),  # 让前端停止计时
+                }
                 llm_logs.append({
                     "stage": stage_id,
                     "ts": time.time(),
@@ -598,7 +562,7 @@ def run_bootstrap_sync(run_id: int, user_input: dict, db=None) -> dict:
 
 
 def _run_single_stage(stage_id: str, locked: dict, user_filled: dict,
-                      prev_outputs: dict) -> dict:
+                      prev_outputs: dict, db=None) -> dict:
     """单个 stage 的 LLM 调用 + JSON 解析"""
     defn = STAGE_DEFS[stage_id]
     prompt_def = STAGE_PROMPTS[stage_id]
@@ -617,35 +581,134 @@ def _run_single_stage(stage_id: str, locked: dict, user_filled: dict,
         f"只输出 JSON，不要任何解释。"
     )
 
-    llm = LLMFactory.create()
+    llm = LLMFactory.create(db=db)
     response = llm.generate(
         prompt=user_prompt,
         system_prompt=system_prompt,
         max_tokens=role.max_tokens,
         temperature=role.temperature,
+        task_type=stage_id,  # 入 log 时按 stage 分类（stage_1_base / stage_2a_theme / ...）
     )
 
     return _parse_json(response)
 
 
 def _parse_json(text: str) -> dict:
-    """从 LLM 响应中解析 JSON（容错：处理 markdown 包装、尾随文本）"""
+    """从 LLM 响应中解析 JSON（超级容错，专门对付 LLM 输出的非标 JSON）
+
+    容错点（按顺序尝试，任意一步成功就返回）：
+      1. 去掉 markdown ```json ``` 包装
+      2. 截取首尾 {...} 范围
+      3. 第一次尝试 strict mode（标准 JSON）—— 理想路径
+      4. strict=False（允许 string value 里有 raw 换行符）
+      5. 把 raw 控制字符（0x00-0x08 / 0x0B-0x1F）替换为空格后再试
+      6. 修复 trailing comma（"a": 1, "b": 2, } → }）
+      7. 修复中文逗号（“” 间的“，”被用作“分隔”）【中常出现】
+      8. 尝试 json_repair 库（专门修复 LLM 输出，能处理绝大多数异常）
+      9. 实在不行 → 抛出原始错误，调用方记录完整原始响应
+
+    设计哲学：LLM 输出的 JSON 错误千奇百怪，宁可多写几层回退，
+    也不要在生产环境上因为一个逗号问题让 30+ 块钱的 LLM 调用全部 failed。
+    """
+    original = text
     text = text.strip()
 
-    # 去掉 markdown 代码块
+    # 1) 去掉 markdown 代码块
     if text.startswith("```"):
-        # 取第一个代码块
         m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
         if m:
             text = m.group(1).strip()
 
-    # 找首个 { 和最后一个 } 的范围
+    # 2) 截取首尾 {...} 范围（避免 LLM 前后加说明文本）
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
         text = text[start:end + 1]
 
-    return json.loads(text)
+    # 3) 第一次：标准 strict 模式（理想路径）
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 4) 第二次：strict=False（允许 string value 里有 raw 换行符）
+    try:
+        return json.loads(text, strict=False)
+    except json.JSONDecodeError:
+        pass
+
+    # 5) 第三次：把 raw 控制字符（除 \t\n\r 外）替换为空格
+    cleaned = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", " ", text)
+    try:
+        return json.loads(cleaned, strict=False)
+    except json.JSONDecodeError:
+        pass
+
+    # 6) 第四次：修复 trailing comma（对象 / 数组中的多余逗号）
+    #    LLM 经常在最后一个元素后还带个 ","
+    no_trail = re.sub(r",(\s*[}\]])", r"\1", cleaned)
+    try:
+        return json.loads(no_trail, strict=False)
+    except json.JSONDecodeError:
+        pass
+
+    # 7) 第五次：修复中文逗号（"x": "a"，"y": "b" → "x": "a", "y": "b"）
+    #    中国 LLM（如 MiniMax / Qwen）偶尔会在多行 JSON 之间用全角逗号
+    #    策略：只替换“看起来像是 key-value 分隔”的中文逗号
+    #    判断方法："} ：" 后跟中文逗号 → 变 ASCII 逗号
+    #    这里是保守修正，避免误伤 value 中本来含的中文逗号
+    zh_comma_fixed = re.sub(r"([\}\]\"\'])\s*[\uff0c]\s*(\"[\w\-_]+\"\s*:)", r"\1, \2", no_trail)
+    try:
+        return json.loads(zh_comma_fixed, strict=False)
+    except json.JSONDecodeError:
+        pass
+
+    # 8) 第六次：json_repair 库（专为修复 LLM 输出的 JSON，能处理大量边缘情况）
+    #    包括：未闭合引号 / 缺失 key 引号 / 单引号 / 注释 / Python 布尔 None / 中文标点
+    try:
+        import json_repair
+        repaired = json_repair.repair_json(text, return_objects=True)
+        if repaired is not None:
+            # json_repair 在某些边界情况会返回 list/None / 原始字符串，统一保证为 dict
+            if isinstance(repaired, dict):
+                return repaired
+            # 如果 repair 返回了字符串，再试一次
+            if isinstance(repaired, str):
+                try:
+                    return json.loads(repaired, strict=False)
+                except json.JSONDecodeError:
+                    pass
+    except ImportError:
+        # 库未安装，静默跳过（之前几层回退可能已经搞定）
+        pass
+    except Exception as e:
+        # json_repair 本身出错（极罕见），不影响主流程
+        pass
+
+    # 9) 实在救不回来：记录完整原始响应 + 各种修复后的中间状态（调试用）
+    #    注意：使用 logger.warning 而非 logger.error —— 这个错误在 stage 那里还会记录一次
+    try:
+        from logger import logger
+        # 截断避免日志爆炸（保留前后片段）
+        orig_preview = original[:300] + ("..." if len(original) > 300 else "")
+        logger.warning(
+            f"[JSON-parse] 全部回退均失败，原始响应（后 600 字符）:\n"
+            f"  ...{original[-600:] if len(original) > 600 else original}"
+        )
+        # 同时把可能的“最优修复版”也记录下来，方便人工诊断
+        logger.warning(
+            f"[JSON-parse] 原文长度={len(original)}，含中文逗号={('，' in original)}, "
+            f"含尾随逗号={bool(re.search(r',\\s*[}\\]]', original))}, "
+            f"含 markdown 包装={original.strip().startswith('```')}"
+        )
+    except Exception:
+        pass
+
+    # 抛出最后一个错误（让上层 stage_xxx 标 failed 并继续重试机制）
+    raise json.JSONDecodeError(
+        "All 7 parse strategies failed. See [JSON-parse] warnings for original text.",
+        text, 0,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -821,7 +884,7 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
             db.add(outline)
 
         # ── Stage 4B: Foreshadowing[] ──
-        foreshadow_map = {}  # title → id（供 Stage 5 引用）
+        foreshadow_map = {}  # title → id
         if results.get("stage_4b_foreshadow", {}).get("status") == "ok":
             fores = results["stage_4b_foreshadow"]["data"].get("foreshadowings", [])
             for fs in fores:
@@ -837,44 +900,6 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
                 if fs.get("title"):
                     foreshadow_map[fs["title"]] = fore.id
 
-        # ── Stage 5: Chapter + ChapterOutline ──
-        if results.get("stage_5_chapters", {}).get("status") == "ok":
-            chapters = results["stage_5_chapters"]["data"].get("chapters", [])
-            for ch in chapters:
-                order = ch.get("order", 0)
-                chapter = Chapter(
-                    project_id=project_id,
-                    title=ch.get("title", f"第{order}章"),
-                    order=order,
-                    content="",
-                    word_count=0,
-                )
-                db.add(chapter)
-                db.flush()
-                # 解析 foreshadow_notes 中的伏笔标题 → id
-                fs_ids = _resolve_foreshadow_ids(
-                    ch.get("foreshadow_notes", ""),
-                    foreshadow_map,
-                )
-                outline = ChapterOutline(
-                    chapter_id=chapter.id,
-                    chapter_position=ch.get("chapter_position", ""),
-                    act_name=ch.get("act_name", ""),
-                    key_content=ch.get("key_content", ""),
-                    plot_advance=ch.get("plot_advance", ""),
-                    foreshadow_ids=fs_ids,
-                    foreshadow_notes=ch.get("foreshadow_notes", ""),
-                    conflicts=ch.get("conflicts", []),
-                    highlights=ch.get("highlights", []),
-                    target_word_count=ch.get("target_word_count", 0),
-                    min_word_count=ch.get("min_word_count", 0),
-                    max_word_count=ch.get("max_word_count", 0),
-                    pacing=ch.get("pacing", "平稳"),
-                    character_ids=[],
-                    status="planning",
-                    notes=ch.get("notes", ""),
-                )
-                db.add(outline)
 
         run.status = "committed"
         db.commit()
@@ -963,6 +988,53 @@ def _index_to_rag(project_id: int, db):
 # 单 stage 重跑
 # ═══════════════════════════════════════════════════════════════
 
+def _rebuild_user_input_from_project(project_id: int, db) -> dict:
+    """
+    老 run 兼容：_meta.user_input 缺失时，从 Project 表反向重建。
+
+    老 run 是在 rerun_stage 实现之前创建的，bootstrap 启动时没把 user_input
+    存进 stage_results._meta，导致现在点重跑拿不到原始 user_input。
+
+    重建策略：
+      - title              ← Project.title
+      - description        ← Project.description
+      - chapter_word_count ← Project.target_word_count
+      - genre              ← ""（Project 模型没这个字段，只能空缺，
+                                 选填字段如 theme/tone/style 也都空缺）
+      - 8 选填             ← 全部空（无法从 Project 表还原）
+
+    返回：dict（4 必填部分填好，选填空）→ 可直接喂给 locked/user_filled。
+         任何字段重建失败（如 project 不存在）→ 返回空 dict。
+    """
+    if not project_id:
+        return {}
+    try:
+        from storage.models.project import Project
+
+        proj = db.query(Project).filter(Project.id == project_id).first()
+        if not proj:
+            return {}
+        return {
+            "title": proj.title or "",
+            "description": proj.description or "",
+            "chapter_word_count": proj.target_word_count or 0,
+            "genre": "",  # Project 模型无此字段，重跑时 LLM 上下文会缺 genre（可接受）
+            # 8 选填：Project 也没存这些，无法还原，留空（user_filled 全是 falsy 不会影响）
+            "theme": "",
+            "tone": "",
+            "style": "",
+            "pacing": "",
+            "premise": "",
+            "protagonist": "",
+            "antagonist": "",
+            "supporting": "",
+            "notes": "",
+        }
+    except Exception as e:
+        logger.warning(f"[RebuildUserInput] failed for project {project_id}: {e}")
+        return {}
+
+
 def rerun_stage(run_id: int, stage_id: str, db) -> dict:
     """
     重新跑某个 stage（覆盖之前的结果）
@@ -991,7 +1063,24 @@ def rerun_stage(run_id: int, stage_id: str, db) -> dict:
     meta = stage_results.get("_meta", {})
     user_input = meta.get("user_input", {})
     if not user_input:
-        return {"status": "failed", "error": "user_input not found in run._meta (run predates rerun support)"}
+        # 老 run 兼容：_meta.user_input 缺失时，从 Project 表反向重建
+        # （老的 run 是在 rerun_stage 实现之前创建的，_meta 里没存 user_input）
+        user_input = _rebuild_user_input_from_project(project_id, db)
+        if not user_input:
+            return {
+                "status": "failed",
+                "error": "user_input not found in run._meta and project is missing "
+                         "(run predates rerun support)",
+            }
+        # 顺手把反推出来的 user_input 写回 _meta，下次直接命中
+        stage_results["_meta"] = {
+            **meta,
+            "user_input": user_input,
+            "user_input_source": "rebuilt_from_project",
+            "user_input_rebuilt_at": time.time(),
+        }
+        run.stage_results = stage_results
+        db.commit()
 
     locked = {
         "title": user_input.get("title", ""),
@@ -1016,13 +1105,232 @@ def rerun_stage(run_id: int, stage_id: str, db) -> dict:
             locked=locked,
             user_filled=user_filled,
             prev_outputs=prev_outputs,
+            db=db,
         )
-        stage_results[stage_id] = {"status": "ok", "data": result}
+        stage_results[stage_id] = {"status": "ok", "data": result, "completed_at": time.time()}
         run.stage_results = stage_results
         db.commit()
         return {"status": "ok", "stage_result": stage_results[stage_id]}
     except Exception as e:
-        stage_results[stage_id] = {"status": "failed", "error": str(e)}
+        stage_results[stage_id] = {
+            "status": "failed",
+            "error": str(e),
+            "completed_at": time.time(),
+        }
         run.stage_results = stage_results
         db.commit()
         return {"status": "failed", "error": str(e)}
+
+
+def rerun_all_failed_stages(run_id: int, db, only_failed: bool = True, force_all: bool = False) -> dict:
+    """
+    重跑 run 中所有 stage（按依赖顺序串行执行）。
+
+    Args:
+        run_id: WorkflowRun.id
+        db: SQLAlchemy Session
+        only_failed: force_all=False 时有效 —— 现已废弃，由 force_all 接管语义
+        force_all: True=重跑全部 stage（包括已成功的）；False=只重跑失败/未完成的
+
+    Returns:
+        {
+            "status": "ok" | "failed",
+            "rerun_stages": [stage_id, ...],   # 重跑了的
+            "still_failed": [stage_id, ...],   # 重跑仍失败的
+            "skipped_no_deps": [stage_id, ...] # 跳过（依赖未就绪）
+            "error": "..." (出错时)
+        }
+    """
+    from storage.models.workflow import WorkflowRun
+    from storage.database import SessionLocal
+
+    should_close = False
+    if db is None:
+        db = SessionLocal()
+        should_close = True
+
+    try:
+        run = db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
+        if not run:
+            return {"status": "failed", "error": "Run not found"}
+
+        stage_results = dict(run.stage_results or {})
+        meta = stage_results.get("_meta", {})
+        user_input = meta.get("user_input", {})
+        if not user_input:
+            # 老 run 兼容：_meta.user_input 缺失时，从 Project 表反向重建
+            user_input = _rebuild_user_input_from_project(run.project_id, db)
+            if not user_input:
+                return {
+                    "status": "failed",
+                    "error": "user_input not found in run._meta and project is missing "
+                             "(run predates rerun support)",
+                }
+            # 写回 _meta，下次直接命中
+            stage_results["_meta"] = {
+                **meta,
+                "user_input": user_input,
+                "user_input_source": "rebuilt_from_project",
+                "user_input_rebuilt_at": time.time(),
+            }
+            run.stage_results = stage_results
+            db.commit()
+
+        locked = {
+            "title": user_input.get("title", ""),
+            "chapter_word_count": user_input.get("chapter_word_count", 0),
+            "genre": user_input.get("genre", ""),
+            "description": user_input.get("description", ""),
+        }
+        user_filled = {
+            k: v for k, v in user_input.items()
+            if k not in locked and v
+        }
+
+        # 待重跑的 stage（按 stages 定义的顺序遍历，依赖关系保证上游先 OK）
+        # 这里依赖 run.stages 的顺序（plan_bootstrap_stages 已按拓扑排序）
+        # 关于 force_all 的语义：
+        #   True  → 选所有非 user_filled/skipped 的 stage（包括已成功的也重跑）
+        #           （用户场景：想完全重新生成所有设定）
+        #   False → 只选 failed/cancelled/未开始的 stage
+        #           （用户场景：bootstrap 跑到一半被取消或部分失败，一键继续）
+        # 共同底线：user_filled（用户手填）和 skipped（明确跳过）永远不动
+        targets: list[str] = []
+        for stage in (run.stages or []):
+            sid = stage["id"]
+            cur_status = stage_results.get(sid, {}).get("status")
+            if cur_status in ("user_filled", "skipped"):
+                # 用户手填 / 明确跳过的：永远不动
+                continue
+            if force_all:
+                # 强制重跑全部：ok 也要重跑
+                targets.append(sid)
+            elif cur_status == "ok":
+                # 非强制模式：已成功的跳过
+                continue
+            else:
+                # failed / cancelled / None
+                targets.append(sid)
+
+        if not targets:
+            return {
+                "status": "ok",
+                "rerun_stages": [],
+                "still_failed": [],
+                "skipped_no_deps": [],
+                "message": "没有需要重跑的 stage",
+            }
+
+        rerun_stages: list[str] = []
+        still_failed: list[str] = []
+        skipped_no_deps: list[str] = []
+        completed_set: set[str] = set()
+
+        # 收集已成功 stage 的 data 作为 prev_outputs
+        for stage in (run.stages or []):
+            sid = stage["id"]
+            sr_info = stage_results.get(sid, {})
+            if sr_info.get("status") in ("ok", "user_filled") and "data" in sr_info:
+                completed_set.add(sid)
+
+        # 顺手把 run 状态恢复 running（让前端轮询能看到变化）
+        run.status = "running"
+        db.commit()
+
+        for sid in targets:
+            stage_def = STAGE_DEFS.get(sid)
+            if not stage_def:
+                continue
+
+            # 检查依赖：依赖的 stage 必须 ok/user_filled/skipped 之一
+            deps_ok = True
+            for dep in stage_def["depends_on"]:
+                dep_status = stage_results.get(dep, {}).get("status")
+                if dep_status not in ("ok", "user_filled", "skipped"):
+                    deps_ok = False
+                    break
+            if not deps_ok:
+                stage_results[sid] = {
+                    "status": "failed",
+                    "error": f"依赖未满足: {stage_def['depends_on']}",
+                }
+                run.stage_results = stage_results
+                db.commit()
+                skipped_no_deps.append(sid)
+                still_failed.append(sid)
+                continue
+
+            # 立即标 running 让前端能看见
+            stage_results[sid] = {
+                "status": "running",
+                "started_at": time.time(),
+            }
+            run.stage_results = stage_results
+            db.commit()
+
+            # 构造 prev_outputs
+            prev_outputs = {
+                dep: stage_results[dep].get("data", {})
+                for dep in stage_def["depends_on"]
+                if dep in stage_results and "data" in stage_results[dep]
+            }
+
+            try:
+                result = _run_single_stage(
+                    stage_id=sid,
+                    locked=locked,
+                    user_filled=user_filled,
+                    prev_outputs=prev_outputs,
+                    db=db,
+                )
+                stage_results[sid] = {
+                    "status": "ok",
+                    "data": result,
+                    "completed_at": time.time(),
+                }
+                completed_set.add(sid)
+                rerun_stages.append(sid)
+            except Exception as e:
+                logger.error(f"[Bootstrap rerun-all] stage {sid} failed: {e}")
+                stage_results[sid] = {
+                    "status": "failed",
+                    "error": str(e),
+                    "completed_at": time.time(),
+                }
+                still_failed.append(sid)
+
+        # 重新计算 run 总状态
+        has_failure = any(r.get("status") == "failed" for r in stage_results.values())
+        all_done = all(
+            r.get("status") in ("ok", "user_filled", "skipped")
+            for r in stage_results.values()
+        )
+        if has_failure:
+            run.status = "failed"
+        elif all_done:
+            run.status = "completed"
+        else:
+            run.status = "partial"
+        run.stage_results = stage_results
+        # 更新 current_stage_index
+        run.current_stage_index = sum(
+            1 for r in stage_results.values()
+            if r.get("status") in ("ok", "user_filled", "skipped")
+        )
+        db.commit()
+
+        logger.info(
+            f"[Bootstrap rerun-all] run={run_id} rerun={rerun_stages} "
+            f"still_failed={still_failed} skipped_no_deps={skipped_no_deps} "
+            f"final_status={run.status}"
+        )
+        return {
+            "status": "ok",
+            "rerun_stages": rerun_stages,
+            "still_failed": still_failed,
+            "skipped_no_deps": skipped_no_deps,
+            "run_status": run.status,
+        }
+    finally:
+        if should_close:
+            db.close()

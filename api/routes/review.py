@@ -22,7 +22,6 @@ class ReviewCreate(BaseModel):
     chapter_id: int | None = None
     session_type: str = "chapter"
     content_reviewed: str = ""
-    async_mode: bool = False  # ⭐ 异步模式
 
 
 class ReviewSubmitResponse(BaseModel):
@@ -70,12 +69,13 @@ def _do_review(project_id: int, chapter_id: int | None, session_type: str, db: S
     logger.info(f"[Review] starting review for project={project_id} chapter={chapter_id}")
 
     try:
-        llm = LLMFactory.create()
+        llm = LLMFactory.create(db=db)
         raw = llm.generate(
             prompt=user_prompt,
             system_prompt=system_prompt,
             max_tokens=role.max_tokens,
             temperature=role.temperature,
+            task_type=f"review_{session_type}",  # 入 log 时按 review 类型分类
         )
         duration_ms = (time.time() - start) * 1000
         log_llm_call(llm.provider_name, getattr(llm, "model", "unknown"), "review", duration_ms, True)
@@ -164,25 +164,9 @@ def _async_review_task(task_id: str, project_id: int, chapter_id: int | None, se
 @router.post("", response_model=ReviewSubmitResponse)
 async def create_review(
     data: ReviewCreate,
-    db: Session = Depends(get_db),
-):
-    """创建评审（仅支持同步，立即返回结果）"""
-    try:
-        result = _do_review(data.project_id, data.chapter_id, data.session_type, db)
-        return ReviewSubmitResponse(
-            status="completed",
-            session_id=result["session_id"],
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"评审失败: {str(e)}")
-
-
-@router.post("/async", response_model=ReviewSubmitResponse)
-async def create_review_async(
-    data: ReviewCreate,
     background_tasks: BackgroundTasks,
 ):
-    """提交异步评审任务（轮询获取结果）"""
+    """提交评审任务（异步：立即返回 task_id，前端轮询 /api/tasks/{task_id}）"""
     task = submit_llm_task(
         task_type="review",
         llm_call_fn=_async_review_task,

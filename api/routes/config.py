@@ -1,24 +1,35 @@
 """Provider 配置保存 API"""
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from pathlib import Path
+from sqlalchemy.orm import Session
+from storage.database import get_db
+from storage.models.system_setting import SystemSetting
 
 
 router = APIRouter(prefix="/api/config", tags=["配置"])
 
 
 class SaveProviderRequest(BaseModel):
-    provider: str  # anthropic / openai / ollama / MiniMax
+    provider: str  # anthropic / openai / ollama / minimax / mimo
     api_key: str | None = None
-    base_url: str | None = None  # 仅 ollama / MiniMax 可选
-    model: str | None = None     # MiniMax 可选
+    base_url: str | None = None
+    model: str | None = None
+
+    # 是否同时设为默认 LLM provider
+    set_as_default: bool = True
+
+
+class SetDefaultProviderRequest(BaseModel):
+    provider: str  # minimax / mimo / anthropic / openai / ollama
 
 
 class ConfigStatusResponse(BaseModel):
     anthropic_configured: bool
     openai_configured: bool
     ollama_configured: bool
-    MiniMax_configured: bool
+    minimax_configured: bool
+    mimo_configured: bool
     default_provider: str
 
 
@@ -39,9 +50,11 @@ def _load_env() -> dict[str, str]:
 
 
 def _save_env(updates: dict[str, str]):
-    """更新 .env 文件"""
+    """更新 .env 文件（不再写 DEFAULT_LLM_PROVIDER）"""
     env_path = Path(".env")
     env_vars = _load_env()
+    # 去掉旧的 DEFAULT_LLM_PROVIDER（如果还有残留）
+    env_vars.pop("DEFAULT_LLM_PROVIDER", None)
     env_vars.update(updates)
 
     lines = []
@@ -52,54 +65,70 @@ def _save_env(updates: dict[str, str]):
 
 
 @router.get("/status", response_model=ConfigStatusResponse)
-async def get_config_status():
+async def get_config_status(db: Session = Depends(get_db)):
     """查询当前 provider 配置状态"""
     env_vars = _load_env()
+    default_provider = SystemSetting.get(db, SystemSetting.KEY_DEFAULT_LLM_PROVIDER, "")
     return ConfigStatusResponse(
         anthropic_configured=bool(env_vars.get("ANTHROPIC_API_KEY", "")),
         openai_configured=bool(env_vars.get("OPENAI_API_KEY", "")),
         ollama_configured=bool(env_vars.get("OLLAMA_BASE_URL", "")),
-        MiniMax_configured=bool(env_vars.get("MINIMAX_API_KEY", "")),
-        default_provider=env_vars.get("DEFAULT_LLM_PROVIDER", "anthropic"),
+        minimax_configured=bool(env_vars.get("MINIMAX_API_KEY", "")),
+        mimo_configured=bool(env_vars.get("MIMO_API_KEY", "")),
+        default_provider=default_provider,
     )
 
 
 @router.post("/save-provider")
-async def save_provider(req: SaveProviderRequest):
+async def save_provider(req: SaveProviderRequest, db: Session = Depends(get_db)):
     """保存用户选择的 provider 和 API Key 到 .env"""
-    if req.provider == "anthropic":
+    provider = req.provider.lower()
+
+    if provider == "anthropic":
         if not req.api_key:
             raise HTTPException(status_code=400, detail="ANTHROPIC_API_KEY is required")
-        _save_env({
-            "ANTHROPIC_API_KEY": req.api_key,
-            "DEFAULT_LLM_PROVIDER": "anthropic",
-        })
-    elif req.provider == "openai":
+        _save_env({"ANTHROPIC_API_KEY": req.api_key})
+    elif provider == "openai":
         if not req.api_key:
             raise HTTPException(status_code=400, detail="OPENAI_API_KEY is required")
-        _save_env({
-            "OPENAI_API_KEY": req.api_key,
-            "DEFAULT_LLM_PROVIDER": "openai",
-        })
-    elif req.provider == "ollama":
+        _save_env({"OPENAI_API_KEY": req.api_key})
+    elif provider == "ollama":
         base_url = req.base_url or "http://localhost:11434"
-        _save_env({
-            "OLLAMA_BASE_URL": base_url,
-            "DEFAULT_LLM_PROVIDER": "ollama",
-        })
-    elif req.provider == "MiniMax":
+        _save_env({"OLLAMA_BASE_URL": base_url})
+    elif provider == "minimax":
         if not req.api_key:
             raise HTTPException(status_code=400, detail="MINIMAX_API_KEY is required")
-        updates = {
-            "MINIMAX_API_KEY": req.api_key,
-            "DEFAULT_LLM_PROVIDER": "MiniMax",
-        }
+        updates = {"MINIMAX_API_KEY": req.api_key}
         if req.base_url:
             updates["MINIMAX_BASE_URL"] = req.base_url
         if req.model:
             updates["MINIMAX_MODEL"] = req.model
         _save_env(updates)
+    elif provider == "mimo":
+        if not req.api_key:
+            raise HTTPException(status_code=400, detail="MIMO_API_KEY is required")
+        updates = {"MIMO_API_KEY": req.api_key}
+        if req.base_url:
+            updates["MIMO_BASE_URL"] = req.base_url
+        if req.model:
+            updates["MIMO_MODEL"] = req.model
+        _save_env(updates)
     else:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {req.provider}")
 
-    return {"status": "ok", "provider": req.provider}
+    # 写入默认 provider 到数据库
+    if req.set_as_default:
+        SystemSetting.set(db, SystemSetting.KEY_DEFAULT_LLM_PROVIDER, provider)
+
+    return {"status": "ok", "provider": provider}
+
+
+@router.post("/set-default-provider")
+async def set_default_provider(req: SetDefaultProviderRequest, db: Session = Depends(get_db)):
+    """单独修改默认 LLM 供应商（不改 API Key）"""
+    provider = req.provider.lower()
+    available = {"anthropic", "openai", "ollama", "minimax", "mimo"}
+    if provider not in available:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {req.provider}")
+    SystemSetting.set(db, SystemSetting.KEY_DEFAULT_LLM_PROVIDER, provider)
+    return {"status": "ok", "default_provider": provider}

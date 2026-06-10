@@ -40,6 +40,10 @@ function app() {
     activePanel: 'writing',
     subPanel: 'themes',  // 子面板
 
+    // 设定预览数据（从 /api/workflow/project/{id}/bootstrap-data 加载）
+    bootstrapData: null,
+    bootstrapDataLoading: false,
+
     // 角色
     characters: [],
     showCharacterForm: false,
@@ -64,11 +68,11 @@ function app() {
       runId: null,
       status: 'idle',                       // idle / running / completed / committed / failed
       stages: [],                           // stage 列表
-      expandedStageId: null,                // 展开预览的 stage
       pollHandle: null,                     // 轮询句柄
       errorMsg: '',
       startedAt: null,
       completedAt: null,
+      rerunAllBusy: false,                  // "重新生成全部" 是否正在执行
     },
     // 创建项目表单（12 字段：4 必填 + 8 选填）
     newProjectForm: {
@@ -246,6 +250,32 @@ function app() {
       } catch (e) { alert('保存失败: ' + e.message); }
     },
 
+    // ─── 全局设置 ───
+    async openGlobalSettings() {
+      await this.loadSettings();
+      this.showSettings = true;
+    },
+
+    async loadSettings() {
+      try {
+        const res = await fetch('/api/config/status');
+        const data = await res.json();
+        this.settings.defaultProvider = data.default_provider || 'minimax';
+      } catch (e) { console.error('加载设置失败:', e); }
+    },
+
+    async saveDefaultProvider() {
+      try {
+        await fetch('/api/config/set-default-provider', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider: this.settings.defaultProvider }),
+        });
+        this.showSettings = false;
+        alert('默认 LLM Provider 已更新为 ' + this.settings.defaultProvider);
+      } catch (e) { alert('保存失败: ' + e.message); }
+    },
+
     async downloadModel() {
       if (this.downloading) return;
       this.downloading = true;
@@ -398,12 +428,129 @@ function app() {
       }
     },
 
+    /**
+     * 重新生成单个 bootstrap 任务（重跑该 run 中所有 failed stage）
+     */
+    async rerunOneBootstrapTask(task, forceAll = false) {
+      if (!task.run_id) {
+        alert('该任务没有关联的 workflow run，无法重跑。');
+        return;
+      }
+      const label = forceAll ? '全部 stage（包括已成功的）' : '所有 failed stage';
+      if (!confirm(`确定重新生成任务「${task.id}」吗？\n将重跑该 run 中${label}。`)) return;
+      try {
+        const res = await fetch(`/api/workflow/run/${task.run_id}/rerun-all?force_all=${forceAll}`, {
+          method: 'POST',
+        });
+        const data = await res.json();
+        if (data.status === 'submitted') {
+          // 异步模式：轮询 task 直到完成
+          const polledTask = await this._pollTask(data.task_id, {
+            onProgress: () => this.refreshAllTasks(),
+          });
+          if (polledTask.status === 'completed' && polledTask.result) {
+            const success = (polledTask.result.rerun_stages || []).length;
+            const still = (polledTask.result.still_failed || []).length;
+            alert(`重跑完成：成功 ${success} 个 stage，仍失败 ${still} 个。`);
+            await this.refreshAllTasks();
+          } else {
+            alert('重跑失败: ' + (polledTask.error || 'unknown'));
+          }
+        } else if (data.status === 'ok') {
+          // 兼容同步返回（旧版 API）
+          const success = (data.rerun_stages || []).length;
+          const still = (data.still_failed || []).length;
+          alert(`重跑完成：成功 ${success} 个 stage，仍失败 ${still} 个。`);
+          await this.refreshAllTasks();
+        } else {
+          alert('重跑失败: ' + (data.error || data.detail || 'unknown'));
+        }
+      } catch (e) {
+        alert('重跑失败: ' + e.message);
+      }
+    },
+
+    /**
+     * 任务管理弹窗【重跑所有失败项 / 重跑全部设定】按钮
+     * forceAll=false：只重跑失败/取消的项目
+     * forceAll=true：重跑全部 bootstrap 项目（覆盖已成功的结果）
+     */
+    async rerunAllBootstrapTasks(forceAll = false) {
+      const seenRunIds = new Set();
+      const uniqueRuns = [];
+      for (const t of this.allTasks) {
+        if (t.task_type !== 'bootstrap' || !t.run_id || seenRunIds.has(t.run_id)) continue;
+        if (!forceAll && !['failed', 'cancelled'].includes(t.status)) continue;
+        seenRunIds.add(t.run_id);
+        uniqueRuns.push(t);
+      }
+      if (uniqueRuns.length === 0) {
+        alert(forceAll ? '没有可重跑的 bootstrap 项目。' : '没有需要重跑的失败项。');
+        return;
+      }
+      const label = forceAll ? `${uniqueRuns.length} 个项目（包括已成功的 stage 也会重新生成）` : `${uniqueRuns.length} 个失败项目`;
+      if (!confirm(`确定对 ${label}按顺序重新生成吗？`)) return;
+
+      let totalSuccess = 0;
+      let totalStillFailed = 0;
+      for (let i = 0; i < uniqueRuns.length; i++) {
+        const t = uniqueRuns[i];
+        try {
+          const res = await fetch(`/api/workflow/run/${t.run_id}/rerun-all?force_all=${forceAll}`, {
+            method: 'POST',
+          });
+          const data = await res.json();
+          if (data.status === 'submitted') {
+            // 异步模式：轮询 task 直到完成
+            const task = await this._pollTask(data.task_id, {
+              onProgress: () => this.refreshAllTasks(),
+            });
+            if (task.status === 'completed' && task.result) {
+              totalSuccess += (task.result.rerun_stages || []).length;
+              totalStillFailed += (task.result.still_failed || []).length;
+            } else {
+              totalStillFailed += 1;
+            }
+          } else {
+            // 兼容同步返回（旧版 API）
+            if (data.status === 'ok') {
+              totalSuccess += (data.rerun_stages || []).length;
+              totalStillFailed += (data.still_failed || []).length;
+            } else {
+              totalStillFailed += 1;
+            }
+          }
+        } catch (e) {
+          console.error(`rerun-all for project ${t.id} failed:`, e);
+          totalStillFailed += 1;
+        }
+      }
+      alert(`重跑完成：成功 ${totalSuccess} 个 stage，仍失败 ${totalStillFailed} 个。`);
+      await this.refreshAllTasks();
+    },
+
     get activeTaskCount() {
       return this.allTasks.filter((t) => ['pending', 'running'].includes(t.status)).length;
     },
 
     get completedTaskCount() {
       return this.allTasks.filter((t) => ['completed', 'failed', 'cancelled'].includes(t.status)).length;
+    },
+
+    /**
+     * 是否有失败/取消的 bootstrap 任务（用于启用顶部"重新生成全部"按钮）
+     */
+    get hasFailedBootstrapTasks() {
+      return this.allTasks.some(
+        (t) => t.task_type === 'bootstrap' && ['failed', 'cancelled'].includes(t.status) && t.run_id
+      );
+    },
+
+    /** 是否有任意 bootstrap 任务（用于启用"重跑全部设定"按钮） */
+    get hasBootstrapTasks() {
+      return this.allTasks.some(
+        (t) => t.task_type === 'bootstrap' && t.run_id
+      );
     },
 
     // ─── 项目删除 ───
@@ -549,7 +696,6 @@ function app() {
         ...f,
         genre: f.genres,  // 数组形式（后端会 join）
         auto_commit: autoCommit,
-        async_mode: true,
       });
 
       try {
@@ -693,9 +839,24 @@ function app() {
           return;
         }
 
-        // 4) failed → 部分失败
+        // 4) failed / partial → 部分失败
+        // ⚠️ 修复反馈 bug：之前只看 status，没看实际 failed 数。
+        //    有时 status='partial'/'failed' 但所有 stage 都 ok/user_filled/skipped
+        //    （例如重跑成功后状态还没及时收敛），却仍错误地显示"部分失败"。
+        //    这里加上 failedCount === 0 的兜底：→ 转为 awaiting_commit 路径。
         if (status === 'failed' || status === 'partial') {
           const failedCount = stages.filter((s) => s.status === 'failed').length;
+          if (failedCount === 0) {
+            // 实际没有失败 stage，降级为"待提交"提示（用户可点"写入数据库"入库）
+            this.bootstrapBanner = {
+              visible: true,
+              projectId,
+              runId: data.run_id,
+              kind: 'awaiting_commit',
+              message: 'AI 补全已完成，等待你确认写入数据库。',
+            };
+            return;
+          }
           this.bootstrapBanner = {
             visible: true,
             projectId,
@@ -741,11 +902,11 @@ function app() {
         runId,
         status: 'running',
         stages: [],
-        expandedStageId: null,
         pollHandle: null,
         errorMsg: '',
         startedAt: Date.now(),
         completedAt: null,
+        rerunAllBusy: false,
       };
       // 立即拉一次
       await this._pollBootstrapStatus();
@@ -753,6 +914,11 @@ function app() {
       this.bootstrapWizard.pollHandle = setInterval(
         () => this._pollBootstrapStatus(),
         5000
+      );
+      // 同时每秒 tick 一次：更新 running stage 的"已耗时"显示
+      this.bootstrapWizard.tickHandle = setInterval(
+        () => this._tickBootstrapElapsed(),
+        1000
       );
     },
 
@@ -787,11 +953,69 @@ function app() {
       }
     },
 
+    /**
+     * 轮询一个 task_id 直到完成（completed / failed / cancelled）。
+     * 用于异步 LLM 任务：rerun / rerun-all / review / generate / chapter_pipeline 等。
+     *
+     * @param {string} task_id - 后端 submit_llm_task 返回的 task.id
+     * @param {object} opts
+     * @param {number} [opts.interval=1500] 轮询间隔 ms
+     * @param {number} [opts.timeout=600000] 总超时 ms（10 分钟）
+     * @param {function} [opts.onProgress] 每次轮询回调 (task) => void
+     * @returns {Promise<object>} 终态 task 对象
+     */
+    async _pollTask(task_id, opts = {}) {
+      const interval = opts.interval || 1500;
+      const timeout = opts.timeout || 600_000;
+      const onProgress = opts.onProgress || (() => {});
+      const t0 = Date.now();
+      while (Date.now() - t0 < timeout) {
+        try {
+          const res = await fetch(`/api/tasks/${task_id}`);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const task = await res.json();
+          onProgress(task);
+          if (['completed', 'failed', 'cancelled'].includes(task.status)) {
+            return task;
+          }
+        } catch (e) {
+          console.warn(`[PollTask ${task_id}] err:`, e);
+        }
+        await new Promise((r) => setTimeout(r, interval));
+      }
+      throw new Error(`Task ${task_id} 轮询超时（${timeout}ms）`);
+    },
+
+    /**
+     * 每秒 tick：给所有 running stage 更新 _tick_now，触发 Alpine 重渲染耗时显示。
+     * 用数组 push/pop 强制触发响应式（直接改属性 Alpine 不会响应）。
+     */
+    _tickBootstrapElapsed() {
+      const wiz = this.bootstrapWizard;
+      if (!wiz.visible || !wiz.stages) return;
+      const hasRunning = wiz.stages.some(
+        (s) => s.status === 'running' && s.started_at && !s.completed_at
+      );
+      if (!hasRunning) return;
+      const now = Date.now();
+      // 强制响应式：用新数组替换（Alpine 检测到 identity 变化）
+      wiz.stages = wiz.stages.map((s) => {
+        if (s.status === 'running' && s.started_at && !s.completed_at) {
+          return { ...s, _tick_now: now };
+        }
+        return s;
+      });
+    },
+
     _stopBootstrapPolling() {
       const wiz = this.bootstrapWizard;
       if (wiz.pollHandle) {
         clearInterval(wiz.pollHandle);
         wiz.pollHandle = null;
+      }
+      if (wiz.tickHandle) {
+        clearInterval(wiz.tickHandle);
+        wiz.tickHandle = null;
       }
     },
 
@@ -800,20 +1024,106 @@ function app() {
       if (!wiz.runId) return;
       if (!confirm(`确定重新生成 stage「${stageId}」吗？将覆盖之前的结果。`)) return;
       try {
+        // 异步：后端立即返回 task_id
         const res = await fetch(`/api/workflow/run/${wiz.runId}/rerun`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ stage_id: stageId }),
         });
         const data = await res.json();
-        if (data.status === 'ok') {
-          // 重新拉一次
+        if (data.status !== 'submitted') {
+          alert('重跑失败: ' + (data.error || JSON.stringify(data)));
+          return;
+        }
+        // 轮询 task
+        const task = await this._pollTask(data.task_id);
+        if (task.status === 'completed') {
+          // 重新拉 stage 状态
           await this._pollBootstrapStatus();
         } else {
-          alert('重跑失败: ' + (data.error || 'unknown'));
+          alert('重跑失败: ' + (task.error || 'unknown'));
         }
       } catch (e) {
         alert('重跑失败: ' + e.message);
+      }
+    },
+
+    /**
+     * 计算 wizard 当前"缺失项"数量：failed / cancelled / 未开始的 stage 总数。
+     * 用于页脚【重跑缺失项】按钮的 disabled 状态与角标。
+     */
+    bootstrapMissingCount() {
+      const wiz = this.bootstrapWizard;
+      if (!wiz || !wiz.stages) return 0;
+      return wiz.stages.filter(
+        (s) => !['ok', 'user_filled', 'skipped'].includes(s.status)
+      ).length;
+    },
+
+    /**
+     * 一键重跑所有未完成 stage（按依赖顺序串行）
+     * 异步：提交后立即返回，后端跑完会刷 stage 状态
+     *
+     * @param {boolean} [forceAll=false]
+     *   - false（默认）：只重跑 failed/cancelled/未开始的 stage（缺失项）
+     *   - true：重跑全部 stage（包括已成功的）（所有项）
+     */
+    async rerunBootstrapAllStages(forceAll = false) {
+      const wiz = this.bootstrapWizard;
+      if (!wiz.runId) return;
+      const missingCount = this.bootstrapMissingCount();
+      if (!forceAll && missingCount === 0) {
+        alert('当前没有未完成的 stage，无需重跑。');
+        return;
+      }
+      const msg = forceAll
+        ? `确定【重跑所有项】吗？\n将覆盖全部已成功的 stage（包括用户手填的项会保留）。\n生成所有 stage 预计耗时较长。`
+        : `确定重新生成 ${missingCount} 个【缺失项】吗？\n（按依赖顺序串行重跑：已成功的不会重复跑）`;
+      if (!confirm(msg)) return;
+
+      wiz.rerunAllBusy = true;
+      try {
+        // 异步：后端立即返回 task_id
+        const res = await fetch(`/api/workflow/run/${wiz.runId}/rerun-all?force_all=${forceAll}`, {
+          method: 'POST',
+        });
+        const data = await res.json();
+        if (data.status !== 'submitted') {
+          alert('重跑失败: ' + (data.error || JSON.stringify(data)));
+          return;
+        }
+        // 轮询：每个 stage 状态会随 _pollBootstrapStatus 实时刷新
+        const task = await this._pollTask(data.task_id, {
+          onProgress: () => this._pollBootstrapStatus(),
+        });
+        if (task.status === 'completed') {
+          // ⚠️ 后端 _refresh_inmem_task_from_run 会覆盖 task.result（变成 stage_results / run_status），
+          //     原 rerun_stages / still_failed 拿不到。这里直接从 wiz.stages 重新统计。
+          const stages = wiz.stages || [];
+          let success = 0, stillFailed = 0, skipped = 0;
+          for (const s of stages) {
+            if (s.status === 'ok') success++;
+            else if (s.status === 'failed' || s.status === 'cancelled') stillFailed++;
+            else if (s.status === 'skipped') skipped++;
+            // user_filled 不计入（用户手填，本就不需重跑）
+          }
+          // 也参考后端 task.result 里的 run_status 判断总体状态
+          const runStatus = (task.result && task.result.run_status) || '';
+          const statusNote = runStatus === 'completed' ? '\n本次全部完成（可点击“写入数据库”入库）。'
+                           : runStatus === 'partial' ? '\n本次部分完成：仍有 stage 失败。'
+                           : runStatus === 'failed' ? '\n本次总体失败。'
+                           : '';
+          alert(`重跑完成：成功 ${success} 个，仍失败 ${stillFailed} 个，跳过 ${skipped} 个。${statusNote}`);
+          await this._pollBootstrapStatus();
+        } else if (task.status === 'failed') {
+          alert('重跑失败: ' + (task.error || 'unknown'));
+        } else {
+          alert('重跑被取消: ' + (task.error || 'cancelled'));
+        }
+      } catch (e) {
+        alert('重跑失败: ' + e.message);
+      } finally {
+        wiz.rerunAllBusy = false;
       }
     },
 
@@ -862,6 +1172,57 @@ function app() {
       }[status] || '⏳';
     },
 
+    /**
+     * 格式化每个 stage 的耗时显示：
+     * - 未开始 → ''
+     * - 运行中 → '已耗时 12.3s'（实时刷新）
+     * - 已完成 → '耗时 8.1s'（最终值）
+     */
+    formatStageElapsed(stage) {
+      if (!stage) return '';
+      // 防御：started_at 缺失、不是数字、或看起来是 epoch 早期（<= 0 / 太早）
+      // → 不显示耗时，避免出现 "494417h" 之类的鬼数字
+      const startSec = Number(stage.started_at);
+      if (!Number.isFinite(startSec) || startSec <= 0 || startSec < 1_000_000_000) {
+        return '';
+      }
+      const startMs = startSec * 1000;  // 后端 time.time() 是秒
+      let elapsedMs;
+      let label;
+      if (stage.completed_at) {
+        const endSec = Number(stage.completed_at);
+        if (!Number.isFinite(endSec) || endSec < startSec) return '';
+        elapsedMs = endSec * 1000 - startMs;
+        label = '耗时';
+      } else if (stage.status === 'running') {
+        const now = stage._tick_now || Date.now();
+        elapsedMs = now - startMs;
+        label = '已耗时';
+      } else {
+        // 终态但既没 completed_at 也不在 running（防御性兜底）→ 不显示
+        return '';
+      }
+      // 防御：elapsedMs 异常（NaN / 负数 / 超过 30 天）→ 不显示
+      if (!Number.isFinite(elapsedMs) || elapsedMs < 0 || elapsedMs > 30 * 24 * 3600 * 1000) {
+        return '';
+      }
+      // 自适应单位：< 60s 用秒，< 60min 用 Xm Ys，>= 1h 用 Xh Ym
+      const totalSec = elapsedMs / 1000;
+      let text;
+      if (totalSec < 60) {
+        text = `${totalSec.toFixed(1)}s`;
+      } else if (totalSec < 3600) {
+        const m = Math.floor(totalSec / 60);
+        const s = totalSec - m * 60;
+        text = `${m}m ${s.toFixed(0)}s`;
+      } else {
+        const h = Math.floor(totalSec / 3600);
+        const m = Math.floor((totalSec - h * 3600) / 60);
+        text = `${h}h ${m}m`;
+      }
+      return ` · ${label} ${text}`;
+    },
+
     bootstrapProgressPct() {
       const wiz = this.bootstrapWizard;
       if (!wiz.stages || wiz.stages.length === 0) return 0;
@@ -894,9 +1255,194 @@ function app() {
         this.loadConsistencyReport(project.id),
         this.loadProjectOutline(project.id),
         this.loadChapterOutlines(project.id),
+        // 设定预览数据：失败不阻塞打开项目（catch 静默）
+        this.loadBootstrapData(project.id).catch((e) => {
+          console.warn('[BootstrapData] load failed (silently ignored):', e);
+        }),
       ]);
       // 检查是否需要显示 AI 补全 banner
       this._maybeShowBootstrapBanner(project.id);
+      // 启动 banner 轮询（让 banner 在 rerun 后能自动刷新状态）
+      this._startBannerPolling(project.id);
+    },
+
+    /**
+     * 从 bootstrapData.characters 中提取所有 AI 生成的"主角/反派/配角"，
+     * 统一为一个数组供【角色】页签下的"🤖 AI 生成角色"区块渲染。
+     *
+     * 数据来源：bootstrapData.characters.protagonist / antagonist / supporting
+     * 返回：扁平数组，每项形如 { name, role, profile, description }
+     */
+    bootstrapAiCharacters() {
+      const bd = this.bootstrapData;
+      if (!bd || !bd.characters) return [];
+      const c = bd.characters;
+      const out = [];
+      // 主角（单对象）
+      if (c.protagonist && (c.protagonist.name || c.protagonist.profile)) {
+        out.push({
+          name: c.protagonist.name || '主角',
+          role: c.protagonist.role || '主角',
+          profile: c.protagonist.profile || {},
+          description: c.protagonist.description || '',
+        });
+      }
+      // 反派（单对象）
+      if (c.antagonist && (c.antagonist.name || c.antagonist.profile)) {
+        out.push({
+          name: c.antagonist.name || '反派',
+          role: c.antagonist.role || '反派',
+          profile: c.antagonist.profile || {},
+          description: c.antagonist.description || '',
+        });
+      }
+      // 配角（数组）
+      const supporting = Array.isArray(c.supporting) ? c.supporting : [];
+      for (const s of supporting) {
+        if (s && (s.name || s.profile)) {
+          out.push({
+            name: s.name || '配角',
+            role: s.role || '配角',
+            profile: s.profile || {},
+            description: s.description || '',
+          });
+        }
+      }
+      return out;
+    },
+
+    /**
+     * 从 bootstrapData.characters.relations 中提取 AI 生成的关系矩阵。
+     * 返回数组，每项形如 { from, to, type, description, strength, status }。
+     */
+    bootstrapAiRelations() {
+      const bd = this.bootstrapData;
+      if (!bd || !bd.characters) return [];
+      const rels = bd.characters.relations;
+      return Array.isArray(rels) ? rels : [];
+    },
+
+    /**
+     * 概述 AI 生成的大纲（用于"🤖 AI 生成大纲"区块右上角的 hint 文本）。
+     * 例："概要 432 字 + 3 剧情线 + 4 幕结构 + 节奏 1 段"
+     */
+    bootstrapAiOutlineSummary() {
+      const o = this.bootstrapData && this.bootstrapData.outline;
+      if (!o) return '';
+      const parts = [];
+      if (o.outline_text) parts.push(`概要 ${o.outline_text.length} 字`);
+      if (Array.isArray(o.plot_lines) && o.plot_lines.length) {
+        parts.push(`${o.plot_lines.length} 剧情线`);
+      }
+      const acts = o.structure && Array.isArray(o.structure.acts) ? o.structure.acts : [];
+      if (acts.length) parts.push(`${acts.length} 幕结构`);
+      if (o.pacing_notes) parts.push('节奏规划');
+      return parts.join(' · ');
+    },
+
+    /**
+     * 估算的总章节数。优先级：
+     *   1. currentProject.total_chapters（Project 表，写入后才有）
+     *   2. bootstrapData.base.total_chapters（AI 在 stage_1_base 推导的值，跑过引导补全就有）
+     *   3. null（都没有）
+     *
+     * 用于大纲页面"预设总章节"的兜底显示：用户看到的"30 章"不能因为
+     * Project.total_chapters 没写就显示"未设定"，而忽略 AI 已经算出来的数字。
+     */
+    effectiveTotalChapters() {
+      const cp = this.currentProject;
+      if (cp && cp.total_chapters) return cp.total_chapters;
+      const base = this.bootstrapData && this.bootstrapData.base;
+      if (base && base.total_chapters) return base.total_chapters;
+      return null;
+    },
+
+    /**
+     * 估算的总字数（千字）。类似 effectiveTotalChapters：从 base.est_total_words 兜底。
+     */
+    effectiveEstTotalWords() {
+      const cp = this.currentProject;
+      if (cp && cp.target_word_count) {
+        // Project 表只有每章字数 → 乘以章节数
+        const chs = this.effectiveTotalChapters();
+        if (chs && cp.target_word_count) return chs * cp.target_word_count;
+        return cp.target_word_count;
+      }
+      const base = this.bootstrapData && this.bootstrapData.base;
+      if (base && base.est_total_words) return base.est_total_words;
+      return null;
+    },
+
+    /**
+     * 提取 AI 生成的主题（来自 bootstrapData.theme）
+     * 返回 { theme, tone } 或空对象。
+     */
+    bootstrapAiTheme() {
+      const t = this.bootstrapData && this.bootstrapData.theme;
+      return t && (t.theme || t.tone) ? t : null;
+    },
+
+    /**
+     * 提取 AI 生成的伏笔列表（按周期分组）
+     * 返回 { "短周期": [...], "中周期": [...], "长周期": [...], "未分类": [...] } 或空对象。
+     */
+    bootstrapAiForeshadowings() {
+      const f = this.bootstrapData && this.bootstrapData.foreshadowings;
+      if (!f || !f.by_period) return null;
+      // 过滤掉空的周期，只保留有内容的
+      const result = {};
+      for (const [period, items] of Object.entries(f.by_period)) {
+        if (Array.isArray(items) && items.length > 0) {
+          result[period] = items;
+        }
+      }
+      return Object.keys(result).length > 0 ? result : null;
+    },
+
+    /**
+     * 加载 bootstrap 设定数据（从 /api/workflow/project/{id}/bootstrap-data）。
+     * 用于"设定预览"面板：把 stage_results 整理成可读结构。
+     * 调用失败（如项目没有 bootstrap run）→ 静默忽略，UI 仍可正常使用。
+     */
+    async loadBootstrapData(projectId) {
+      this.bootstrapDataLoading = true;
+      try {
+        const res = await fetch(`/api/workflow/project/${projectId}/bootstrap-data`);
+        if (!res.ok) {
+          // 404 = 没有 run（项目没跑过 bootstrap）→ 静默置空
+          this.bootstrapData = null;
+          return;
+        }
+        this.bootstrapData = await res.json();
+      } catch (e) {
+        this.bootstrapData = null;
+        throw e;  // 让调用方决定是否需要提示用户
+      } finally {
+        this.bootstrapDataLoading = false;
+      }
+    },
+
+    /**
+     * 启动 banner 轮询：每 5s 重新评估 banner 状态
+     * 用户进入项目页时启动，离开时停止
+     */
+    _startBannerPolling(projectId) {
+      this._stopBannerPolling();
+      this._bannerPollHandle = setInterval(async () => {
+        // 只有当前在这个项目页时才轮询（避免污染）
+        if (this.currentProject && this.currentProject.id === projectId) {
+          await this._maybeShowBootstrapBanner(projectId);
+        } else {
+          this._stopBannerPolling();
+        }
+      }, 5000);
+    },
+
+    _stopBannerPolling() {
+      if (this._bannerPollHandle) {
+        clearInterval(this._bannerPollHandle);
+        this._bannerPollHandle = null;
+      }
     },
 
     backToHome() {
@@ -914,6 +1460,8 @@ function app() {
       this.projectOutline = null;
       this.chapterOutlines = [];
       this.consistencyReport = null;
+      // 停掉 banner 轮询
+      this._stopBannerPolling();
       // 刷新项目列表（确保最新）
       this.loadProjects();
     },
@@ -1172,6 +1720,20 @@ function app() {
         this.newProjectForm.genres.push(name);
       }
       evt.target.value = '';
+    },
+
+    /**
+     * 移除已选题材（创建项目表单中已选 chip 上的 × 按钮）
+     * 修复：之前模板里使用 `:key="g + '-' + i"` 并直接 splice(i,1)，
+     * 删除任一标签后剩余项的索引都会变化，导致 x-for 重新渲染异常，
+     * 表现是"删一个，全部消失"。
+     * 这里改为按值查找并过滤，避开了索引带来的 key 不稳定问题。
+     */
+    removeGenre(name) {
+      const idx = this.newProjectForm.genres.indexOf(name);
+      if (idx >= 0) {
+        this.newProjectForm.genres.splice(idx, 1);
+      }
     },
 
     async submitNewGenre() {
@@ -1487,6 +2049,7 @@ function app() {
       this.activeReviewSession = { chapter_id: chapter.id };
       this.reviewResult = null;
       try {
+        // 异步：后端立即返回 task_id
         const res = await fetch('/api/reviews', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1496,9 +2059,26 @@ function app() {
             session_type: 'chapter',
           }),
         });
-        this.reviewResult = await res.json();
-        await this.loadReviewHistory();
-      } catch (e) { alert('评审失败: ' + e.message); this.activeReviewSession = null; }
+        const data = await res.json();
+        if (data.status !== 'submitted' || !data.task_id) {
+          alert('评审失败: ' + (data.error || JSON.stringify(data)));
+          this.activeReviewSession = null;
+          return;
+        }
+        // 轮询 task
+        const task = await this._pollTask(data.task_id);
+        if (task.status === 'completed') {
+          // task.result 包含 session_id / overall_score / scores / critique
+          this.reviewResult = task.result;
+          await this.loadReviewHistory();
+        } else {
+          alert('评审失败: ' + (task.error || 'unknown'));
+          this.activeReviewSession = null;
+        }
+      } catch (e) {
+        alert('评审失败: ' + e.message);
+        this.activeReviewSession = null;
+      }
     },
 
     showReviewDetail(rev) {

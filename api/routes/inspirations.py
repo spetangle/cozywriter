@@ -263,7 +263,6 @@ async def create_project_from_inspiration(
         "genre": data.genre,
         "description": description,
         "auto_commit": True,
-        "async_mode": True,
     }
     # 加上灵感全文作为 8 选填 hint
     user_input["premise"] = insp.content  # 灵感全文 → premise 字段

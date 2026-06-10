@@ -11,3 +11,5 @@ pydantic>=2.0.0
 pydantic-settings>=2.0.0
 python-multipart>=0.0.9
 python-dotenv>=1.0.0
+# LLM 输出 JSON 容错修复（处理尾随逗号 / 中英文逗号混用 / 未闭合引号 / 注释等）
+json_repair>=0.30.0

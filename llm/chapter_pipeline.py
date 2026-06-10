@@ -65,6 +65,7 @@ def _call_llm(role_name: str, ctx: dict, user_msg: str, provider: str | None = N
         system_prompt=system,
         max_tokens=role.max_tokens,
         temperature=role.temperature,
+        task_type=f"chapter_pipeline_{role_name}",  # 入 log 时按 role 分类
     )
 
 
@@ -273,7 +274,7 @@ def generate_chapter_text(
     # 用现有的 writing role，但拼更厚的 context
     writing_ctx = {
         "writing_style": project.writing_style or "平实",
-        "ai_removal_instruction": build_ai_removal_instruction(project.ai味去除程度 or 7),
+        "ai_removal_instruction": build_ai_removal_instruction(project.ai味去除程度) if project.ai味去除程度 else "",
         "themes": prep["themes"],
         "characters": "\n".join(prep["characters"]) or "（无）",
         "character_arcs": "（参见上文 character 段）",
@@ -301,6 +302,7 @@ def generate_chapter_text(
         system_prompt=system,
         max_tokens=ROLES["writing"].max_tokens,
         temperature=ROLES["writing"].temperature,
+        task_type="chapter_pipeline_writing",  # 入 log 时分类
     )
 
 
@@ -392,6 +394,7 @@ def revise_chapter_text(
         system_prompt=system,
         max_tokens=ROLES["revision"].max_tokens,
         temperature=ROLES["revision"].temperature,
+        task_type="chapter_pipeline_revision",  # 入 log 时分类
     )
 
 

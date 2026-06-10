@@ -23,7 +23,6 @@ class GenerateRequest(BaseModel):
     prompt: str
     mode: str = "continue"  # continue / polish / expand
     provider: str | None = None
-    async_mode: bool = False  # ⭐ 异步模式开关
 
 
 class GenerateResponse(BaseModel):
@@ -114,6 +113,7 @@ def _do_generate(
             system_prompt=system_prompt,
             max_tokens=role.max_tokens,
             temperature=role.temperature,
+            task_type=f"generate_{mode}",  # 入 log 时按 mode 分类（continue/polish/expand）
         )
         duration_ms = (time.time() - start) * 1000
         log_llm_call(llm.provider_name, llm.model, f"generate_{mode}", duration_ms, True)
@@ -174,46 +174,23 @@ async def generate_text(
     background_tasks: BackgroundTasks = None,
 ):
     """
-    生成小说文本
+    生成小说文本（异步：提交到线程池，立即返回 task_id）
 
-    - async_mode=False（默认）：同步等待，立即返回结果
-    - async_mode=True：异步提交，返回 task_id，前端轮询 /api/tasks/{task_id}
+    前端轮询 /api/tasks/{task_id} 获取结果。
     """
-    if not req.async_mode:
-        # 同步模式
-        try:
-            result = _do_generate(
-                project_id=req.project_id,
-                chapter_id=req.chapter_id,
-                prompt=req.prompt,
-                mode=req.mode,
-                provider=req.provider,
-                db=db,
-            )
-            return GenerateResponse(
-                status="completed",
-                generated_text=result["generated_text"],
-                provider=result["provider"],
-                duration_ms=result["duration_ms"],
-                context_used=result["context_used"],
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"生成失败: {str(e)}")
+    # 异步提交到线程池，立即返回 task_id
+    task = submit_llm_task(
+        task_type="generate",
+        llm_call_fn=_async_generate_task,
+        project_id=req.project_id,
+        description=f"生成 [{req.mode}] {req.prompt[:50]}...",
+        chapter_id=req.chapter_id,
+        prompt=req.prompt,
+        mode=req.mode,
+        provider=req.provider,
+    )
 
-    else:
-        # 异步模式：提交任务，立即返回 task_id
-        task = submit_llm_task(
-            task_type="generate",
-            llm_call_fn=_async_generate_task,
-            project_id=req.project_id,
-            description=f"生成 [{req.mode}] {req.prompt[:50]}...",
-            chapter_id=req.chapter_id,
-            prompt=req.prompt,
-            mode=req.mode,
-            provider=req.provider,
-        )
-
-        return GenerateResponse(
-            task_id=task.id,
-            status="submitted",
-        )
+    return GenerateResponse(
+        task_id=task.id,
+        status="submitted",
+    )

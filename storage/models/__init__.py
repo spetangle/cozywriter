@@ -12,3 +12,5 @@ from storage.models.project_outline import ProjectOutline, ChapterOutline
 from storage.models.inspiration import Inspiration
 from storage.models.custom_genre import CustomGenre
 from storage.models.creative_questionnaire import CreativeQuestionnaire
+from storage.models.workflow import WorkflowRun
+from storage.models.system_setting import SystemSetting

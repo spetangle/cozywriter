@@ -215,7 +215,6 @@ class PipelineRequest(BaseModel):
     provider: str | None = None
     auto_revise: bool = True
     revision_threshold: float = 6.5
-    async_mode: bool = True
 
 
 class PipelineResponse(BaseModel):
@@ -239,35 +238,10 @@ pipeline_router = APIRouter(prefix="/api/chapters", tags=["章节生成"])
 @pipeline_router.post("/generate-pipeline", response_model=PipelineResponse)
 async def run_pipeline(req: PipelineRequest, db: Session = Depends(get_db)):
     """
-    一键章节生成（9 步流水线）
+    一键章节生成（9 步流水线，异步：提交到线程池，立即返回 task_id）
 
-    同步模式：立即返回完整结果
-    异步模式：返回 task_id，前端轮询 /api/tasks/{task_id}
+    前端轮询 /api/tasks/{task_id} 获取结果。
     """
-    from llm.chapter_pipeline import run_chapter_generation_pipeline
-
-    if not req.async_mode:
-        try:
-            result = run_chapter_generation_pipeline(
-                db, req.project_id, req.chapter_id, req.provider,
-                auto_revise=req.auto_revise,
-                revision_threshold=req.revision_threshold,
-            )
-            return PipelineResponse(
-                status=result["status"],
-                project_id=req.project_id,
-                chapter_id=req.chapter_id,
-                final_word_count=result.get("final_word_count"),
-                stages=result.get("stages", {}),
-                post_processing=result.get("post_processing", {}),
-                error=result.get("error"),
-                total_duration_ms=result.get("total_duration_ms"),
-                notifications=result.get("post_processing", {}).get("notifications", []),
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"生成失败: {str(e)}")
-
-    # 异步模式
     from api.tasks import submit_llm_task
     task = submit_llm_task(
         task_type="chapter_pipeline",

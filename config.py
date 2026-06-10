@@ -22,8 +22,13 @@ class Settings(BaseSettings):
     # MiniMax 配置
     minimax_api_key: str = ""
     minimax_model: str = "MiniMax-M2.7"
-    minimax_base_url: str = "https://api.minimaxi.com"
-    default_llm_provider: str = "MiniMax"
+    minimax_base_url: str = "https://api.minimaxi.com/anthropic"
+    # Xiaomi MiMo 配置
+    mimo_api_key: str = ""
+    mimo_model: str = "mimo-v2.5-pro"
+    mimo_base_url: str = "https://token-plan-cn.xiaomimimo.com/anthropic"
+    # 默认 LLM Provider（值为空字符串时，由 LLMFactory 从数据库 SystemSetting 读取回退）
+    default_llm_provider: str = ""
 
     # Embedding 配置
     embedding_model: str = "moka-ai/m3e-base"

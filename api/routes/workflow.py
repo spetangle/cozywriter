@@ -34,6 +34,55 @@ class WorkflowStatusResponse(BaseModel):
     updated_at: object
 
 
+# ─── Helpers ───
+
+def merge_stage_results(stages: list[dict], stage_results: dict) -> list[dict]:
+    """
+    把 stage_results 里的实时状态合并到每个 stage 上。
+
+    原因：run.stages 是 plan_bootstrap_stages 生成的静态定义（status 始终 "pending"），
+    真正的 per-stage 状态在 run.stage_results[id].status（"running" / "ok" / "failed" / "skipped" / "user_filled"）。
+    前端读 stage.status，所以这里把 stage_results 合并进来。
+    同时挂上每个 stage 的 started_at / completed_at / elapsed_s，方便前端显示耗时。
+    """
+    out = []
+    import time as _time
+    for stage in (stages or []):
+        sid = stage.get("id", "")
+        sr = (stage_results or {}).get(sid) or {}
+        merged = dict(stage)
+        status = sr.get("status", stage.get("status", "pending"))
+        merged["status"] = status
+        # 时间戳（让前端能算每个 stage 的耗时）
+        started_at = sr.get("started_at")
+        completed_at = sr.get("completed_at")
+        # 防御 started_at 看起来无效（sentinel 值/0/epoch 早期）：
+        # 任何小于 2001-09-09 (1_000_000_000) 的时间戳视为无效，丢弃
+        if started_at is not None and started_at < 1_000_000_000:
+            started_at = None
+        if completed_at is not None and completed_at < 1_000_000_000:
+            completed_at = None
+        # 防御：终态但缺 completed_at → 补成 now（保留实际运行时长，停止累加）
+        if status in ("ok", "user_filled", "skipped", "failed", "cancelled") and started_at and not completed_at:
+            completed_at = _time.time()
+        # 防御：running 但缺 started_at（极端 race / 残留脏数据）
+        # → 不挂 started_at，前端会 return 空；再单独挂 elapsed_s=None 让前端知道"无法计算"
+        if started_at:
+            merged["started_at"] = started_at
+        if completed_at:
+            merged["completed_at"] = completed_at
+        if started_at and completed_at:
+            merged["elapsed_s"] = round(completed_at - started_at, 1)
+        elif started_at and status == "running":
+            # 还在跑：用当前时间算"已耗时"
+            merged["elapsed_s"] = round(_time.time() - started_at, 1)
+        # running 缺 started_at：明确不挂 elapsed_s，让前端兜底 return ''
+        if sr.get("error"):
+            merged["error"] = sr["error"]
+        out.append(merged)
+    return out
+
+
 # ─── Routes ───
 
 @router.get("/in-flight")
@@ -60,7 +109,7 @@ async def get_in_flight_run(db: Session = Depends(get_db)):
             "project_id": run.project_id,
             "name": run.name,
             "status": run.status,
-            "stages": run.stages or [],
+            "stages": merge_stage_results(run.stages or [], run.stage_results or {}),
             "stage_results": run.stage_results or {},
         }
     }
@@ -78,7 +127,7 @@ async def get_run(run_id: int, db: Session = Depends(get_db)):
         name=run.name,
         status=run.status,
         current_stage_index=run.current_stage_index,
-        stages=run.stages or [],
+        stages=merge_stage_results(run.stages or [], run.stage_results or {}),
         stage_results=run.stage_results or {},
         created_at=run.created_at,
         updated_at=run.updated_at,
@@ -100,15 +149,173 @@ async def get_latest_run(project_id: int, db: Session = Depends(get_db)):
         "run_id": run.id,
         "status": run.status,
         "name": run.name,
-        "stages": run.stages or [],
+        "stages": merge_stage_results(run.stages or [], run.stage_results or {}),
         "stage_results": run.stage_results or {},
+    }
+
+
+@router.get("/project/{project_id}/bootstrap-data")
+async def get_bootstrap_data(project_id: int, db: Session = Depends(get_db)):
+    """获取 bootstrap 产出的"设定文档"（按 stage 整理成结构化视图，给"设定预览"面板用）
+
+    返回：
+      - project_meta:     4 必填 + 8 选填（从 _meta.user_input 读）
+      - base:             基础外推（total_chapters / est_total_words / ai_removal / rationale）
+      - theme:            主旨 + 基调
+      - style:            文风 + 节奏
+      - world:            世界观条目（按 category 分组）
+      - characters:       主角 + 反派 + 配角（含 profile、relations）
+      - arcs:             角色弧光
+      - outline:          项目大纲（plot_lines / structure / pacing_notes）
+      - foreshadowings:   伏笔列表（按短/中/长周期分组）
+      - chapter_outlines: 章节细纲（数组）
+      - run_status:       最新 run 的状态 + 时间戳
+    """
+    run = (
+        db.query(WorkflowRun)
+        .filter(WorkflowRun.project_id == project_id)
+        .order_by(WorkflowRun.created_at.desc())
+        .first()
+    )
+    if not run:
+        raise HTTPException(status_code=404, detail="No run found for this project")
+
+    sr = dict(run.stage_results or {})
+
+    # 读 _meta.user_input（兼容老 run：可能缺失或为反推值）
+    meta = sr.get("_meta", {})
+    user_input = meta.get("user_input", {}) or {}
+    project_meta = {
+        "title": user_input.get("title", ""),
+        "description": user_input.get("description", ""),
+        "chapter_word_count": user_input.get("chapter_word_count", 0),
+        "genre": user_input.get("genre", ""),
+        # 8 选填
+        "theme_input": user_input.get("theme", ""),
+        "tone": user_input.get("tone", ""),
+        "style_input": user_input.get("style", ""),
+        "pacing": user_input.get("pacing", ""),
+        "premise": user_input.get("premise", ""),
+        "protagonist_input": user_input.get("protagonist", ""),
+        "antagonist_input": user_input.get("antagonist", ""),
+        "supporting_input": user_input.get("supporting", ""),
+        "notes": user_input.get("notes", ""),
+    }
+
+    # 各 stage 的 data（如果 stage ok，data 是 dict；failed 则是 None）
+    def _data(stage_id: str) -> dict | None:
+        s = sr.get(stage_id) or {}
+        if s.get("status") == "ok":
+            return s.get("data") or {}
+        return None
+
+    # ── 基础外推（stage_1） ──
+    base = _data("stage_1_base") or {}
+
+    # ── 主旨 / 基调（stage_2a） ──
+    theme_data = _data("stage_2a_theme") or {}
+
+    # ── 文风 / 节奏（stage_2b） ──
+    style_data = _data("stage_2b_style") or {}
+
+    # ── 世界观（stage_2c）：按 category 分组 ──
+    world_data = _data("stage_2c_world") or {}
+    world_entries = world_data.get("world_entries", [])
+    world_by_category: dict[str, list] = {}
+    for entry in world_entries:
+        cat = entry.get("category", "其他")
+        world_by_category.setdefault(cat, []).append(entry)
+
+    # ── 角色（stage_3a/3b/3c）──
+    protagonist = _data("stage_3a_protagonist") or {}
+    antagonist = _data("stage_3b_antagonist") or {}
+    supporting_data = _data("stage_3c_supporting") or {}
+    supporting = supporting_data.get("supporting", [])
+    relations = supporting_data.get("relations", [])
+
+    # ── 角色弧光（stage_3d）──
+    arcs_data = _data("stage_3d_arcs") or {}
+    arcs = arcs_data.get("arcs", [])
+
+    # ── 项目大纲（stage_4a）──
+    outline_data = _data("stage_4a_outline") or {}
+
+    # ── 伏笔（stage_4b）：按 type/周期分组 ──
+    # 实际数据结构：{"title", "content", "type": "短/中/长" 或 "short/medium/long", "suggested_plant_chapter", "suggested_resolve_chapter"}
+    f_data = _data("stage_4b_foreshadow") or {}
+    foreshadowings = f_data.get("foreshadowings", [])
+    foreshadow_by_period: dict[str, list] = {
+        "短周期": [], "中周期": [], "长周期": [], "未分类": [],
+    }
+    # 兼容多种字段命名 + 中英文值
+    period_field_candidates = ["type", "period", "duration", "category"]
+    period_value_map = {
+        "short": "短周期", "medium": "中周期", "long": "长周期",
+        "短": "短周期", "中": "中周期", "长": "长周期",
+        "短周期": "短周期", "中周期": "中周期", "长周期": "长周期",
+    }
+    for f in foreshadowings:
+        period = "未分类"
+        for field in period_field_candidates:
+            raw = f.get(field, "")
+            if isinstance(raw, str) and raw in period_value_map:
+                period = period_value_map[raw]
+                break
+        foreshadow_by_period[period].append(f)
+
+    # ── 章节细纲（stage_5）──
+    chap_data = _data("stage_5_chapters") or {}
+    chapter_outlines = chap_data.get("chapter_outlines", [])
+
+    return {
+        "project_id": project_id,
+        "run_id": run.id,
+        "run_status": run.status,
+        "run_created_at": run.created_at,
+        "run_updated_at": run.updated_at,
+        "project_meta": project_meta,
+        "base": {
+            "total_chapters": base.get("total_chapters"),
+            "est_total_words": base.get("est_total_words"),
+            "ai_removal": base.get("ai_removal"),
+            "rationale": base.get("rationale", ""),
+        },
+        "theme": {
+            "theme": theme_data.get("theme", ""),
+            "tone": theme_data.get("tone", ""),
+        },
+        "style": {
+            "style": style_data.get("style", ""),
+            "pacing": style_data.get("pacing", ""),
+        },
+        "world": {
+            "entries_by_category": world_by_category,
+            "entry_count": len(world_entries),
+        },
+        "characters": {
+            "protagonist": protagonist,
+            "antagonist": antagonist,
+            "supporting": supporting,
+            "relations": relations,
+        },
+        "arcs": arcs,
+        "outline": outline_data,
+        "foreshadowings": {
+            "by_period": foreshadow_by_period,
+            "total": len(foreshadowings),
+        },
+        "chapter_outlines": chapter_outlines,
     }
 
 
 @router.post("/run/{run_id}/rerun")
 async def rerun_stage(run_id: int, req: RerunRequest, db: Session = Depends(get_db)):
-    """重新跑某个 stage（覆盖之前的结果）"""
+    """重新跑某个 stage（异步：提交到线程池，立即返回 task_id）
+
+    前端拿到 task_id 后轮询 /api/tasks/{task_id} 获取结果。
+    """
     from llm.workflow import rerun_stage as _rerun
+    from api.tasks import submit_llm_task, get_task
 
     run = db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
     if not run:
@@ -120,9 +327,145 @@ async def rerun_stage(run_id: int, req: RerunRequest, db: Session = Depends(get_
             detail="已 commit 的 run 不能 rerun stage，请新建项目或清除 commit 状态",
         )
 
-    logger.info(f"[Workflow] rerun run={run_id} stage={req.stage_id}")
-    result = _rerun(run_id, req.stage_id, db)
-    return result
+    logger.info(f"[Workflow] rerun (async) run={run_id} stage={req.stage_id}")
+
+    # 异步提交：在线程池里跑 LLM，主线程立即返回
+    def _async_rerun_task(task_id: str, **kwargs):
+        from storage.database import SessionLocal
+        from api.tasks import _refresh_inmem_task_from_run
+
+        run_id = kwargs["run_id"]
+        stage_id = kwargs["stage_id"]
+
+        # 重新开一个 session（线程池不能共用主线程的 db）
+        local_db = SessionLocal()
+        try:
+            result = _rerun(run_id, stage_id, local_db)
+            task = get_task(task_id)
+            if task is None:
+                return
+            if result.get("status") == "ok":
+                task.status = "completed"
+                task.result = result
+                task.progress = 100
+                # 同步 in-memory task → DB
+                _refresh_inmem_task_from_run(run_id)
+            else:
+                task.status = "failed"
+                task.error = result.get("error", "rerun failed")
+            task.completed_at = __import__("time").time()
+            logger.info(f"[Workflow] async rerun done run={run_id} stage={stage_id} status={task.status}")
+        except Exception as e:
+            task = get_task(task_id)
+            if task:
+                task.status = "failed"
+                task.error = str(e)
+                task.completed_at = __import__("time").time()
+            logger.error(f"[Workflow] async rerun EXC run={run_id} stage={stage_id}: {e}", exc_info=True)
+        finally:
+            local_db.close()
+
+    task = submit_llm_task(
+        task_type="rerun_stage",
+        llm_call_fn=_async_rerun_task,
+        project_id=run.project_id,
+        description=f"重跑 stage [{req.stage_id}]",
+        run_id=run_id,
+        stage_id=req.stage_id,
+    )
+    return {
+        "status": "submitted",
+        "task_id": task.id,
+        "run_id": run_id,
+        "stage_id": req.stage_id,
+        "message": "rerun 已提交，立即返回；前端轮询 /api/tasks/{task_id} 拿结果",
+    }
+
+
+@router.post("/run/{run_id}/rerun-all")
+async def rerun_all_stages(run_id: int, db: Session = Depends(get_db), force_all: bool = False):
+    """重跑 run 中所有 stage（异步：提交到线程池，立即返回 task_id）
+
+    行为：
+      force_all=False（默认）：只重跑 failed / cancelled / 未开始的 stage，已成功的不动。
+      force_all=True：重跑全部 stage（包括已成功的），仅 user_filled 和 skipped 不动。
+
+    前端轮询 /api/tasks/{task_id} 拿结果。
+    """
+    from llm.workflow import rerun_all_failed_stages
+    from api.tasks import submit_llm_task, get_task
+
+    run = db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    if run.status == "committed":
+        raise HTTPException(
+            status_code=400,
+            detail="已 commit 的 run 不能 rerun-all",
+        )
+
+    logger.info(f"[Workflow] rerun-all (async) run={run_id} force_all={force_all}")
+
+    def _async_rerun_all_task(task_id: str, **kwargs):
+        from storage.database import SessionLocal
+        from api.tasks import _refresh_inmem_task_from_run
+        import time as _time
+
+        run_id = kwargs["run_id"]
+        force_all = kwargs.get("force_all", False)
+        local_db = SessionLocal()
+        try:
+            # 让前端能看到 stage 状态在变：把 run 标 running
+            local_run = local_db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
+            if local_run and local_run.status in ("completed", "partial", "failed", "cancelled"):
+                local_run.status = "running"
+                local_db.commit()
+
+            result = rerun_all_failed_stages(run_id, local_db, force_all=force_all)
+
+            task = get_task(task_id)
+            if task is None:
+                return
+            task.status = "completed" if result.get("status") == "ok" else "failed"
+            task.result = result
+            task.progress = 100
+            task.completed_at = _time.time()
+            # 同步 in-memory → DB
+            synced = _refresh_inmem_task_from_run(run_id)
+            result["in_mem_synced"] = synced
+            logger.info(
+                f"[Workflow] async rerun-all done run={run_id} "
+                f"force_all={force_all} "
+                f"rerun={len(result.get('rerun_stages', []))} "
+                f"still_failed={len(result.get('still_failed', []))}"
+            )
+        except Exception as e:
+            task = get_task(task_id)
+            if task:
+                task.status = "failed"
+                task.error = str(e)
+                task.completed_at = __import__("time").time()
+            logger.error(f"[Workflow] async rerun-all EXC run={run_id}: {e}", exc_info=True)
+        finally:
+            local_db.close()
+
+    task = submit_llm_task(
+        task_type="rerun_all",
+        llm_call_fn=_async_rerun_all_task,
+        project_id=run.project_id,
+        description="重跑全部 stage" if force_all else "重跑失败/未完成 stage",
+        run_id=run_id,
+        force_all=force_all,
+    )
+    return {
+        "status": "submitted",
+        "task_id": task.id,
+        "run_id": run_id,
+        "force_all": force_all,
+        "message": "rerun-all 已提交，立即返回；前端轮询 /api/tasks/{task_id} 拿结果，"
+                   "并通过 /api/workflow/run/{run_id} 看 stage 状态变化",
+    }
 
 
 @router.post("/run/{run_id}/commit", response_model=CommitResponse)
@@ -154,23 +497,69 @@ async def commit_run(run_id: int, db: Session = Depends(get_db)):
 
 @router.post("/run/{run_id}/rerun-and-commit")
 async def rerun_and_commit(run_id: int, req: RerunRequest, db: Session = Depends(get_db)):
-    """重跑 stage 后自动 commit（用于用户在预览页修改后提交）"""
+    """重跑 stage 后自动 commit（异步：立即返回 task_id）"""
+    from api.tasks import submit_llm_task, get_task
     from llm.workflow import rerun_stage as _rerun, commit_bootstrap
 
     run = db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    rerun_result = _rerun(run_id, req.stage_id, db)
-    if rerun_result.get("status") != "ok":
-        return {
-            "status": "rerun_failed",
-            "error": rerun_result.get("error"),
-        }
+    def _async_rerun_and_commit_task(task_id: str, **kwargs):
+        from storage.database import SessionLocal
+        import time as _time
 
-    commit_result = commit_bootstrap(run.project_id, run_id, db)
+        run_id_inner = kwargs["run_id"]
+        stage_id = kwargs["stage_id"]
+        local_db = SessionLocal()
+        try:
+            # 取 run（在新 session 里）
+            local_run = local_db.query(WorkflowRun).filter(WorkflowRun.id == run_id_inner).first()
+            if local_run is None:
+                raise RuntimeError(f"Run {run_id_inner} not found")
+
+            rerun_result = _rerun(run_id_inner, stage_id, local_db)
+            if rerun_result.get("status") != "ok":
+                task = get_task(task_id)
+                if task:
+                    task.status = "failed"
+                    task.error = rerun_result.get("error", "rerun failed")
+                    task.completed_at = _time.time()
+                return
+
+            commit_result = commit_bootstrap(local_run.project_id, run_id_inner, local_db)
+            task = get_task(task_id)
+            if task:
+                task.status = "completed"
+                task.result = {
+                    "status": "committed",
+                    "rerun_stage": stage_id,
+                    "commit_summary": commit_result.get("summary", {}),
+                }
+                task.progress = 100
+                task.completed_at = _time.time()
+        except Exception as e:
+            task = get_task(task_id)
+            if task:
+                task.status = "failed"
+                task.error = str(e)
+                task.completed_at = _time.time()
+            logger.error(f"[Workflow] async rerun-and-commit EXC run={run_id_inner}: {e}", exc_info=True)
+        finally:
+            local_db.close()
+
+    task = submit_llm_task(
+        task_type="rerun_and_commit",
+        llm_call_fn=_async_rerun_and_commit_task,
+        project_id=run.project_id,
+        description=f"重跑+commit stage [{req.stage_id}]",
+        run_id=run_id,
+        stage_id=req.stage_id,
+    )
     return {
-        "status": "committed",
-        "rerun_stage": req.stage_id,
-        "commit_summary": commit_result.get("summary", {}),
+        "status": "submitted",
+        "task_id": task.id,
+        "run_id": run_id,
+        "stage_id": req.stage_id,
+        "message": "rerun-and-commit 已提交，立即返回；轮询 /api/tasks/{task_id} 拿结果",
     }
