@@ -184,6 +184,16 @@ function app() {
     generating: false,
     generatedText: null,
 
+    // ─── 9 步章节生成流水线（chapter_pipeline）───
+    // 后端：/api/chapters/generate-pipeline (POST) → task_id
+    // 轮询 /api/tasks/{id} 拿实时 9 step 状态
+    showPipelineProgress: false,
+    pipelineTask: null,        // 当前正在跟踪的 task 完整对象（含 result.stages）
+    pipelinePollHandle: null,  // setInterval 句柄
+    pipelineStartTs: 0,        // pipelineStartedAt，用于 elapsed_text
+    // 任务管理弹窗：chapter_pipeline 类型的任务是否展开子任务详情
+    expandedTaskIds: [],
+
     // ─── Init ───
     async init() {
       await this.checkInitStatus();
@@ -2115,6 +2125,211 @@ function app() {
         this.reviewResult = newRev;
         alert('修订完成！修订版已生成。');
       } catch (e) { alert('修订失败: ' + e.message); }
+    },
+
+    // ─── 章节生成 9 步流水线 ───
+
+    // 9 步元数据（与后端 llm.chapter_pipeline.PIPELINE_STAGES_META 对齐）
+    PIPELINE_STAGES_META: [
+      { id: '1_prep',           label: '准备上下文' },
+      { id: '2_outline_gen',    label: '生成章节细纲' },
+      { id: '3_outline_review', label: '细纲评审' },
+      { id: '4_text_gen',       label: '生成正文' },
+      { id: '5_word_adjust',    label: '字数调整' },
+      { id: '6_review',         label: '正文评审' },
+      { id: '7_revise',         label: '自动修订' },
+      { id: '8_save',           label: '保存到数据库' },
+      { id: '9_post',           label: '后处理（弧光/伏笔/一致性）' },
+    ],
+
+    get canRunPipeline() {
+      // 必须有项目 + 章节
+      return !!(this.currentProject && this.currentChapter);
+    },
+
+    /**
+     * 启动 9 步章节生成流水线：
+     *  1. POST /api/chapters/generate-pipeline → 拿 task_id
+     *  2. 弹出 showPipelineProgress 弹窗
+     *  3. setInterval 轮询 /api/tasks/{id}，每次把 result.stages 推进 UI
+     *  4. 终态（completed/failed/cancelled）停止轮询
+     */
+    async runChapterPipeline() {
+      if (!this.canRunPipeline) {
+        alert('请先选择项目和章节');
+        return;
+      }
+      if (this.pipelinePollHandle) {
+        alert('已有流水线正在运行，请等待完成');
+        return;
+      }
+      try {
+        const res = await fetch('/api/chapters/generate-pipeline', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            project_id: this.currentProject.id,
+            chapter_id: this.currentChapter.id,
+            auto_revise: true,
+            revision_threshold: 6.5,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.task_id) {
+          alert('流水线提交失败：' + (data.detail || JSON.stringify(data)));
+          return;
+        }
+        // 打开面板
+        this.pipelineTask = { id: data.task_id, status: 'pending', result: { stages: {} } };
+        this.pipelineStartTs = Date.now();
+        this.showPipelineProgress = true;
+        // 开始轮询
+        this.pipelinePollHandle = setInterval(() => this._pollPipelineTask(), 1200);
+        this._pollPipelineTask();  // 立即拉一次
+        // 同时刷新任务管理列表
+        if (this.refreshAllTasks) this.refreshAllTasks();
+      } catch (e) {
+        alert('启动流水线失败：' + e.message);
+      }
+    },
+
+    async _pollPipelineTask() {
+      if (!this.pipelineTask) return;
+      try {
+        const res = await fetch('/api/tasks/' + this.pipelineTask.id);
+        if (!res.ok) return;
+        const task = await res.json();
+        this.pipelineTask = task;
+        // 同步刷新任务管理列表（让顶部 badge 数字也变）
+        if (this.refreshAllTasks) this.refreshAllTasks();
+        if (['completed', 'failed', 'cancelled'].includes(task.status)) {
+          clearInterval(this.pipelinePollHandle);
+          this.pipelinePollHandle = null;
+          // 完成后自动重拉章节（拿到最新 content）
+          if (task.status === 'completed') {
+            try { await this.selectChapter(this.currentChapter); } catch (e) { /* ignore */ }
+          }
+        }
+      } catch (e) {
+        console.warn('[Pipeline] poll failed:', e);
+      }
+    },
+
+    closePipelinePanel(navigateToChapter) {
+      // 只有在终态才允许关
+      const s = this.pipelineStatus;
+      const taskDone = !this.pipelineTask || ['completed','failed','cancelled'].includes(this.pipelineTask.status);
+      if (!taskDone && s === 'running') {
+        if (!confirm('流水线还在运行中，确认关闭此面板？（不会停止后台任务）')) return;
+        // 用户选择关：停掉轮询但不动后端任务
+        if (this.pipelinePollHandle) {
+          clearInterval(this.pipelinePollHandle);
+          this.pipelinePollHandle = null;
+        }
+      } else {
+        if (this.pipelinePollHandle) {
+          clearInterval(this.pipelinePollHandle);
+          this.pipelinePollHandle = null;
+        }
+      }
+      this.showPipelineProgress = false;
+      if (navigateToChapter) {
+        // 已经在写作台，不用跳
+      }
+    },
+
+    onPipelineCompletedAndClose() {
+      this.closePipelinePanel(false);
+      // 重拉章节列表（确保字数/状态更新）
+      if (this.currentProject && this.loadChapters) {
+        this.loadChapters(this.currentProject.id);
+      }
+    },
+
+    // 把后端 task.result.stages 合并成 9 步视图（永远显示 9 行）
+    get pipelineStagesView() {
+      const meta = this.PIPELINE_STAGES_META;
+      const backendStages = (this.pipelineTask && this.pipelineTask.result && this.pipelineTask.result.stages) || {};
+      const now = Date.now();
+      return meta.map(m => {
+        const s = backendStages[m.id] || {};
+        const startedAtMs = s.started_at ? Math.floor(s.started_at * 1000) : null;
+        // running 阶段：实时算 elapsed
+        let elapsed_display = '0.0';
+        let elapsed_pct = 0;
+        if (s.status === 'running') {
+          if (startedAtMs) {
+            const e = (now - startedAtMs) / 1000;
+            elapsed_display = e.toFixed(1);
+            // 假设单阶段最多 90s 满，进度条走 e/90
+            elapsed_pct = Math.min(95, (e / 90) * 100);
+          } else {
+            elapsed_display = ((now - this.pipelineStartTs) / 1000).toFixed(1);
+            elapsed_pct = 30;
+          }
+        } else if (s.duration_ms != null) {
+          elapsed_display = (s.duration_ms / 1000).toFixed(1);
+          elapsed_pct = 100;
+        }
+        return {
+          id: m.id,
+          label: s.label || m.label,
+          status: s.status || 'pending',
+          duration_ms: s.duration_ms,
+          duration_display: elapsed_display,
+          elapsed_display: elapsed_display,
+          elapsed_pct: elapsed_pct,
+          error: s.error || null,
+        };
+      });
+    },
+
+    get pipelineProgressPct() {
+      if (!this.pipelineTask || !this.pipelineTask.result) return 0;
+      return this.pipelineTask.result.progress_pct || 0;
+    },
+
+    get pipelineStatus() {
+      return (this.pipelineTask && this.pipelineTask.status) || 'pending';
+    },
+
+    get pipelineFinalResult() {
+      if (!this.pipelineTask || !this.pipelineTask.result) return null;
+      const r = this.pipelineTask.result;
+      if (r.final_word_count) return { final_word_count: r.final_word_count };
+      return null;
+    },
+
+    get pipelineElapsedText() {
+      const e = (Date.now() - this.pipelineStartTs) / 1000;
+      return e < 60 ? e.toFixed(1) + 's' : Math.floor(e/60) + 'm' + Math.floor(e%60) + 's';
+    },
+
+    // ─── 任务管理：chapter_pipeline 任务的展开/操作 ───
+
+    toggleTaskDetail(taskId) {
+      if (this.expandedTaskIds.includes(taskId)) {
+        this.expandedTaskIds = this.expandedTaskIds.filter(id => id !== taskId);
+      } else {
+        this.expandedTaskIds = [...this.expandedTaskIds, taskId];
+      }
+    },
+
+    openPipelinePanelForTask(t) {
+      // 拿一个 task 对象塞到 pipelineTask + 打开面板
+      this.pipelineTask = t;
+      this.pipelineStartTs = Date.now() - Math.floor((t.duration_s || 0) * 1000);
+      this.showPipelineProgress = true;
+      // 若任务还在跑，启轮询
+      if (['pending','running'].includes(t.status)) {
+        if (this.pipelinePollHandle) clearInterval(this.pipelinePollHandle);
+        this.pipelinePollHandle = setInterval(() => this._pollPipelineTask(), 1200);
+      }
+    },
+
+    getStageLabel(stageId) {
+      const m = this.PIPELINE_STAGES_META.find(s => s.id === stageId);
+      return m ? m.label : stageId;
     },
 
     // ─── AI 生成 ───

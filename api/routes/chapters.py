@@ -5,6 +5,8 @@ from sqlalchemy.orm import Session
 from storage.database import get_db
 from storage.models import Chapter, ChapterVersion, Project
 import re
+from logger import logger
+
 
 
 router = APIRouter(prefix="/api", tags=["章节"])
@@ -262,23 +264,79 @@ async def run_pipeline(req: PipelineRequest, db: Session = Depends(get_db)):
 
 def _async_pipeline_task(task_id: str, req: PipelineRequest):
     from storage.database import SessionLocal
-    from llm.chapter_pipeline import run_chapter_generation_pipeline
+    from llm.chapter_pipeline import run_chapter_generation_pipeline, PIPELINE_STAGES_META
     from api.tasks import get_task
+    import time as _time
 
     db = SessionLocal()
     try:
         task = get_task(task_id)
+
+        # 初始化 task.result.stages（让前端轮询时一开始就能看到 9 个 step 骨架）
+        if task is not None:
+            task.result = {
+                "stages": {
+                    m["id"]: {
+                        "id": m["id"],
+                        "label": m["label"],
+                        "weight": m["weight"],
+                        "status": "pending",  # pending / running / completed / failed
+                        "duration_ms": None,
+                    }
+                    for m in PIPELINE_STAGES_META
+                },
+                "current_stage": None,
+                "progress_pct": 0,
+                "post_processing": {},
+            }
+            task.progress = 5  # 一启动就让任务管理面板活起来
+
+        # 进度回调：每 stage 跑开始/完成时调用
+        def _on_progress(stage_id: str, status: str, info: dict):
+            t = get_task(task_id)
+            if t is None:
+                return
+            r = dict(t.result or {})
+            stages = dict(r.get("stages") or {})
+            entry = dict(stages.get(stage_id) or {"id": stage_id})
+            entry["status"] = status
+            if "duration_ms" in info:
+                entry["duration_ms"] = info["duration_ms"]
+            if "label" in info:
+                entry["label"] = info["label"]
+            if "error" in info:
+                entry["error"] = info["error"]
+            stages[stage_id] = entry
+            r["stages"] = stages
+            r["current_stage"] = stage_id if status == "running" else r.get("current_stage")
+            r["progress_pct"] = info.get("progress_pct", r.get("progress_pct", 0))
+            t.result = r
+            t.progress = max(t.progress or 0, min(95, r["progress_pct"] + 5))
+            logger.info(
+                f"[PipelineTask {task_id}] stage {stage_id} → {status} "
+                f"({entry.get('duration_ms') or 0:.0f}ms) progress={r['progress_pct']}%"
+            )
+
         result = run_chapter_generation_pipeline(
             db, req.project_id, req.chapter_id, req.provider,
             auto_revise=req.auto_revise,
             revision_threshold=req.revision_threshold,
+            progress_cb=_on_progress,
         )
-        if task:
-            task.result = {
-                "final_word_count": result.get("final_word_count"),
-                "stages": {k: v.get("status") for k, v in result.get("stages", {}).items()},
-                "post_processing": result.get("post_processing", {}),
-            }
+
+        # 收尾：把完整 stages 列表 + 终态写进 task.result
+        if task is not None:
+            r = dict(task.result or {})
+            r["status"] = result.get("status")
+            r["final_word_count"] = result.get("final_word_count")
+            r["post_processing"] = result.get("post_processing", {})
+            r["total_duration_ms"] = result.get("total_duration_ms")
+            r["error"] = result.get("error")
+            r["progress_pct"] = 100
+            task.result = r
+            task.progress = 100
+            task.completed_at = _time.time()
         return result
     finally:
         db.close()
+

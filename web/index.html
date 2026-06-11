@@ -6,6 +6,47 @@
   <title>CozyWriter - 小说编写助手</title>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
   <link rel="stylesheet" href="/static/css/style.css">
+
+<style>
+/* === 流水线进度面板 === */
+.pipeline-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.pipeline-overall { margin: 8px 0 16px; }
+.pipeline-overall-text { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; font-size: 13px; }
+.pipeline-stages { display: flex; flex-direction: column; gap: 6px; }
+.pipeline-stage { display: flex; align-items: flex-start; gap: 12px; padding: 8px 10px; border-radius: 6px; background: #f8fafc; border-left: 3px solid #cbd5e1; transition: all .2s; }
+.pipeline-stage.stage-running { background: #eff6ff; border-left-color: #3b82f6; }
+.pipeline-stage.stage-completed { background: #f0fdf4; border-left-color: #10b981; }
+.pipeline-stage.stage-failed { background: #fef2f2; border-left-color: #ef4444; }
+.pipeline-stage.stage-skipped { background: #f1f5f9; border-left-color: #94a3b8; opacity: 0.6; }
+.stage-marker { display: flex; flex-direction: column; align-items: center; min-width: 30px; }
+.stage-num { font-size: 11px; color: #64748b; font-weight: 600; }
+.stage-icon { font-size: 16px; }
+.stage-body { flex: 1; }
+.stage-label { display: flex; gap: 8px; align-items: center; font-size: 14px; font-weight: 500; }
+.stage-elapsed { font-size: 11px; color: #64748b; font-weight: normal; }
+.stage-bar { margin-top: 4px; height: 4px; background: #e2e8f0; border-radius: 2px; overflow: hidden; }
+.stage-bar-fill { height: 100%; background: #3b82f6; transition: width .3s; }
+.pipeline-stage.stage-completed .stage-bar-fill { background: #10b981; }
+.stage-error { font-size: 11px; color: #ef4444; margin-top: 4px; }
+.pipeline-result { padding: 8px 10px; background: #f0fdf4; border-radius: 4px; font-size: 13px; }
+.pipeline-failed { background: #fef2f2; }
+.pipeline-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+/* === 任务管理：子任务详情 === */
+.btn-tiny { background: transparent; border: 1px solid #cbd5e1; color: #475569; padding: 1px 8px; border-radius: 10px; font-size: 11px; cursor: pointer; }
+.btn-tiny:hover { background: #f1f5f9; }
+.task-pipeline-detail { margin-top: 8px; padding: 8px 10px; background: #f8fafc; border-radius: 4px; }
+.tpd-overall { font-size: 12px; color: #475569; margin-bottom: 6px; }
+.tpd-stages { display: flex; flex-direction: column; gap: 3px; }
+.tpd-stage { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 0; }
+.tpd-stage.stage-completed { color: #047857; }
+.tpd-stage.stage-running { color: #1d4ed8; font-weight: 500; }
+.tpd-stage.stage-failed { color: #b91c1c; }
+.tpd-icon { width: 16px; }
+.tpd-time { color: #94a3b8; font-size: 11px; margin-left: auto; }
+.tpd-err { color: #ef4444; font-size: 11px; margin-left: 6px; }
+</style>
+
 </head>
 <body>
   <div id="app" x-data="cozywriterApp" x-init="init()">
@@ -285,7 +326,10 @@
                   </div>
                   <div class="footer-actions">
                     <button class="btn-secondary" @click="saveChapter()">💾 保存</button>
-                    <button class="btn-primary" @click="showGenerateModal = true">✨ AI 续写</button>
+                    <button class="btn-secondary" @click="showGenerateModal = true">✨ AI 续写</button>
+                    <button class="btn-primary" @click="runChapterPipeline()"
+                            title="一键启动 9 步流水线（细纲→正文→评审→修订→保存→后处理）"
+                            :disabled="!canRunPipeline">🤖 一键生成</button>
                   </div>
                 </div>
               </div>
@@ -1280,6 +1324,94 @@
       </div>
     </template>
 
+    <!-- ═══ 章节生成 9 步流水线进度面板 ═══ -->
+    <template x-if="showPipelineProgress">
+      <div class="modal-overlay" @click.self="closePipelinePanel(false)">
+        <div class="modal modal-wide">
+          <header class="pipeline-header">
+            <h3>
+              <span>🤖 章节生成流水线（第 </span>
+              <span x-text="currentChapter ? currentChapter.order + 1 : '?'"></span>
+              <span> 章）</span>
+            </h3>
+            <button class="modal-close-x" @click="closePipelinePanel(false)" :disabled="pipelineTask && !pipelineTaskDone">×</button>
+          </header>
+
+          <!-- 总体进度条 -->
+          <div class="pipeline-overall">
+            <div class="progress-bar-track">
+              <div class="progress-bar-fill" :style="`width: ${pipelineProgressPct}%`"></div>
+            </div>
+            <div class="pipeline-overall-text">
+              <span x-text="`${pipelineProgressPct}% · ${pipelineElapsedText}`"></span>
+              <span class="status-pill" :class="`status-${pipelineStatus}`" x-text="{
+                pending: '等待',
+                running: '运行中',
+                completed: '已完成',
+                failed: '失败',
+                cancelled: '已取消'
+              }[pipelineStatus] || pipelineStatus"></span>
+            </div>
+          </div>
+
+          <!-- 9 步任务清单 -->
+          <div class="pipeline-stages">
+            <template x-for="stage in pipelineStagesView" :key="stage.id">
+              <div class="pipeline-stage" :class="`stage-${stage.status}`">
+                <div class="stage-marker">
+                  <span class="stage-num" x-text="stage.id.split('_')[0]"></span>
+                  <span class="stage-icon" x-text="{
+                    pending: '○',
+                    running: '⏳',
+                    completed: '✅',
+                    failed: '❌',
+                    skipped: '⏭'
+                  }[stage.status] || '○'"></span>
+                </div>
+                <div class="stage-body">
+                  <div class="stage-label">
+                    <span x-text="stage.label"></span>
+                    <span class="stage-elapsed" x-show="stage.status === 'running' && stage.duration_ms === null"
+                          x-text="`(已 ${stage.elapsed_display}s)`"></span>
+                    <span class="stage-elapsed" x-show="stage.duration_ms !== null"
+                          x-text="`(${stage.duration_display}s)`"></span>
+                  </div>
+                  <div class="stage-bar" x-show="stage.status === 'running' || stage.status === 'completed'">
+                    <div class="stage-bar-fill"
+                         :style="`width: ${stage.status === 'completed' ? 100 : stage.elapsed_pct}%`"></div>
+                  </div>
+                  <div class="stage-error" x-show="stage.error" x-text="stage.error"></div>
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <!-- 完成后显示的字数 / 评审信息 -->
+          <template x-if="pipelineStatus === 'completed' && pipelineFinalResult">
+            <div class="pipeline-result">
+              <span>✅ 章节生成完成 · 共 <strong x-text="pipelineFinalResult.final_word_count"></strong> 字</span>
+            </div>
+          </template>
+          <template x-if="pipelineStatus === 'failed'">
+            <div class="pipeline-result pipeline-failed">
+              <span>❌ 流水线中断：<span x-text="pipelineTask && pipelineTask.error"></span></span>
+            </div>
+          </template>
+
+          <footer class="pipeline-footer">
+            <button class="btn-secondary" @click="closePipelinePanel(false)"
+                    :disabled="pipelineTask && !pipelineTaskDone && pipelineStatus !== 'cancelled' && pipelineStatus !== 'failed'">
+              关闭
+            </button>
+            <button class="btn-primary" @click="onPipelineCompletedAndClose()"
+                    x-show="pipelineStatus === 'completed'">
+              📖 回到章节查看
+            </button>
+          </footer>
+        </div>
+      </div>
+    </template>
+
     <!-- ═══ 项目设置弹窗 ═══ -->
     <template x-if="showProjectSettings">
       <div class="modal-overlay" @click.self="showProjectSettings = false">
@@ -1375,9 +1507,42 @@
                     <span class="task-type" x-text="t.task_type"></span>
                     <span class="task-id" x-text="t.id"></span>
                     <span class="task-duration" x-text="`${t.duration_s}s`"></span>
+                    <!-- 流水线任务：展开/收起子任务详情 -->
+                    <button class="btn-tiny"
+                            x-show="t.task_type === 'chapter_pipeline' && t.result && t.result.stages"
+                            @click="toggleTaskDetail(t.id)">
+                      <span x-text="expandedTaskIds.includes(t.id) ? '▾ 收起子任务' : '▸ 展开子任务'"></span>
+                    </button>
                   </div>
                   <template x-if="t.error">
                     <div class="task-error" x-text="t.error"></div>
+                  </template>
+
+                  <!-- 流水线子任务详情 -->
+                  <template x-if="t.task_type === 'chapter_pipeline' && t.result && t.result.stages && expandedTaskIds.includes(t.id)">
+                    <div class="task-pipeline-detail">
+                      <div class="tpd-overall">
+                        <span x-text="`总进度: ${(t.result.progress_pct || 0)}%`"></span>
+                        <span x-text="t.result.current_stage ? `· 当前: ${getStageLabel(t.result.current_stage)}` : ''"></span>
+                        <span x-show="t.result.total_duration_ms" x-text="`· 总耗时: ${(t.result.total_duration_ms/1000).toFixed(1)}s`"></span>
+                      </div>
+                      <div class="tpd-stages">
+                        <template x-for="[sid, sinfo] in Object.entries(t.result.stages)" :key="sid">
+                          <div class="tpd-stage" :class="`stage-${sinfo.status}`">
+                            <span class="tpd-icon" x-text="{
+                              pending: '○',
+                              running: '⏳',
+                              completed: '✅',
+                              failed: '❌'
+                            }[sinfo.status] || '○'"></span>
+                            <span class="tpd-label" x-text="sinfo.label || sid"></span>
+                            <span class="tpd-time" x-show="sinfo.duration_ms !== null && sinfo.duration_ms !== undefined"
+                                  x-text="`${(sinfo.duration_ms/1000).toFixed(1)}s`"></span>
+                            <span class="tpd-err" x-show="sinfo.error" x-text="sinfo.error"></span>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
                   </template>
                 </div>
                 <div class="task-status">
@@ -1393,6 +1558,12 @@
                           x-show="t.task_type === 'bootstrap' && ['failed', 'cancelled'].includes(t.status) && t.run_id"
                           @click="rerunOneBootstrapTask(t)">
                     🔄 重新生成
+                  </button>
+                  <!-- 流水线任务 → 直接打开流水线面板（实时进度） -->
+                  <button class="btn-small"
+                          x-show="t.task_type === 'chapter_pipeline' && ['pending','running','failed'].includes(t.status)"
+                          @click="openPipelinePanelForTask(t)">
+                    📊 查看进度
                   </button>
                   <button class="btn-small" x-show="['pending','running'].includes(t.status)"
                           @click="terminateOneTask(t.id)">⛔ 终止</button>
@@ -1725,7 +1896,7 @@
 
   </div>
 
-  <script src="/static/js/app.js?v=2"></script>
+  <script src="/static/js/app.js?v=3"></script>
 </body>
 </html>
 

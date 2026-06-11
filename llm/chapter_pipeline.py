@@ -19,9 +19,11 @@ Step 9: 章节后处理（弧光/关系/伏笔/黄金3/一致性）
 import json
 import re
 import time
-from typing import Any
+import traceback
+from typing import Any, Callable, Optional
 
 from logger import logger
+
 from llm.factory import LLMFactory
 from llm.roles import get_role, ROLES, build_ai_removal_instruction
 from rag.retrieval import RetrievalService
@@ -687,15 +689,18 @@ def run_quick_consistency_check(
 
 def _format_prep_for_llm(prep: dict) -> str:
     """把 prep_info dict 格式化成 LLM 可读的文本块"""
+    # 防御：chapter_outline 可能是 None（项目未建 ChapterOutline）→ 用 {} 兜底
+    co = prep.get("chapter_outline") if isinstance(prep.get("chapter_outline"), dict) else {}
+
     parts = [
         f"【项目元信息】\n标题: {prep['project_meta']['title']}\n文风: {prep['project_meta']['writing_style']}\n去AI味: {prep['project_meta']['ai_removal']}",
         f"【项目大纲】\n{prep['project_outline_text'] or '（无）'}",
         f"【核心主旨】\n{prep['themes']}",
         f"【本章细纲（来自 ChapterOutline）】\n"
-        f"  位置: {prep['chapter_outline'].get('position', '')} · 节奏: {prep['chapter_outline'].get('pacing', '')}\n"
-        f"  关键内容: {prep['chapter_outline'].get('key_content', '')}\n"
-        f"  剧情推进: {prep['chapter_outline'].get('plot_advance', '')}\n"
-        f"  伏笔动作: {prep['chapter_outline'].get('foreshadow_notes', '')}",
+        f"  位置: {co.get('position', '')} · 节奏: {co.get('pacing', '')}\n"
+        f"  关键内容: {co.get('key_content', '')}\n"
+        f"  剧情推进: {co.get('plot_advance', '')}\n"
+        f"  伏笔动作: {co.get('foreshadow_notes', '')}",
         f"【前 3 章摘要】\n{prep['prev_chapters_summary']}",
         f"【上章结尾】\n{prep['prev_chapter_ending'][-500:]}",
         f"【登场人物】\n" + "\n".join(prep["characters"]),
@@ -709,12 +714,38 @@ def _format_prep_for_llm(prep: dict) -> str:
 # 主编排：9 步流水线
 # ═══════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════
+# 9 步流水线元数据：供前端展示任务清单/进度
+# ═══════════════════════════════════════════════════════════════
+
+# 9 步的"展示名 + 权重"（用于前端进度条）
+PIPELINE_STAGES_META = [
+    {"id": "1_prep",          "label": "准备上下文",   "weight": 1},
+    {"id": "2_outline_gen",   "label": "生成章节细纲", "weight": 2},
+    {"id": "3_outline_review","label": "细纲评审",     "weight": 1},
+    {"id": "4_text_gen",      "label": "生成正文",     "weight": 4},
+    {"id": "5_word_adjust",   "label": "字数调整",     "weight": 1},
+    {"id": "6_review",        "label": "正文评审",     "weight": 2},
+    {"id": "7_revise",        "label": "自动修订",     "weight": 3},
+    {"id": "8_save",          "label": "保存到数据库", "weight": 1},
+    {"id": "9_post",          "label": "后处理",       "weight": 2},
+]
+_TOTAL_WEIGHT = sum(s["weight"] for s in PIPELINE_STAGES_META)  # 17
+
+
 def run_chapter_generation_pipeline(
     db, project_id: int, chapter_id: int, provider: str | None = None,
     auto_revise: bool = True, revision_threshold: float = 6.5,
+    progress_cb: Optional[Callable[[str, str, dict], None]] = None,
 ) -> dict:
     """
     9 步章节生成流水线
+
+    Args:
+        progress_cb: 可选回调 fn(stage_id, status, info) → None
+                     status: "running" | "completed" | "failed"
+                     info: {"label", "duration_ms", "weight", ...}
+                     用于把 stage 状态实时回写到 task.result / task.progress
 
     Returns:
         {
@@ -729,16 +760,51 @@ def run_chapter_generation_pipeline(
     from storage.models import Chapter, ChapterVersion
     start_time = time.time()
     stages = {}
+    completed_weight = 0  # 累计已完成权重（用于计算 task.progress）
+
+    def _notify(stage_id: str, status: str, info: dict):
+        if progress_cb:
+            try:
+                progress_cb(stage_id, status, info)
+            except Exception as cb_err:
+                logger.warning(f"[Pipeline] progress_cb error: {cb_err}")
 
     def _run_stage(name: str, fn) -> tuple[Any, float]:
+        nonlocal completed_weight
         t0 = time.time()
+        meta = next((m for m in PIPELINE_STAGES_META if m["id"] == name), None)
+        label = meta["label"] if meta else name
+        # 通知"开始"
+        _notify(name, "running", {
+            "label": label,
+            "weight": meta["weight"] if meta else 1,
+            "started_at": t0,
+        })
         try:
             result = fn()
-            return result, (time.time() - t0) * 1000
+            duration_ms = (time.time() - t0) * 1000
+            stages[name] = {"status": "completed", "duration_ms": duration_ms, "data": result}
+            completed_weight += (meta["weight"] if meta else 1)
+            # 通知"完成"（带最新进度）
+            _notify(name, "completed", {
+                "label": label,
+                "weight": meta["weight"] if meta else 1,
+                "duration_ms": duration_ms,
+                "progress_pct": min(99, round(completed_weight / _TOTAL_WEIGHT * 100)),
+            })
+            return result, duration_ms
         except Exception as e:
-            logger.error(f"[Pipeline] stage {name} failed: {e}")
-            stages[name] = {"status": "failed", "error": str(e), "duration_ms": (time.time() - t0) * 1000}
+            duration_ms = (time.time() - t0) * 1000
+            tb = traceback.format_exc()
+            logger.error(f"[Pipeline] stage {name} failed: {e}\n{tb}")
+            stages[name] = {"status": "failed", "error": str(e), "duration_ms": duration_ms}
+            _notify(name, "failed", {
+                "label": label,
+                "error": str(e),
+                "duration_ms": duration_ms,
+            })
             raise
+
 
     try:
         # Step 1: 准备
