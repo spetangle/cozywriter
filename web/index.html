@@ -328,7 +328,7 @@
                     <span class="chapter-num" x-text="`第${currentChapter.order + 1}章`"></span>
                     <input type="text" class="chapter-title-input" x-model="currentChapter.title" @change="saveChapter()">
                     <span class="chapter-meta" x-text="`字数: ${currentChapter.word_count}`"></span>
-                    <span class="chapter-score" x-show="previewReview">评分: <strong x-text="previewReview?.overall_score?.toFixed(0) || '-'"></strong></span>
+                    <span class="chapter-score" x-show="previewReview">评分: <strong x-text="previewReview?.overall_score?.toFixed(1) || '-'"></strong> / 100</span>
                   </div>
                   <div class="writing-tabs">
                     <button :class="{ active: writingTab === 'content' }" @click="writingTab = 'content'">正文</button>
@@ -426,7 +426,7 @@
                       </div>
                       <div class="overall-score">
                         <span>综合评分</span>
-                        <strong x-text="previewReview.overall_score?.toFixed(1) + ' / 10'"></strong>
+                        <strong x-text="previewReview.overall_score?.toFixed(1) + ' / 100'"></strong>
                       </div>
                       <div class="critique-section">
                         <h4>评审意见</h4>
@@ -1015,7 +1015,7 @@
                         </div>
                         <div class="overall-score">
                           <span>综合评分</span>
-                          <strong x-text="reviewResult.overall_score.toFixed(1) + ' / 10'"></strong>
+                          <strong x-text="reviewResult.overall_score.toFixed(1) + ' / 100'"></strong>
                         </div>
                         <div class="critique">
                           <h4>评审意见</h4>
@@ -1047,12 +1047,11 @@
               <div class="panel-page">
                 <div class="panel-page-header">
                   <h2>📋 大纲与细纲</h2>
-                  <div class="panel-tabs">
-                    <button :class="{ active: outlineSubPanel === 'overview' }" @click="outlineSubPanel = 'overview'">项目总览</button>
-                    <button :class="{ active: outlineSubPanel === 'plotlines' }" @click="outlineSubPanel = 'plotlines'">剧情线</button>
-                    <button :class="{ active: outlineSubPanel === 'structure' }" @click="outlineSubPanel = 'structure'">结构</button>
-                    <button :class="{ active: outlineSubPanel === 'chapters' }" @click="outlineSubPanel = 'chapters'">章节细纲</button>
-                  </div>
+                  <!--
+                    简化：移除"剧情线 / 结构 / 章节细纲"三个标签页，
+                    这三项内容已经包含在"项目总览"的 AI 生成大纲里（剧情线 / 结构 / 节奏规划），
+                    章节细纲则统一在写作面板的"细纲"标签页维护。
+                  -->
                 </div>
 
                 <!-- 总览 -->
@@ -1144,141 +1143,6 @@
                     <template x-if="!bootstrapData || !bootstrapData.outline || (!bootstrapData.outline.outline_text && (!bootstrapData.outline.plot_lines || bootstrapData.outline.plot_lines.length === 0))">
                       <p style="text-align:center;padding:20px;color:var(--text-muted);font-size:13px">暂无 AI 生成的大纲（项目未跑过引导补全或阶段失败）。</p>
                     </template>
-                  </div>
-                </template>
-
-                <!-- 剧情线 -->
-                <template x-if="outlineSubPanel === 'plotlines'">
-                  <div class="panel-section">
-                    <button class="btn-primary" @click="showPlotlineForm = true">+ 添加剧情线</button>
-                    <div class="plotline-list">
-                      <template x-for="(pl, idx) in projectOutline.plot_lines" :key="idx">
-                        <div class="plotline-card">
-                          <div class="pl-header">
-                            <strong x-text="pl.title"></strong>
-                            <span class="pl-range" x-text="`第${pl.from_chapter}章 → 第${pl.to_chapter}章`"></span>
-                          </div>
-                          <div class="pl-desc" x-text="pl.description || '暂无描述'"></div>
-                        </div>
-                      </template>
-                    </div>
-                    <template x-if="showPlotlineForm">
-                      <div class="inline-form">
-                        <input type="text" x-model="plotlineForm.title" placeholder="剧情线标题">
-                        <textarea x-model="plotlineForm.description" placeholder="剧情线描述..."></textarea>
-                        <div class="form-row">
-                          <label>起始章节</label>
-                          <input type="number" x-model.number="plotlineForm.from_chapter" min="1">
-                          <label>结束章节</label>
-                          <input type="number" x-model.number="plotlineForm.to_chapter" min="1">
-                        </div>
-                        <div class="form-actions">
-                          <button class="btn-secondary" @click="showPlotlineForm = false">取消</button>
-                          <button class="btn-primary" @click="savePlotline()">保存</button>
-                        </div>
-                      </div>
-                    </template>
-                  </div>
-                </template>
-
-                <!-- 结构 -->
-                <template x-if="outlineSubPanel === 'structure'">
-                  <div class="panel-section">
-                    <div class="structure-builder">
-                      <div class="act-list">
-                        <template x-for="(act, idx) in (projectOutline.structure.acts || [])" :key="idx">
-                          <div class="act-card">
-                            <div class="act-name" x-text="act.name"></div>
-                            <div class="act-range" x-text="`第${act.from_chapter}章 → 第${act.to_chapter}章`"></div>
-                          </div>
-                        </template>
-                      </div>
-                      <button class="btn-primary" @click="addAct()">+ 添加段落/幕</button>
-                    </div>
-                    <div class="pacing-notes">
-                      <h4>节奏规划</h4>
-                      <textarea x-model="projectOutline.pacing_notes" @change="saveProjectOutline()" placeholder="整体节奏说明..."></textarea>
-                    </div>
-                  </div>
-                </template>
-
-                <!-- 章节细纲 -->
-                <template x-if="outlineSubPanel === 'chapters'">
-                  <div class="panel-section">
-                    <div class="chapter-outline-list">
-                      <template x-for="ch in chapters" :key="ch.id">
-                        <div class="co-chapter-card" :class="{ expanded: expandedChapterId === ch.id }" @click="toggleChapterOutline(ch.id)">
-                          <div class="co-ch-header">
-                            <span class="co-num" x-text="`第${ch.order + 1}章`"></span>
-                            <span class="co-title" x-text="ch.title"></span>
-                            <span class="co-status" :class="`status-${getChapterOutlineStatus(ch.id)}`" x-text="getChapterOutlineStatus(ch.id)"></span>
-                          </div>
-                          <template x-if="expandedChapterId === ch.id">
-                            <div class="co-ch-body" @click.stop>
-                              <template x-if="!chapterOutlinesMap[ch.id]">
-                                <div class="co-empty">
-                                  <p>暂无细纲</p>
-                                  <button class="btn-small" @click="createChapterOutline(ch)">创建细纲</button>
-                                </div>
-                              </template>
-                              <template x-if="chapterOutlinesMap[ch.id]">
-                                <div class="co-detail">
-                                  <div class="co-row">
-                                    <label>定位</label>
-                                    <select x-model="chapterOutlinesMap[ch.id].chapter_position" @change="saveChapterOutline(ch.id)">
-                                      <option value="">未设定</option>
-                                      <option value="开局">开局</option>
-                                      <option value="发展">发展</option>
-                                      <option value="高潮">高潮</option>
-                                      <option value="回落">回落</option>
-                                      <option value="结局">结局</option>
-                                    </select>
-                                  </div>
-                                  <div class="co-row">
-                                    <label>节奏</label>
-                                    <select x-model="chapterOutlinesMap[ch.id].pacing" @change="saveChapterOutline(ch.id)">
-                                      <option value="铺垫">铺垫</option>
-                                      <option value="推进">推进</option>
-                                      <option value="高潮">高潮</option>
-                                      <option value="回落">回落</option>
-                                      <option value="平稳">平稳</option>
-                                    </select>
-                                  </div>
-                                  <div class="co-row">
-                                    <label>目标字数</label>
-                                    <input type="number" x-model.number="chapterOutlinesMap[ch.id].target_word_count" @change="saveChapterOutline(ch.id)">
-                                  </div>
-                                  <div class="co-field">
-                                    <label>本章重点内容</label>
-                                    <textarea x-model="chapterOutlinesMap[ch.id].key_content" @change="saveChapterOutline(ch.id)" placeholder=""></textarea>
-                                  </div>
-                                  <div class="co-field">
-                                    <label>剧情推进</label>
-                                    <textarea x-model="chapterOutlinesMap[ch.id].plot_advance" @change="saveChapterOutline(ch.id)" placeholder=""></textarea>
-                                  </div>
-                                  <div class="co-field">
-                                    <label>伏笔埋设</label>
-                                    <textarea x-model="chapterOutlinesMap[ch.id].foreshadow_notes" @change="saveChapterOutline(ch.id)" placeholder=""></textarea>
-                                  </div>
-                                  <div class="co-field">
-                                    <label>冲突与看点</label>
-                                    <textarea x-model="chapterOutlinesMap[ch.id].highlights" @change="saveChapterOutline(ch.id)" placeholder="用换行分隔各看点"></textarea>
-                                  </div>
-                                  <div class="co-row">
-                                    <label>状态</label>
-                                    <select x-model="chapterOutlinesMap[ch.id].status" @change="saveChapterOutline(ch.id)">
-                                      <option value="planning">规划中</option>
-                                      <option value="written">已写</option>
-                                      <option value="revised">已修订</option>
-                                    </select>
-                                  </div>
-                                </div>
-                              </template>
-                            </div>
-                          </template>
-                        </div>
-                      </template>
-                    </div>
                   </div>
                 </template>
               </div>
@@ -1692,17 +1556,56 @@
     <!-- ═══ 修订确认浮层 ═══ -->
     <template x-if="showReviseConfirmModal">
       <div class="modal-overlay" @click.self="showReviseConfirmModal = false">
-        <div class="modal" style="max-width:420px">
+        <div class="modal" style="max-width:460px">
           <header class="pipeline-header">
             <h3>📝 确认修订</h3>
             <button class="modal-close-x" @click="showReviseConfirmModal = false">×</button>
           </header>
           <div style="padding:20px">
-            <p style="margin-bottom:12px">将根据本章已生成的<b>细纲</b>和<b>评审报告</b>，由 LLM 重新生成正文。</p>
-            <p style="margin-bottom:16px;color:var(--text-muted);font-size:13px">⚠️ 之前的旧版正文将标记为废稿，移入废纸篓。</p>
+            <p style="margin-bottom:12px">
+              第 <strong x-text="currentChapter ? currentChapter.order + 1 : '?'"></strong> 章
+              《<strong x-text="currentChapter ? currentChapter.title : ''"></strong>》
+              当前 <strong x-text="currentChapter ? (currentChapter.word_count || 0) : 0"></strong> 字。
+            </p>
+            <p style="margin-bottom:12px">
+              将根据本章已生成的<b>细纲</b>和<b>评审报告</b>，由 LLM 重新生成正文，<b style="color:#dc2626">覆盖现有正文</b>。
+            </p>
+            <p style="margin-bottom:16px;color:var(--text-muted);font-size:13px;background:#fef3c7;padding:8px 10px;border-radius:4px">
+              💾 旧版正文会作为新版本存入废纸篓，可在「章节版本」中回滚。
+            </p>
             <div style="display:flex;justify-content:flex-end;gap:8px">
               <button class="btn-secondary" @click="showReviseConfirmModal = false">取消</button>
               <button class="btn-primary" @click="runRevise()">确认修订</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ═══ 一键生成（覆盖已有章节）确认浮层 ═══ -->
+    <template x-if="showRegenerateConfirmModal">
+      <div class="modal-overlay" @click.self="cancelRegenerateExisting()">
+        <div class="modal" style="max-width:460px">
+          <header class="pipeline-header">
+            <h3>⚠️ 章节已有正文</h3>
+            <button class="modal-close-x" @click="cancelRegenerateExisting()">×</button>
+          </header>
+          <div style="padding:20px">
+            <p style="margin-bottom:12px">
+              第 <strong x-text="currentChapter ? currentChapter.order + 1 : '?'"></strong> 章
+              《<strong x-text="currentChapter ? currentChapter.title : ''"></strong>》
+              已有 <strong x-text="currentChapter ? (currentChapter.word_count || 0) : 0"></strong> 字正文。
+            </p>
+            <p style="margin-bottom:12px">
+              继续 <b>一键生成</b> 将走完整 9 步流水线（细纲 → 正文 → 评审 → 修订），<b style="color:#dc2626">覆盖现有正文和细纲</b>。
+            </p>
+            <p style="margin-bottom:16px;color:var(--text-muted);font-size:13px;background:#fef3c7;padding:8px 10px;border-radius:4px">
+              💾 当前正文的快照会作为新版本存入废纸篓，可在「章节版本」中回滚。<br>
+              如果只想基于现有细纲/评审重写正文，建议用「📝 修订」按钮。
+            </p>
+            <div style="display:flex;justify-content:flex-end;gap:8px">
+              <button class="btn-secondary" @click="cancelRegenerateExisting()">取消</button>
+              <button class="btn-primary" @click="confirmRegenerateExisting()">确认覆盖生成</button>
             </div>
           </div>
         </div>
@@ -1922,7 +1825,7 @@
                             }[sinfo.status] || '○'"></span>
                             <span class="tpd-label" x-text="sinfo.label || sid"></span>
                             <span class="tpd-score" x-show="sinfo.score"
-                                  x-text="`(${sinfo.score?.toFixed(1) || '-'}分)`"></span>
+                                  x-text="`(${sinfo.score?.toFixed(1) || '-'}/100)`"></span>
                             <span class="tpd-time" x-show="sinfo.duration_ms !== null && sinfo.duration_ms !== undefined"
                                   x-text="`${(sinfo.duration_ms/1000).toFixed(1)}s`"></span>
                             <span class="tpd-err" x-show="sinfo.error" x-text="sinfo.error"></span>
@@ -2247,7 +2150,7 @@
               <span>·</span>
               <span x-text="'创建于 ' + (previewChapter?.created_at || '').slice(0,10)"></span>
               <span x-show="previewReview">·</span>
-              <span x-show="previewReview" class="pcb-score">评分: <strong x-text="previewReview?.overall_score?.toFixed(1) || '-'"></strong> / 10</span>
+              <span x-show="previewReview" class="pcb-score">评分: <strong x-text="previewReview?.overall_score?.toFixed(1) || '-'"></strong> / 100</span>
             </span>
           </div>
           <div class="pcb-actions">
@@ -2367,7 +2270,7 @@
                   </div>
                   <div class="overall-score">
                     <span>综合评分</span>
-                    <strong x-text="previewReview.overall_score.toFixed(1) + ' / 10'"></strong>
+                    <strong x-text="previewReview.overall_score.toFixed(1) + ' / 100'"></strong>
                   </div>
                   <div class="critique">
                     <h4>评审意见</h4>

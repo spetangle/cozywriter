@@ -6,6 +6,7 @@ from storage.database import get_db
 from storage.models import ReviewSession, Chapter, Project
 from llm.factory import LLMFactory
 from llm.roles import get_role
+from llm.scoring import calculate_overall_score
 from api.tasks import submit_llm_task, get_task
 from logger import logger, log_llm_call
 import time
@@ -98,7 +99,7 @@ def _do_review(project_id: int, chapter_id: int | None, session_type: str, db: S
         log_llm_call("unknown", "unknown", "review", duration_ms, False, str(e))
         raise
 
-    overall = round(sum(scores.values()) / len(scores), 1) if scores else 0.0
+    overall = calculate_overall_score(scores)  # 8 维度加权综合分（满分 100）
 
     # 保存评审会话
     session = ReviewSession(

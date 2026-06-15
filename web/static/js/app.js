@@ -172,13 +172,13 @@ function app() {
     qQuestions: [],
 
     // 大纲/细纲
+    // 注意：移除"剧情线/结构/章节细纲"三个标签页后，projectOutline、plotlineForm、
+    // showPlotlineForm、expandedChapterId 等手动编辑剧情线/结构相关的状态/方法
+    // 不再被 UI 引用，已彻底清理。下面的 chapterOutlines / chapterOutlinesMap
+    // 仍保留，因为写作面板的"细纲"标签和项目总览的章节进度条都会用到。
     outlineSubPanel: 'overview',
-    projectOutline: { plot_lines: [], structure: { acts: [] }, pacing_notes: '', outline_text: '' },
     chapterOutlines: [],
     chapterOutlinesMap: {},
-    expandedChapterId: null,
-    showPlotlineForm: false,
-    plotlineForm: { title: '', description: '', from_chapter: 1, to_chapter: 1 },
 
     // 评审
     reviewSubPanel: 'new',
@@ -225,8 +225,11 @@ function app() {
     batchPollHandle: null,     // setInterval handle
 
     // 修订功能
-    // 修订功能
     showReviseConfirmModal: false,
+
+    // 一键生成已有内容章节时的二次确认
+    showRegenerateConfirmModal: false,
+    _pendingPipelineGuide: '',  // 用户在 setup 浮层填的引导，触发确认时暂存
 
     // ─── 9 步章节生成流水线（chapter_pipeline）───
     // 后端：/api/chapters/generate-pipeline (POST) → task_id
@@ -1426,7 +1429,6 @@ function app() {
         this.loadCharacterArcs(project.id),
         this.loadCharacterRelations(project.id),
         this.loadConsistencyReport(project.id),
-        this.loadProjectOutline(project.id),
         this.loadChapterOutlines(project.id),
         // 设定预览数据：失败不阻塞打开项目（catch 静默）
         this.loadBootstrapData(project.id).catch((e) => {
@@ -1630,7 +1632,6 @@ function app() {
       this.foreshadowings = [];
       this.characterArcs = [];
       this.characterRelations = [];
-      this.projectOutline = null;
       this.chapterOutlines = [];
       this.consistencyReport = null;
       // 停掉 banner 轮询
@@ -2615,8 +2616,20 @@ function app() {
       // 关闭设置浮层
       this.showPipelineSetupModal = false;
 
-      // 如果目标章节不是当前章节，先切换
+      // 检查目标章节是否已存在且有内容
       const target = this.chapters.find(ch => ch.order + 1 === targetChapter);
+      const hasExistingContent = target && (target.content || '').trim().length > 0;
+
+      if (hasExistingContent) {
+        // 已有正文：弹出二次确认模态框，暂存引导
+        this.currentChapter = target;
+        this._pendingPipelineGuide = this.pipelineSetupGuide;
+        this.showRegenerateConfirmModal = true;
+        this.pipelineSetupGuide = '';
+        return;
+      }
+
+      // 第一次生成 / 空章节：直接跑流水线
       if (target) {
         this.currentChapter = target;
         // 延迟一帧再启动pipeline，确保currentChapter已更新
@@ -2629,6 +2642,22 @@ function app() {
       }
       // 重置设置
       this.pipelineSetupGuide = '';
+    },
+
+    // 确认覆盖已有章节，启动流水线
+    confirmRegenerateExisting() {
+      this.showRegenerateConfirmModal = false;
+      const guide = this._pendingPipelineGuide;
+      this._pendingPipelineGuide = '';
+      this.$nextTick(() => {
+        this.runChapterPipeline(guide);
+      });
+    },
+
+    // 取消覆盖
+    cancelRegenerateExisting() {
+      this.showRegenerateConfirmModal = false;
+      this._pendingPipelineGuide = '';
     },
 
     async createChapterWithGuide(chapterNum, guide) {
@@ -2907,61 +2936,7 @@ function app() {
       }
     },
 
-    // ─── 大纲/细纲 ───
-    async loadProjectOutline(projectId) {
-      try {
-        const res = await fetch(`/api/projects/${projectId}/outline`);
-        const data = await res.json();
-        if (data && data.id) {
-          this.projectOutline = data;
-        } else {
-          this.projectOutline = { plot_lines: [], structure: { acts: [] }, pacing_notes: '', outline_text: '' };
-        }
-      } catch (e) { console.error(e); }
-    },
-
-    async saveProjectOutline() {
-      if (!this.currentProject) return;
-      try {
-        await fetch(`/api/projects/${this.currentProject.id}/outline`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            plot_lines: this.projectOutline.plot_lines || [],
-            structure: this.projectOutline.structure || { acts: [] },
-            pacing_notes: this.projectOutline.pacing_notes || '',
-            outline_text: this.projectOutline.outline_text || '',
-          }),
-        });
-      } catch (e) { console.error('保存大纲失败:', e); }
-    },
-
-    async savePlotline() {
-      const pl = {
-        title: this.plotlineForm.title,
-        description: this.plotlineForm.description,
-        from_chapter: parseInt(this.plotlineForm.from_chapter) || 1,
-        to_chapter: parseInt(this.plotlineForm.to_chapter) || 1,
-        priority: 1,
-      };
-      if (!this.projectOutline.plot_lines) this.projectOutline.plot_lines = [];
-      this.projectOutline.plot_lines.push(pl);
-      this.showPlotlineForm = false;
-      this.plotlineForm = { title: '', description: '', from_chapter: 1, to_chapter: 1 };
-      await this.saveProjectOutline();
-    },
-
-    async addAct() {
-      const acts = this.projectOutline.structure.acts || [];
-      const name = prompt('请输入段落/幕名称（如：第一幕）:');
-      if (!name) return;
-      const fromCh = parseInt(prompt('起始章节:', '1')) || 1;
-      const toCh = parseInt(prompt('结束章节:', String(this.currentProject.total_chapters || 10))) || 10;
-      acts.push({ name, from_chapter: fromCh, to_chapter: toCh });
-      this.projectOutline.structure.acts = acts;
-      await this.saveProjectOutline();
-    },
-
+    // ─── 章节细纲（写作面板 / 大纲面板共用） ───
     async loadChapterOutlines(projectId) {
       try {
         const res = await fetch(`/api/projects/${projectId}/chapter-outlines`);
@@ -2971,48 +2946,6 @@ function app() {
           this.chapterOutlinesMap[o.chapter_id] = o;
         }
       } catch (e) { console.error(e); }
-    },
-
-    async createChapterOutline(chapter) {
-      try {
-        const res = await fetch(`/api/projects/${this.currentProject.id}/chapters/${chapter.id}/outline`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chapter_id: chapter.id,
-            target_word_count: this.currentProject.target_word_count || 3000,
-            min_word_count: this.currentProject.word_count_min || 2000,
-            max_word_count: this.currentProject.word_count_max || 5000,
-          }),
-        });
-        const outline = await res.json();
-        this.chapterOutlines.push(outline);
-        this.chapterOutlinesMap[chapter.id] = outline;
-        this.expandedChapterId = chapter.id;
-      } catch (e) { alert('创建失败: ' + e.message); }
-    },
-
-    async saveChapterOutline(chapterId) {
-      const outline = this.chapterOutlinesMap[chapterId];
-      if (!outline) return;
-      try {
-        await fetch(`/api/projects/${this.currentProject.id}/chapters/${chapterId}/outline`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(outline),
-        });
-      } catch (e) { console.error('保存失败:', e); }
-    },
-
-    toggleChapterOutline(chapterId) {
-      this.expandedChapterId = this.expandedChapterId === chapterId ? null : chapterId;
-    },
-
-    getChapterOutlineStatus(chapterId) {
-      const o = this.chapterOutlinesMap[chapterId];
-      if (!o) return 'none';
-      const map = { planning: '规划中', written: '已写', revised: '已修订' };
-      return map[o.status] || '规划中';
     },
 
     getChapterTrackClass(chapter) {

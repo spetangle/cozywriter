@@ -495,7 +495,25 @@ CHAPTER_OUTLINE_GEN_SYSTEM = """你是一位专业的小说架构师，擅长按
 ═══════════════════════════════════════════════════════════════
 
 请生成本章细纲（JSON）：
+
+═══════════════════════════════════════════════════════════════
+【顶层字段】（必须填写，用于入库和前端展示）
+═══════════════════════════════════════════════════════════════
 {{
+  "chapter_position": "开局|发展|高潮|回落|结局",
+  "pacing": "铺垫|推进|高潮|回落|平稳",
+  "key_content": "本章核心内容（1-2 句话概述）",
+  "plot_advance": "本章剧情如何推进主线（1-2 句话）",
+  "foreshadow_notes": "本章对伏笔的操作（埋设/推进/回收哪些伏笔，1-2 句话）",
+  "conflicts": ["冲突/矛盾点1", "冲突/矛盾点2"],
+  "highlights": ["看点/爽点1", "看点/爽点2"],
+  "target_word_count": {target_word_count},
+  "min_word_count": 2000,
+  "max_word_count": 5000,
+
+═══════════════════════════════════════════════════════════════
+【四阶段结构】（保存到 qi_cheng_zhuan_he JSON 列）
+═══════════════════════════════════════════════════════════════
   "qi_cheng_zhuan_he": {{
     "qi": {{
       "summary": "起阶段内容概述",
@@ -524,6 +542,10 @@ CHAPTER_OUTLINE_GEN_SYSTEM = """你是一位专业的小说架构师，擅长按
       "beats": ["节拍1"]
     }}
   }},
+
+═══════════════════════════════════════════════════════════════
+【章内节奏】（保存到 pacing_hooks / reversals JSON 列）
+═══════════════════════════════════════════════════════════════
   "scenes": [
     {{"name": "场景名", "summary": "场景概要", "characters": ["登场人物"], "conflict": "冲突点", "phase": "qi|cheng|zhuan|he"}}
   ],
@@ -533,13 +555,16 @@ CHAPTER_OUTLINE_GEN_SYSTEM = """你是一位专业的小说架构师，擅长按
   "reversals": [
     {{"type": "small|medium|large", "description": "反转描述", "emotional_impact": "情绪效果"}}
   ],
+
+═══════════════════════════════════════════════════════════════
+【伏笔与角色】（保存到 foreshadow_notes / notes JSON 列）
+═══════════════════════════════════════════════════════════════
   "foreshadow_actions": [
     {{"title": "伏笔标题", "action": "plant|advance|resolve|tie", "cycle": "short|medium|long", "detail": "具体操作"}}
   ],
   "character_developments": [
     {{"name": "角色名", "change": "本章变化 1 句"}}
   ],
-  "target_word_count": {target_word_count},
   "word_count_check": "四阶段字数总和 = X字，与目标偏差 Y%"
 }}
 """

@@ -447,15 +447,19 @@ def review_chapter_text(
 # ═══════════════════════════════════════════════════════════════
 
 def decide_revision(review_data: dict, outline: dict, content: str, provider: str | None = None) -> dict:
-    """根据评审分决定是否自动修订"""
+    """根据评审分决定是否自动修订
+
+    决策依据：综合分（满分 100），由 8 维度加权求和得出。
+    """
+    from llm.scoring import calculate_overall_score
     scores = review_data.get("scores", {})
-    if scores:
-        avg = sum(scores.values()) / len(scores)
-    else:
-        avg = 0
+    overall = calculate_overall_score(scores)
+    # 同时给出平均分供 LLM 决策时参考（避免单维度极端值干扰）
+    avg = (sum(scores.values()) / len(scores)) if scores else 0
     ctx = {
         "scores": json.dumps(scores, ensure_ascii=False, indent=2),
-        "avg_score": round(avg, 2),
+        "overall_score": overall,            # 加权综合分（0-100）
+        "avg_score": round(avg, 2),          # 简单平均分（0-10），仅供决策参考
         "outline": json.dumps(outline, ensure_ascii=False, indent=2),
         "content": content[:4000],
     }
@@ -886,10 +890,12 @@ def run_chapter_generation_pipeline(
                 "progress_pct": min(99, round(completed_weight / _TOTAL_WEIGHT * 100)),
             }
             # 如果是评审阶段，提取评审得分
+            # 综合分改用加权求和（满分 100），前端用 0-100 展示
             if name in ("3_outline_review", "6_review") and isinstance(result, dict):
+                from llm.scoring import calculate_overall_score
                 scores = result.get("scores", {})
                 if scores:
-                    notify_info["score"] = sum(scores.values()) / len(scores)
+                    notify_info["score"] = calculate_overall_score(scores)
                 elif "overall_score" in result:
                     notify_info["score"] = result["overall_score"]
             _notify(name, "completed", notify_info)
@@ -1026,47 +1032,94 @@ def run_chapter_generation_pipeline(
         # ─── 保存细纲到数据库 ───
         try:
             from storage.models import ChapterOutline
-            outline_raw = stages.get("3_outline", {})
+            # 修复：stage id 应对齐 PIPELINE_STAGES_META ("2_outline_gen")
+            # 之前误写为 "3_outline"，导致细纲从未入库 → 前端显示"暂无细纲"
+            outline_raw = stages.get("2_outline_gen", {})
             outline_data = outline_raw.get("data", outline_raw) if isinstance(outline_raw, dict) else {}
             if isinstance(outline_data, dict):
+                # 简单字段（顶层）—— 与 chapter_outline_gen role 顶层输出对齐
+                chapter_position = outline_data.get("chapter_position", "")
+                key_content      = outline_data.get("key_content", "")
+                plot_advance     = outline_data.get("plot_advance", "")
+                foreshadow_notes = outline_data.get("foreshadow_notes", "")
+                conflicts        = outline_data.get("conflicts", [])
+                highlights       = outline_data.get("highlights", [])
+                target_word_count = outline_data.get("target_word_count", 0)
+                min_word_count   = outline_data.get("min_word_count", 0)
+                max_word_count   = outline_data.get("max_word_count", 0)
+                pacing           = outline_data.get("pacing", "平稳")
+                # 丰富结构（保存到 JSON 列）—— role 输出中的 qi_cheng_zhuan_he / pacing_hooks / reversals
+                qi_cheng_zhuan_he = outline_data.get("qi_cheng_zhuan_he", {})
+                pacing_hooks     = outline_data.get("pacing_hooks", [])
+                reversals        = outline_data.get("reversals", [])
+                # 详细字段（保存到 notes）—— 给后续修订阶段做上下文
+                notes_payload = {
+                    "scenes": outline_data.get("scenes", []),
+                    "foreshadow_actions": outline_data.get("foreshadow_actions", []),
+                    "character_developments": outline_data.get("character_developments", []),
+                    "word_count_check": outline_data.get("word_count_check", ""),
+                }
+                notes_text = json.dumps(notes_payload, ensure_ascii=False)
+
                 existing = db.query(ChapterOutline).filter(
                     ChapterOutline.chapter_id == chapter_id
                 ).first()
                 if existing:
-                    existing.chapter_position = outline_data.get("chapter_position", "")
-                    existing.key_content = outline_data.get("key_content", "")
-                    existing.plot_advance = outline_data.get("plot_advance", "")
-                    existing.conflicts = outline_data.get("conflicts", [])
-                    existing.highlights = outline_data.get("highlights", [])
-                    existing.target_word_count = outline_data.get("target_word_count", 0)
-                    existing.pacing = outline_data.get("pacing", "平稳")
-                    existing.status = "completed"
+                    existing.chapter_position = chapter_position
+                    existing.key_content       = key_content
+                    existing.plot_advance      = plot_advance
+                    existing.foreshadow_notes  = foreshadow_notes
+                    existing.conflicts         = conflicts
+                    existing.highlights        = highlights
+                    existing.target_word_count = target_word_count
+                    existing.min_word_count    = min_word_count
+                    existing.max_word_count    = max_word_count
+                    existing.pacing            = pacing
+                    existing.qi_cheng_zhuan_he = qi_cheng_zhuan_he
+                    existing.pacing_hooks      = pacing_hooks
+                    existing.reversals         = reversals
+                    existing.notes             = notes_text
+                    existing.status            = "completed"
                 else:
                     outline = ChapterOutline(
                         chapter_id=chapter_id,
-                        chapter_position=outline_data.get("chapter_position", ""),
-                        key_content=outline_data.get("key_content", ""),
-                        plot_advance=outline_data.get("plot_advance", ""),
-                        conflicts=outline_data.get("conflicts", []),
-                        highlights=outline_data.get("highlights", []),
-                        target_word_count=outline_data.get("target_word_count", 0),
-                        pacing=outline_data.get("pacing", "平稳"),
+                        chapter_position=chapter_position,
+                        key_content=key_content,
+                        plot_advance=plot_advance,
+                        foreshadow_notes=foreshadow_notes,
+                        conflicts=conflicts,
+                        highlights=highlights,
+                        target_word_count=target_word_count,
+                        min_word_count=min_word_count,
+                        max_word_count=max_word_count,
+                        pacing=pacing,
+                        qi_cheng_zhuan_he=qi_cheng_zhuan_he,
+                        pacing_hooks=pacing_hooks,
+                        reversals=reversals,
+                        notes=notes_text,
                         status="completed",
                     )
                     db.add(outline)
                 db.commit()
-                logger.info(f"[Pipeline] saved outline for chapter {chapter_id}")
+                logger.info(
+                    f"[Pipeline] saved outline for chapter {chapter_id} "
+                    f"(key_content={len(key_content)}字 plot_advance={len(plot_advance)}字)"
+                )
         except Exception as e:
             logger.warning(f"[Pipeline] failed to save outline: {e}")
 
         # ─── 保存评审报告到数据库 ───
         try:
             from storage.models import ReviewSession
-            review_raw = stages.get("7_review", {})
+            from llm.scoring import calculate_overall_score
+            # 修复：stage id 应对齐 PIPELINE_STAGES_META ("6_review")
+            # 之前误写为 "7_review"，导致评审报告从未入库 → 前端"章节评分/评审报告"为空
+            # 综合分改用 llm.scoring.calculate_overall_score：8 维度加权求和，满分 100
+            review_raw = stages.get("6_review", {})
             review_data = review_raw.get("data", review_raw) if isinstance(review_raw, dict) else {}
             if isinstance(review_data, dict):
                 scores = review_data.get("scores", {})
-                overall = round(sum(scores.values()) / len(scores), 1) if scores else 0.0
+                overall = calculate_overall_score(scores)  # 0-100 加权综合分
                 session = ReviewSession(
                     project_id=project_id,
                     chapter_id=chapter_id,
@@ -1086,7 +1139,7 @@ def run_chapter_generation_pipeline(
                 )
                 db.add(session)
                 db.commit()
-                logger.info(f"[Pipeline] saved review for chapter {chapter_id}, score={overall}")
+                logger.info(f"[Pipeline] saved review for chapter {chapter_id}, weighted score={overall}/100")
         except Exception as e:
             logger.warning(f"[Pipeline] failed to save review: {e}")
 
@@ -1182,11 +1235,12 @@ def run_chapter_revise(
                 "duration_ms": duration_ms,
                 "progress_pct": min(99, round(completed_weight / total_weight * 100)),
             }
-            # 评审阶段提取得分
+            # 评审阶段提取得分（加权综合分，满分 100）
             if "review" in name and isinstance(result, dict):
+                from llm.scoring import calculate_overall_score
                 scores = result.get("scores", {})
                 if scores:
-                    notify_info["score"] = sum(scores.values()) / len(scores)
+                    notify_info["score"] = calculate_overall_score(scores)
                 elif "overall_score" in result:
                     notify_info["score"] = result["overall_score"]
             _notify(name, "completed", notify_info)
@@ -1418,13 +1472,14 @@ def run_chapter_revise(
         # ─── 保存评审报告到数据库（修订后重新评审） ───
         try:
             from storage.models import ReviewSession
+            from llm.scoring import calculate_overall_score
             review_data_raw = stages.get("6_review")
             review_data = None
             if isinstance(review_data_raw, dict):
                 review_data = review_data_raw.get("data", review_data_raw)
             if isinstance(review_data, dict):
                 scores = review_data.get("scores", {})
-                overall = round(sum(scores.values()) / len(scores), 1) if scores else 0.0
+                overall = calculate_overall_score(scores)  # 加权综合分 0-100
                 session = ReviewSession(
                     project_id=project_id,
                     chapter_id=chapter_id,
@@ -1444,7 +1499,7 @@ def run_chapter_revise(
                 )
                 db.add(session)
                 db.commit()
-                logger.info(f"[Revise] saved review for chapter {chapter_id}, score={overall}")
+                logger.info(f"[Revise] saved review for chapter {chapter_id}, weighted score={overall}/100")
         except Exception as e:
             logger.warning(f"[Revise] failed to save review: {e}")
 
