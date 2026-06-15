@@ -69,6 +69,8 @@ class ProjectCreate(BaseModel):
     # genre 支持多选：list[str] 或 str（逗号分隔），写入时存为逗号分隔字符串
     genre: str | list[str] = ""
     description: str = ""
+    # 扩展字段
+    total_chapters: int = Field(default=100, description="预计总章节数", ge=1, le=10000)
     # 8 选填
     theme: str | None = None
     tone: str | None = None
@@ -98,6 +100,7 @@ class ProjectResponse(BaseModel):
     id: int
     title: str
     description: str
+    genre: str = ""
     word_count: int
     writing_style: str
     ai味去除程度: int
@@ -105,6 +108,7 @@ class ProjectResponse(BaseModel):
     word_count_min: int
     word_count_max: int
     total_chapters: int
+    chapter_count: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -142,7 +146,15 @@ class BootstrapResponse(BaseModel):
 @router.get("", response_model=list[ProjectResponse])
 async def list_projects(db: Session = Depends(get_db)):
     """获取项目列表"""
-    return db.query(Project).order_by(Project.updated_at.desc()).all()
+    from storage.models import Chapter
+    projects = db.query(Project).order_by(Project.updated_at.desc()).all()
+    result = []
+    for p in projects:
+        ch_count = db.query(Chapter).filter(Chapter.project_id == p.id).count()
+        row = {c.name: getattr(p, c.name) for c in Project.__table__.columns}
+        row['chapter_count'] = ch_count
+        result.append(row)
+    return result
 
 
 @router.post("", response_model=BootstrapResponse)
@@ -180,9 +192,11 @@ async def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
     project = Project(
         title=data.title.strip(),
         description=data.description.strip(),
+        genre=genre_str,
         target_word_count=data.chapter_word_count * 1000,  # 千字 → 字
         word_count_min=int(data.chapter_word_count * 1000 * 0.7),
         word_count_max=int(data.chapter_word_count * 1000 * 1.3),
+        total_chapters=data.total_chapters,
         writing_style=data.style or "平实",
     )
     db.add(project)

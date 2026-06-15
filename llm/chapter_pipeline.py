@@ -34,7 +34,7 @@ from rag.retrieval import RetrievalService
 # ═══════════════════════════════════════════════════════════════
 
 def _parse_json(text: str) -> dict | list | str:
-    """宽松 JSON 解析（容忍 markdown / 前缀后缀）"""
+    """宽松 JSON 解析（容忍 markdown / 前缀后缀 / 字符串内换行等常见问题）"""
     if not text or not text.strip():
         raise ValueError("empty response from LLM")
     text = text.strip()
@@ -46,7 +46,90 @@ def _parse_json(text: str) -> dict | list | str:
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
         text = text[start:end + 1]
-    return json.loads(text)
+    # 第一次尝试：直接解析
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # 第二次尝试：逐字符修复字符串值内的裸换行/tabs（LLM 常见问题）
+    try:
+        result = []
+        in_string = False
+        escape_next = False
+        i = 0
+        while i < len(text):
+            ch = text[i]
+            if escape_next:
+                result.append(ch)
+                escape_next = False
+                i += 1
+                continue
+            if ch == '\\' and in_string:
+                result.append(ch)
+                escape_next = True
+                i += 1
+                continue
+            if ch == '"':
+                in_string = not in_string
+                result.append(ch)
+                i += 1
+                continue
+            if in_string and ch == '\n':
+                result.append('\\n')
+                i += 1
+                continue
+            if in_string and ch == '\r':
+                result.append('\\r')
+                i += 1
+                continue
+            if in_string and ch == '\t':
+                result.append('\\t')
+                i += 1
+                continue
+            result.append(ch)
+            i += 1
+        return json.loads(''.join(result))
+    except json.JSONDecodeError as e:
+        # 第四次尝试：更激进的修复 - 处理未转义的引号和特殊字符
+        try:
+            # 尝试用正则提取JSON结构
+            import re as _re
+            # 找到所有顶层键值对
+            json_pattern = _re.compile(r'\{[^{}]*\}', _re.DOTALL)
+            matches = json_pattern.findall(text)
+            if matches:
+                # 取最大的匹配（最可能是完整的JSON）
+                best = max(matches, key=len)
+                return json.loads(best)
+        except Exception:
+            pass
+
+        # 第五次尝试：逐行修复常见的JSON格式问题
+        try:
+            lines = text.split(chr(10))
+            fixed_lines = []
+            for line in lines:
+                # 修复行尾缺少逗号的问题（如果下一行以"或}开头）
+                stripped = line.rstrip()
+                if stripped and not stripped.endswith(',') and not stripped.endswith('{') and not stripped.endswith('['):
+                    # 检查是否需要添加逗号
+                    next_line_idx = lines.index(line) + 1
+                    if next_line_idx < len(lines):
+                        next_stripped = lines[next_line_idx].strip()
+                        if next_stripped.startswith('"') or next_stripped.startswith('}') or next_stripped.startswith(']'):
+                            if not stripped.endswith(':') and not stripped.endswith('"'):
+                                stripped += ','
+                fixed_lines.append(stripped)
+            fixed_text = chr(10).join(fixed_lines)
+            return json.loads(fixed_text)
+        except Exception:
+            pass
+
+        raise json.JSONDecodeError(
+            f"JSON parse failed after all attempts: {e.msg}",
+            e.doc,
+            e.pos,
+        ) from e
 
 
 def _count_chinese_chars(text: str) -> int:
@@ -54,14 +137,14 @@ def _count_chinese_chars(text: str) -> int:
     return sum(1 for c in text if "一" <= c <= "鿿")
 
 
-def _call_llm(role_name: str, ctx: dict, user_msg: str, provider: str | None = None) -> str:
+def _call_llm(role_name: str, ctx: dict, user_msg: str, provider: str | None = None, db=None) -> str:
     """通用 LLM 调用 helper"""
     role = ROLES.get(role_name)
     if role is None:
         raise ValueError(f"Unknown role: {role_name}")
     system = role.build_system(ctx)
     user = role.build_user({**ctx, "context": user_msg})
-    llm = LLMFactory.create(provider=provider)
+    llm = LLMFactory.create(provider=provider, db=db)
     return llm.generate(
         prompt=user,
         system_prompt=system,
@@ -226,7 +309,7 @@ def build_chapter_prep_info(
 # Step 2: 章节细纲生成
 # ═══════════════════════════════════════════════════════════════
 
-def generate_chapter_outline(db, project_id: int, chapter_id: int, provider: str | None = None) -> dict:
+def generate_chapter_outline(db, project_id: int, chapter_id: int, provider: str | None = None, guide: str = "") -> dict:
     """LLM 生成章节细纲（不存库，返回给上层走评审）"""
     prep = build_chapter_prep_info(db, project_id, chapter_id)
     project = db.query(__import__("storage.models", fromlist=["Project"]).Project).filter(
@@ -240,6 +323,7 @@ def generate_chapter_outline(db, project_id: int, chapter_id: int, provider: str
         "plot_advance": (prep["chapter_outline"] or {}).get("plot_advance", ""),
         "prep_info": _format_prep_for_llm(prep),
         "target_word_count": prep["project_meta"]["target_word_count"],
+        "guide": guide,
     }
 
     raw = _call_llm("chapter_outline_gen", outline_ctx, "", provider)
@@ -323,17 +407,21 @@ def adjust_word_count(
     ctx = {
         "target_word_count": target,
         "current_word_count": actual,
-        "outline": json.dumps(outline, ensure_ascii=False, indent=2),
+        "outline": json.dumps(outline, ensure_ascii=False, indent=2) if isinstance(outline, dict) else str(outline),
         "content": content[:6000],  # 截断避免超长
     }
-    if actual > max_w:
-        raw = _call_llm("compressor", ctx, "", provider)
-        data = _parse_json(raw)
-        return data.get("compressed_text", content)
-    else:
-        raw = _call_llm("expander", ctx, "", provider)
-        data = _parse_json(raw)
-        return data.get("expanded_text", content)
+    try:
+        if actual > max_w:
+            raw = _call_llm("compressor", ctx, "", provider)
+            data = _parse_json(raw)
+            return data.get("compressed_text", content)
+        else:
+            raw = _call_llm("expander", ctx, "", provider)
+            data = _parse_json(raw)
+            return data.get("expanded_text", content)
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning(f"[adjust_word_count] JSON parse failed: {e}, returning original content")
+        return content
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -424,8 +512,12 @@ def run_post_chapter_processing(
     chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
     if not chapter:
         return result
-
-    # 9.1 弧光 + 关系更新
+    
+    # 确保 content 不为 None
+    if not chapter.content:
+        logger.warning(f"[PostChapter] chapter {chapter_id} has no content, skipping LLM calls")
+        chapter.content = ""
+        db.commit()
     chars = db.query(Character).filter(Character.project_id == project_id).all()
     current_state = "\n".join(
         [f"- {c.name}: 描述={c.description or ''}, profile={json.dumps(c.profile, ensure_ascii=False)}"
@@ -441,7 +533,7 @@ def run_post_chapter_processing(
     ) or "（暂无关系）"
 
     ctx = {
-        "content": content[:8000],
+        "content": (chapter.content or "")[:8000],
         "current_state": current_state,
         "current_relations": current_relations,
     }
@@ -737,6 +829,7 @@ def run_chapter_generation_pipeline(
     db, project_id: int, chapter_id: int, provider: str | None = None,
     auto_revise: bool = True, revision_threshold: float = 6.5,
     progress_cb: Optional[Callable[[str, str, dict], None]] = None,
+    guide: str = "",
 ) -> dict:
     """
     9 步章节生成流水线
@@ -786,12 +879,20 @@ def run_chapter_generation_pipeline(
             stages[name] = {"status": "completed", "duration_ms": duration_ms, "data": result}
             completed_weight += (meta["weight"] if meta else 1)
             # 通知"完成"（带最新进度）
-            _notify(name, "completed", {
+            notify_info = {
                 "label": label,
                 "weight": meta["weight"] if meta else 1,
                 "duration_ms": duration_ms,
                 "progress_pct": min(99, round(completed_weight / _TOTAL_WEIGHT * 100)),
-            })
+            }
+            # 如果是评审阶段，提取评审得分
+            if name in ("3_outline_review", "6_review") and isinstance(result, dict):
+                scores = result.get("scores", {})
+                if scores:
+                    notify_info["score"] = sum(scores.values()) / len(scores)
+                elif "overall_score" in result:
+                    notify_info["score"] = result["overall_score"]
+            _notify(name, "completed", notify_info)
             return result, duration_ms
         except Exception as e:
             duration_ms = (time.time() - t0) * 1000
@@ -816,7 +917,7 @@ def run_chapter_generation_pipeline(
         # Step 2: 细纲生成
         stages["2_outline_gen"], _ = _run_stage(
             "2_outline_gen",
-            lambda: generate_chapter_outline(db, project_id, chapter_id, provider),
+            lambda: generate_chapter_outline(db, project_id, chapter_id, provider, guide),
         )
 
         # Step 3: 细纲评审
@@ -922,6 +1023,73 @@ def run_chapter_generation_pipeline(
             ),
         )
 
+        # ─── 保存细纲到数据库 ───
+        try:
+            from storage.models import ChapterOutline
+            outline_raw = stages.get("3_outline", {})
+            outline_data = outline_raw.get("data", outline_raw) if isinstance(outline_raw, dict) else {}
+            if isinstance(outline_data, dict):
+                existing = db.query(ChapterOutline).filter(
+                    ChapterOutline.chapter_id == chapter_id
+                ).first()
+                if existing:
+                    existing.chapter_position = outline_data.get("chapter_position", "")
+                    existing.key_content = outline_data.get("key_content", "")
+                    existing.plot_advance = outline_data.get("plot_advance", "")
+                    existing.conflicts = outline_data.get("conflicts", [])
+                    existing.highlights = outline_data.get("highlights", [])
+                    existing.target_word_count = outline_data.get("target_word_count", 0)
+                    existing.pacing = outline_data.get("pacing", "平稳")
+                    existing.status = "completed"
+                else:
+                    outline = ChapterOutline(
+                        chapter_id=chapter_id,
+                        chapter_position=outline_data.get("chapter_position", ""),
+                        key_content=outline_data.get("key_content", ""),
+                        plot_advance=outline_data.get("plot_advance", ""),
+                        conflicts=outline_data.get("conflicts", []),
+                        highlights=outline_data.get("highlights", []),
+                        target_word_count=outline_data.get("target_word_count", 0),
+                        pacing=outline_data.get("pacing", "平稳"),
+                        status="completed",
+                    )
+                    db.add(outline)
+                db.commit()
+                logger.info(f"[Pipeline] saved outline for chapter {chapter_id}")
+        except Exception as e:
+            logger.warning(f"[Pipeline] failed to save outline: {e}")
+
+        # ─── 保存评审报告到数据库 ───
+        try:
+            from storage.models import ReviewSession
+            review_raw = stages.get("7_review", {})
+            review_data = review_raw.get("data", review_raw) if isinstance(review_raw, dict) else {}
+            if isinstance(review_data, dict):
+                scores = review_data.get("scores", {})
+                overall = round(sum(scores.values()) / len(scores), 1) if scores else 0.0
+                session = ReviewSession(
+                    project_id=project_id,
+                    chapter_id=chapter_id,
+                    session_type="chapter",
+                    content_reviewed=final_text[:2000],
+                    score_consistency=scores.get("consistency", 0),
+                    score_pacing=scores.get("pacing", 0),
+                    score_style=scores.get("style", 0),
+                    score_ai_removal=scores.get("ai_removal", 0),
+                    score_word_count=scores.get("word_count", 0),
+                    score_foreshadowing=scores.get("foreshadowing", 0),
+                    score_character_arc=scores.get("character_arc", 0),
+                    score_thematic=scores.get("thematic", 0),
+                    overall_score=overall,
+                    critique=review_data.get("critique", ""),
+                    suggestions=review_data.get("suggestions", []),
+                )
+                db.add(session)
+                db.commit()
+                logger.info(f"[Pipeline] saved review for chapter {chapter_id}, score={overall}")
+        except Exception as e:
+            logger.warning(f"[Pipeline] failed to save review: {e}")
+
         total_ms = (time.time() - start_time) * 1000
         logger.info(f"[Pipeline] chapter {chapter_id} done in {total_ms/1000:.1f}s")
 
@@ -967,3 +1135,334 @@ def _next_version_num(db, chapter_id: int) -> int:
         .first()
     )
     return (last.version_num + 1) if last else 1
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# 章节修订（根据细纲和评审报告重新生成正文）
+# ═══════════════════════════════════════════════════════════════
+
+def run_chapter_revise(
+    db, project_id: int, chapter_id: int, provider: str | None = None,
+    progress_cb: Optional[Callable[[str, str, dict], None]] = None,
+    task_id: str = "",
+) -> dict:
+    """
+    章节修订：根据已生成的细纲和评审报告，由LLM重新生成正文。
+    旧版正文标记为废稿，移入废纸篓（ChapterVersion）。
+    """
+    from sqlalchemy import func
+    from storage.models import Chapter, ChapterVersion, ChapterOutline
+
+    start_time = time.time()
+    stages = {}
+    completed_weight = 0
+    total_weight = 8  # 8 steps
+
+    def _notify(stage_id: str, status: str, info: dict):
+        if progress_cb:
+            try:
+                progress_cb(stage_id, status, info)
+            except Exception as cb_err:
+                logger.warning(f"[Revise] progress_cb error: {cb_err}")
+
+    def _run_stage(name: str, fn, weight: int = 1) -> tuple:
+        """执行单个阶段，捕获异常，通知进度"""
+        nonlocal completed_weight
+        label = name
+        _notify(name, "running", {"label": label})
+        t0 = time.time()
+        try:
+            result = fn()
+            duration_ms = (time.time() - t0) * 1000
+            stages[name] = {"status": "completed", "duration_ms": duration_ms, "data": result}
+            completed_weight += weight
+            notify_info = {
+                "label": label,
+                "duration_ms": duration_ms,
+                "progress_pct": min(99, round(completed_weight / total_weight * 100)),
+            }
+            # 评审阶段提取得分
+            if "review" in name and isinstance(result, dict):
+                scores = result.get("scores", {})
+                if scores:
+                    notify_info["score"] = sum(scores.values()) / len(scores)
+                elif "overall_score" in result:
+                    notify_info["score"] = result["overall_score"]
+            _notify(name, "completed", notify_info)
+            return result, duration_ms
+        except Exception as e:
+            duration_ms = (time.time() - t0) * 1000
+            tb = traceback.format_exc()
+            logger.error(f"[Revise] stage {name} failed: {e}\n{tb}")
+            stages[name] = {"status": "failed", "error": str(e), "duration_ms": duration_ms}
+            _notify(name, "failed", {"label": label, "error": str(e), "duration_ms": duration_ms})
+            raise
+
+    try:
+        # 获取章节
+        chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
+        if not chapter:
+            raise ValueError(f"章节不存在: {chapter_id}")
+        if not chapter.content:
+            raise ValueError("章节没有正文内容，无法修订")
+
+        # Step 1: 获取细纲
+        def _get_outline():
+            outline = db.query(ChapterOutline).filter(
+                ChapterOutline.chapter_id == chapter_id
+            ).first()
+            if outline:
+                return {
+                    "key_content": outline.key_content or "",
+                    "plot_advance": outline.plot_advance or "",
+                    "conflicts": outline.conflicts or [],
+                    "highlights": outline.highlights or [],
+                    "foreshadows": outline.foreshadows or [],
+                    "character_changes": outline.character_changes or [],
+                }
+            return {}
+
+        stages["1_get_outline"], _ = _run_stage("1_get_outline", _get_outline)
+
+        # Step 2: 保存旧正文为废稿
+        def _save_old_version():
+            # 获取当前最大版本号
+            max_ver = db.query(func.max(ChapterVersion.version_num)).filter(
+                ChapterVersion.chapter_id == chapter_id
+            ).scalar() or 0
+            old_version = ChapterVersion(
+                chapter_id=chapter_id,
+                content=chapter.content,
+                version_num=max_ver + 1,
+            )
+            db.add(old_version)
+            db.commit()
+            return {"saved": True, "version_num": max_ver + 1}
+
+        stages["2_save_old"], _ = _run_stage("2_save_old", _save_old_version)
+
+        # Step 3: 获取评审报告
+        def _get_review():
+            from storage.models import ReviewSession
+            review = db.query(ReviewSession).filter(
+                ReviewSession.chapter_id == chapter_id,
+                ReviewSession.session_type == "chapter"
+            ).order_by(ReviewSession.created_at.desc()).first()
+            if review:
+                return {
+                    "overall_score": review.overall_score,
+                    "critique": review.critique or "",
+                    "suggestions": review.suggestions or [],
+                }
+            return {}
+
+        stages["3_get_review"], _ = _run_stage("3_get_review", _get_review)
+
+        # Step 4: 根据细纲+评审生成新正文
+        def _generate_new_content():
+            from storage.models import Project
+            project = db.query(Project).filter(Project.id == project_id).first()
+            prep = build_chapter_prep_info(db, project_id, chapter_id)
+            
+            # 正确提取 outline 和 review 数据（从 stage 结果中解包）
+            def _unwrap(stage_val):
+                """从 stage 结果中提取实际数据"""
+                if isinstance(stage_val, dict):
+                    if "data" in stage_val:
+                        return stage_val["data"]
+                return stage_val
+            
+            outline_data = _unwrap(stages["1_get_outline"])
+            review_data = _unwrap(stages["3_get_review"])
+            
+            logger.info(f"[Revise] outline_data keys: {list(outline_data.keys()) if isinstance(outline_data, dict) else type(outline_data)}")
+            logger.info(f"[Revise] review_data keys: {list(review_data.keys()) if isinstance(review_data, dict) else type(review_data)}")
+
+            # 使用 writing 角色生成正文
+            writing_ctx = {
+                "writing_style": project.writing_style or "平实",
+                "ai_removal_instruction": build_ai_removal_instruction(project.ai味去除程度) if project.ai味去除程度 else "",
+                "themes": prep["themes"],
+                "characters": "\n".join(prep["characters"]) or "（无）",
+                "character_arcs": "（参见上文 character 段）",
+                "world": prep["project_outline_text"] or "（无项目大纲）",
+                "foreshadowings": prep["active_foreshadowings"],
+                "chapters": prep["prev_chapters_summary"],
+                "target_word_count": prep["project_meta"]["target_word_count"],
+                "word_count_range": f"{prep['project_meta']['min_words']}~{prep['project_meta']['max_words']} 字",
+            }
+
+            system = ROLES["writing"].build_system(writing_ctx)
+
+            # 拼接用户消息：细纲 + 评审建议 + 上章结尾
+            critique = review_data.get("critique", "") if isinstance(review_data, dict) else ""
+            suggestions = review_data.get("suggestions", []) if isinstance(review_data, dict) else []
+            suggestion_text = "\n".join([f"- {s}" for s in suggestions]) if suggestions else "（无）"
+            
+            # 序列化细纲数据
+            outline_text = json.dumps(outline_data, ensure_ascii=False, indent=2) if isinstance(outline_data, dict) else str(outline_data) if outline_data else "（无细纲）"
+
+            user_msg = (
+                f"【本章细纲（严格遵循）】\n{outline_text}\n\n"
+                f"【评审意见】\n{critique or '（无评审意见）'}\n\n"
+                f"【修改建议】\n{suggestion_text}\n\n"
+                f"【上章结尾（衔接用）】\n{prep.get('prev_chapter_ending', '')}\n\n"
+                f"【登场人物】\n" + "\n".join(prep.get("characters", [])[:5]) + "\n\n"
+                f"请根据以上信息重新生成本章正文。"
+            )
+
+            logger.info(f"[Revise] user_msg preview: {user_msg[:200]}...")
+
+            llm = LLMFactory.create(provider=provider, db=db)
+            raw = llm.generate(
+                prompt=user_msg,
+                system_prompt=system,
+                max_tokens=ROLES["writing"].max_tokens,
+                temperature=ROLES["writing"].temperature,
+                task_type="chapter_pipeline_revise_content",
+            )
+            return raw
+
+        stages["4_generate"], _ = _run_stage("4_generate", _generate_new_content)
+
+        # Step 5: 字数调整
+        def _adjust():
+            prep = build_chapter_prep_info(db, project_id, chapter_id)
+            meta = prep["project_meta"]
+            gen_result = stages["4_generate"]
+            if isinstance(gen_result, dict):
+                content_text = gen_result.get("data", "")
+            else:
+                content_text = gen_result
+            if not isinstance(content_text, str):
+                content_text = str(content_text)
+            # 获取outline数据（从stage结果中提取）
+            outline_result = stages["1_get_outline"]
+            if isinstance(outline_result, dict):
+                outline_data = outline_result.get("data", outline_result)
+            else:
+                outline_data = outline_result
+            return adjust_word_count(
+                content_text,
+                meta["target_word_count"],
+                meta["min_words"],
+                meta["max_words"],
+                outline_data,
+                provider,
+            )
+
+        stages["5_adjust"], _ = _run_stage("5_adjust", _adjust)
+
+        # Step 6: 章节评审
+        def _review():
+            adj_result = stages["5_adjust"]
+            if isinstance(adj_result, dict):
+                final_content = adj_result.get("data", adj_result)
+                if isinstance(final_content, dict):
+                    final_content = final_content.get("adjusted_content", str(final_content))
+            else:
+                final_content = adj_result
+            if not isinstance(final_content, str):
+                final_content = str(final_content)
+            return review_chapter_text(
+                db, project_id, chapter_id, final_content, provider,
+            )
+
+        stages["6_review"], _ = _run_stage("6_review", _review)
+
+        # Step 7: 保存新正文
+        def _save():
+            # 从多个可能的位置获取最终内容
+            final_content = None
+            
+            # 尝试从 5_adjust 结果获取
+            adj_result = stages.get("5_adjust")
+            if isinstance(adj_result, dict):
+                data = adj_result.get("data", adj_result)
+                if isinstance(data, dict):
+                    final_content = data.get("adjusted_content")
+                elif isinstance(data, str):
+                    final_content = data
+            
+            # 如果没有，从 4_generate 获取
+            if not final_content:
+                gen_result = stages.get("4_generate")
+                if isinstance(gen_result, dict):
+                    data = gen_result.get("data", gen_result)
+                    if isinstance(data, str):
+                        final_content = data
+                elif isinstance(gen_result, str):
+                    final_content = gen_result
+            
+            if not final_content:
+                logger.error("[Revise] No content found in stages, using original")
+                final_content = chapter.content or ""
+            
+            if not isinstance(final_content, str):
+                final_content = str(final_content)
+            
+            chapter.content = final_content
+            chapter.word_count = _count_chinese_chars(final_content)
+            db.commit()
+            return {"word_count": chapter.word_count}
+
+        stages["7_save"], _ = _run_stage("7_save", _save)
+
+        # Step 8: 后处理
+        def _post_process():
+            return run_post_chapter_processing(db, project_id, chapter_id, provider)
+
+        stages["8_post"], _ = _run_stage("8_post", _post_process)
+
+        # ─── 保存评审报告到数据库（修订后重新评审） ───
+        try:
+            from storage.models import ReviewSession
+            review_data_raw = stages.get("6_review")
+            review_data = None
+            if isinstance(review_data_raw, dict):
+                review_data = review_data_raw.get("data", review_data_raw)
+            if isinstance(review_data, dict):
+                scores = review_data.get("scores", {})
+                overall = round(sum(scores.values()) / len(scores), 1) if scores else 0.0
+                session = ReviewSession(
+                    project_id=project_id,
+                    chapter_id=chapter_id,
+                    session_type="chapter",
+                    content_reviewed=(chapter.content or "")[:2000],
+                    score_consistency=scores.get("consistency", 0),
+                    score_pacing=scores.get("pacing", 0),
+                    score_style=scores.get("style", 0),
+                    score_ai_removal=scores.get("ai_removal", 0),
+                    score_word_count=scores.get("word_count", 0),
+                    score_foreshadowing=scores.get("foreshadowing", 0),
+                    score_character_arc=scores.get("character_arc", 0),
+                    score_thematic=scores.get("thematic", 0),
+                    overall_score=overall,
+                    critique=review_data.get("critique", ""),
+                    suggestions=review_data.get("suggestions", []),
+                )
+                db.add(session)
+                db.commit()
+                logger.info(f"[Revise] saved review for chapter {chapter_id}, score={overall}")
+        except Exception as e:
+            logger.warning(f"[Revise] failed to save review: {e}")
+
+        total_ms = (time.time() - start_time) * 1000
+        return {
+            "status": "completed",
+            "stages": {k: {**v, "duration_ms": v.get("duration_ms", 0)} for k, v in stages.items()},
+            "chapter_content": chapter.content,
+            "final_word_count": chapter.word_count,
+            "total_duration_ms": total_ms,
+        }
+
+    except Exception as e:
+        logger.error(f"[Revise] failed: {e}")
+        return {
+            "status": "failed",
+            "stages": stages,
+            "error": str(e),
+            "total_duration_ms": (time.time() - start_time) * 1000,
+        }
+

@@ -292,6 +292,15 @@ STAGE_PROMPTS = {
             "2. structure.acts：4 幕结构（开局/发展/高潮/结局），每幕给 from_chapter / to_chapter\n"
             "3. pacing_notes：整体节奏规划（2-3 句）\n"
             "4. outline_text：完整大纲文本（200-500 字概述）\n"
+            "\n"
+            "【宏观节奏规划 - 必须包含以下内容】\n"
+            "5. reversal_schedule：反转/高潮时刻表，严格遵循以下节奏：\n"
+            "   - 小反转/小爽点（约每 3 章）：压力积累 + 爆发式爽点循环\n"
+            "     例：反派挑衅 → 资源争夺 → 绝地反击 → 获得奖励\n"
+            "   - 大反转/大爽点（约每 10 章）：重大剧情转折或身份揭晓\n"
+            "     例：身世揭秘、阵营反转、核心秘密揭露\n"
+            "   请列出每个小爽点和大爽点的章节号和简要描述\n"
+            "6. climax_map：每个幕的高潮点安排，确保读者追更动力\n"
         ),
         "json_schema": {
             "plot_lines": [
@@ -313,24 +322,60 @@ STAGE_PROMPTS = {
             },
             "pacing_notes": "...",
             "outline_text": "...",
+            "reversal_schedule": {
+                "small_reversals": [
+                    {"chapter": 3, "description": "小爽点描述"},
+                    {"chapter": 6, "description": "小爽点描述"},
+                ],
+                "big_reversals": [
+                    {"chapter": 10, "description": "大反转描述"},
+                    {"chapter": 20, "description": "大反转描述"},
+                ],
+            },
+            "climax_map": [
+                {"act": "第一幕", "climax_chapter": 7, "description": "幕高潮描述"},
+                {"act": "第二幕", "climax_chapter": 17, "description": "幕高潮描述"},
+            ],
         },
     },
     "stage_4b_foreshadow": {
         "task": (
-            "根据项目大纲，规划 5-8 条伏笔。\n"
-            "type 必须是：短期（1-5 章内回收）/ 中期（6-15 章）/ 长期（跨幕）\n"
+            "根据项目大纲，规划伏笔系统。伏笔必须分三个层级，确保与主线紧密相关：\n"
+            "\n"
+            "【伏笔三层级体系】\n"
+            "1. 短伏笔（约 6000 字内 / 3 章以内回收）：\n"
+            "   - 短期内抛出并迅速解决\n"
+            "   - 例：主角进副本前得罪了某人，在副本内立刻遇到并打脸\n"
+            "   - 作用：维持近期的阅读期待\n"
+            "   - 数量：3-5 条\n"
+            "\n"
+            "2. 中伏笔（约 5 万字 / 跨越一个完整副本或较大剧情篇章）：\n"
+            "   - 开篇埋下线索，在篇章结尾进行回收，形成阶段性闭环\n"
+            "   - 例：副本入口的神秘符号 → 副本最终 boss 的弱点\n"
+            "   - 作用：维持中期追更动力\n"
+            "   - 数量：2-3 条\n"
+            "\n"
+            "3. 长伏笔（贯穿全书）：\n"
+            "   - 从小说第一章埋下，直到大结局才揭晓\n"
+            "   - 涉及世界观的核心秘密或主角的最终宿命\n"
+            "   - 作用：整本书的灵魂\n"
+            "   - 数量：1-2 条\n"
+            "\n"
             "要求：\n"
             "1. suggested_plant_chapter：建议埋设章节号\n"
-            "2. suggested_resolve_chapter：建议回收章节号\n"
+            "2. suggested_resolve_chapter：建议回收章节号（长伏笔写 'final'）\n"
+            "3. importance：high / medium / low（长伏笔必须 high）\n"
         ),
         "json_schema": {
             "foreshadowings": [
                 {
                     "title": "...",
                     "content": "...",
-                    "type": "短期",
+                    "type": "短伏笔|中伏笔|长伏笔",
                     "suggested_plant_chapter": 1,
                     "suggested_resolve_chapter": 5,
+                    "importance": "high|medium|low",
+                    "connection_to_mainline": "与主线的关联说明",
                 }
             ]
         },
@@ -880,6 +925,8 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
                 structure=data.get("structure", {}),
                 pacing_notes=data.get("pacing_notes", ""),
                 outline_text=data.get("outline_text", ""),
+                reversal_schedule=data.get("reversal_schedule", {}),
+                climax_map=data.get("climax_map", []),
             )
             db.add(outline)
 
@@ -892,6 +939,9 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
                     project_id=project_id,
                     title=fs.get("title", ""),
                     content=fs.get("content", ""),
+                    cycle=fs.get("type", "短伏笔"),
+                    importance=fs.get("importance", "medium"),
+                    connection_to_mainline=fs.get("connection_to_mainline", ""),
                     plant_order=fs.get("suggested_plant_chapter", 0),
                     status="active",
                 )

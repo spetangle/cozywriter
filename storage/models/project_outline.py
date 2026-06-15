@@ -15,6 +15,8 @@ class ProjectOutline(Base):
     structure = Column(JSON, default=dict)
     pacing_notes = Column(Text, default="")
     outline_text = Column(Text, default="")
+    reversal_schedule = Column(JSON, default=dict)  # 宏观节奏：小爽点(每3章) + 大爽点(每10章)
+    climax_map = Column(JSON, default=list)  # 每幕高潮点安排
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -40,6 +42,9 @@ class ChapterOutline(Base):
     max_word_count = Column(Integer, default=0)
     pacing = Column(String(20), default="平稳")
     character_ids = Column(JSON, default=list)
+    qi_cheng_zhuan_he = Column(JSON, default=dict)  # 起承转合四阶段结构
+    pacing_hooks = Column(JSON, default=list)  # 章内钩子（每500字一个小转折）
+    reversals = Column(JSON, default=list)  # 本章反转安排
     status = Column(String(20), default="planning")
     notes = Column(Text, default="")
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -15,6 +15,7 @@ from api.routes import (
     creative_questionnaire, workflow, genres,
 )
 from api.routes.chapters import pipeline_router
+from api.routes import export
 from logger import logger
 
 
@@ -142,6 +143,7 @@ app.include_router(genres.router)                 # 题材（系统 + 用户自�
 app.include_router(creative_questionnaire.router) # 创意问卷
 app.include_router(workflow.router)             # 工作流管理（重跑/提交）
 app.include_router(pipeline_router)            # 章节生成 9 步流水线
+app.include_router(export.router)              # 导出正文
 
 # 旧版灵感 API 兼容路由：/api/projects/{pid}/inspirations → 转发到 /api/inspirations
 # （保留项目内旧版右侧面板可用）

@@ -5,9 +5,34 @@ from sqlalchemy.orm import Session
 from storage.database import get_db
 from storage.models.workflow import WorkflowRun
 from logger import logger
+import threading as _threading
 
 
 router = APIRouter(prefix="/api/workflow", tags=["工作流"])
+
+
+# ─── In-process 锁：防止同一 run 并发重跑 ───
+# 背景：rerun-all 异步提交到线程池，10s 内连点 2 次会同时跑 2 个 task，
+#      都会改 run.stage_results → 竞态 → 数据混乱
+# 范围：进程内（单实例足够；多实例需要走 DB 锁，但当前是单机）
+# 粒度：per-run_id
+# 自动释放：task 跑完（无论成功失败）→ 释放
+_inflight_runs: set[int] = set()
+_inflight_lock = _threading.Lock()
+
+
+def _acquire_run_lock(run_id: int) -> bool:
+    """尝试加锁。返回 True=拿到锁 / False=已被别的 task 占用"""
+    with _inflight_lock:
+        if run_id in _inflight_runs:
+            return False
+        _inflight_runs.add(run_id)
+        return True
+
+
+def _release_run_lock(run_id: int) -> None:
+    with _inflight_lock:
+        _inflight_runs.discard(run_id)
 
 
 # ─── Schemas ───
@@ -317,11 +342,20 @@ async def rerun_stage(run_id: int, req: RerunRequest, db: Session = Depends(get_
     from llm.workflow import rerun_stage as _rerun
     from api.tasks import submit_llm_task, get_task
 
+    # 防并发：同一 run 已有一个 rerun 任务在跑 → 拒绝新的请求
+    if not _acquire_run_lock(run_id):
+        raise HTTPException(
+            status_code=409,
+            detail="该 run 已有重跑任务在执行中，请等待当前任务完成后再试",
+        )
+
     run = db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
     if not run:
+        _release_run_lock(run_id)
         raise HTTPException(status_code=404, detail="Run not found")
 
     if run.status == "committed":
+        _release_run_lock(run_id)
         raise HTTPException(
             status_code=400,
             detail="已 commit 的 run 不能 rerun stage，请新建项目或清除 commit 状态",
@@ -364,6 +398,7 @@ async def rerun_stage(run_id: int, req: RerunRequest, db: Session = Depends(get_
             logger.error(f"[Workflow] async rerun EXC run={run_id} stage={stage_id}: {e}", exc_info=True)
         finally:
             local_db.close()
+            _release_run_lock(run_id)  # 无论成败都释放锁
 
     task = submit_llm_task(
         task_type="rerun_stage",
@@ -395,11 +430,20 @@ async def rerun_all_stages(run_id: int, db: Session = Depends(get_db), force_all
     from llm.workflow import rerun_all_failed_stages
     from api.tasks import submit_llm_task, get_task
 
+    # 防并发：同一 run 已有一个 rerun-all 任务在跑 → 拒绝
+    if not _acquire_run_lock(run_id):
+        raise HTTPException(
+            status_code=409,
+            detail="该 run 已有重跑任务在执行中，请等待当前任务完成后再试",
+        )
+
     run = db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
     if not run:
+        _release_run_lock(run_id)
         raise HTTPException(status_code=404, detail="Run not found")
 
     if run.status == "committed":
+        _release_run_lock(run_id)
         raise HTTPException(
             status_code=400,
             detail="已 commit 的 run 不能 rerun-all",
@@ -449,6 +493,7 @@ async def rerun_all_stages(run_id: int, db: Session = Depends(get_db), force_all
             logger.error(f"[Workflow] async rerun-all EXC run={run_id}: {e}", exc_info=True)
         finally:
             local_db.close()
+            _release_run_lock(run_id)  # 无论成败都释放锁
 
     task = submit_llm_task(
         task_type="rerun_all",
@@ -501,8 +546,16 @@ async def rerun_and_commit(run_id: int, req: RerunRequest, db: Session = Depends
     from api.tasks import submit_llm_task, get_task
     from llm.workflow import rerun_stage as _rerun, commit_bootstrap
 
+    # 防并发：同 run 已有重跑/提交任务在跑 → 拒绝
+    if not _acquire_run_lock(run_id):
+        raise HTTPException(
+            status_code=409,
+            detail="该 run 已有重跑任务在执行中，请等待当前任务完成后再试",
+        )
+
     run = db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
     if not run:
+        _release_run_lock(run_id)
         raise HTTPException(status_code=404, detail="Run not found")
 
     def _async_rerun_and_commit_task(task_id: str, **kwargs):
@@ -547,6 +600,7 @@ async def rerun_and_commit(run_id: int, req: RerunRequest, db: Session = Depends
             logger.error(f"[Workflow] async rerun-and-commit EXC run={run_id_inner}: {e}", exc_info=True)
         finally:
             local_db.close()
+            _release_run_lock(run_id_inner)  # 无论成败都释放锁
 
     task = submit_llm_task(
         task_type="rerun_and_commit",

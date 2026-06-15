@@ -87,6 +87,7 @@ STYLE_SYSTEM = """你是一位专业的小说作家，文字功底深厚，擅�
 5. 严格遵守字数要求
 6. 回复只输出小说正文，不要输出任何其他内容
 7. 文字要有文学性和人文感，不要机械模板化
+8. 【重要】尽量避免使用短句（如三字句、四字句），多使用长短句交替的叙述方式，增加文字的节奏感和文学性
 """
 
 STYLE_USER = """请根据上下文继续撰写下一段小说内容：
@@ -440,31 +441,113 @@ ROLE_CHAPTER_PREP = Role(
 
 
 # 9.2 细纲生成（在已有 prep info 上）
-CHAPTER_OUTLINE_GEN_SYSTEM = """你是一位专业的小说架构师。
+CHAPTER_OUTLINE_GEN_SYSTEM = """你是一位专业的小说架构师，擅长按"起承转合"四阶段结构规划章节。
 
 【本章定位】{chapter_position} · 节奏：{pacing}
 【关键内容】{key_content}
 【剧情推进】{plot_advance}
+【章节目标字数】{target_word_count} 字
 
 【章节准备信息】
 {prep_info}
 
+═══════════════════════════════════════════════════════════════
+【核心规划原则】
+═══════════════════════════════════════════════════════════════
+
+## 一、起承转合四阶段结构
+
+本章必须严格按"起承转合"四阶段规划，每个阶段字数按目标字数分配：
+
+| 阶段 | 字数占比 | 核心任务 |
+|------|---------|----------|
+| 起   | 15-20%  | 引入场景、人物、悬念，建立读者期待 |
+| 承   | 25-30%  | 推进剧情、深化冲突、积累张力 |
+| 转   | 30-35%  | 核心冲突爆发、反转出现、情绪高潮 |
+| 合   | 15-20%  | 收束情节、留下悬念、过渡到下章 |
+
+**字数分配规则**：四阶段字数总和与目标字数的偏差不能大于 10%。
+
+## 二、剧情点密度规则
+
+### 微观节奏（章内钩子）
+- **每 500 字左右**必须出现一次小转折、小冲突或情绪波动
+- 章中钩子类型：对话变质、消息突来、环境异动、秘密揭露、态度转变
+- 目的：防止读者中途划走
+
+### 宏观节奏（单章体验）
+- 一章（2000-3000 字）需容纳 **1-2 个完整的情节弧或小高潮**
+- 确保单章阅读体验完整且过瘾
+
+## 三、反转与高潮设计
+
+- **小反转/小爽点**（每 3 章）：压力积累 → 爆发式爽点（如：反派挑衅 → 资源争夺 → 绝地反击 → 获得奖励）
+- **大反转/大爽点**（每 10 章）：重大剧情转折或身份揭晓
+- 本章在整体节奏中的位置决定了需要安排的反转强度
+
+## 四、伏笔操作
+
+根据伏笔规划，明确本章需要：
+- **埋设短伏笔**（3 章内回收）：维持近期阅读期待
+- **推进中伏笔**（跨篇章回收）：阶段性闭环
+- **呼应长伏笔**（贯穿全书）：世界观核心秘密
+
+═══════════════════════════════════════════════════════════════
+
 请生成本章细纲（JSON）：
 {{
+  "qi_cheng_zhuan_he": {{
+    "qi": {{
+      "summary": "起阶段内容概述",
+      "word_count": 预估字数,
+      "hook": "开篇钩子（吸引读者的悬念/冲突）",
+      "beats": ["节拍1", "节拍2"]
+    }},
+    "cheng": {{
+      "summary": "承阶段内容概述",
+      "word_count": 预估字数,
+      "escalation": "张力升级方式",
+      "beats": ["节拍1", "节拍2"]
+    }},
+    "zhuan": {{
+      "summary": "转阶段内容概述",
+      "word_count": 预估字数,
+      "turning_point": "核心转折/反转点",
+      "climax": "高潮描述",
+      "beats": ["节拍1", "节拍2", "节拍3"]
+    }},
+    "he": {{
+      "summary": "合阶段内容概述",
+      "word_count": 预估字数,
+      "resolution": "收束方式",
+      "hook_for_next": "下章悬念/钩子",
+      "beats": ["节拍1"]
+    }}
+  }},
   "scenes": [
-    {{"name": "场景名", "summary": "场景概要", "characters": ["登场人物"], "conflict": "冲突点"}}
+    {{"name": "场景名", "summary": "场景概要", "characters": ["登场人物"], "conflict": "冲突点", "phase": "qi|cheng|zhuan|he"}}
   ],
-  "key_beats": ["关键节拍 1", "关键节拍 2"],
-  "foreshadow_actions": [{{"title": "伏笔标题", "action": "plant|resolve|tie"}}, ...],
-  "character_developments": [{{"name": "角色名", "change": "本章变化 1 句"}}, ...],
-  "target_word_count": {target_word_count}
+  "pacing_hooks": [
+    {{"position": "约第X字", "type": "钩子类型", "description": "具体内容"}}
+  ],
+  "reversals": [
+    {{"type": "small|medium|large", "description": "反转描述", "emotional_impact": "情绪效果"}}
+  ],
+  "foreshadow_actions": [
+    {{"title": "伏笔标题", "action": "plant|advance|resolve|tie", "cycle": "short|medium|long", "detail": "具体操作"}}
+  ],
+  "character_developments": [
+    {{"name": "角色名", "change": "本章变化 1 句"}}
+  ],
+  "target_word_count": {target_word_count},
+  "word_count_check": "四阶段字数总和 = X字，与目标偏差 Y%"
 }}
 """
 ROLE_CHAPTER_OUTLINE_GEN = Role(
     name="chapter_outline_gen",
     system_prompt=CHAPTER_OUTLINE_GEN_SYSTEM,
     user_prompt_template="请生成第 {chapter_num} 章细纲：",
-    max_tokens=2048,
+    max_tokens=3072,
     temperature=0.6,
 )
 
@@ -832,7 +915,7 @@ def build_ai_removal_instruction(level: int) -> str:
     elif level <= 4:
         return "减少机械化的连接词使用，避免过于工整的句式。"
     elif level <= 6:
-        return "适当变化句式长度，增加对话的自然感，减少过度完美的修辞。"
+        return "适当变化句式长度，减少短句的使用，增加对话的自然感，减少过度完美的修辞。"
     elif level <= 8:
         return "刻意打破模板化表达，增加口语化、个性化的叙述方式。"
     else:

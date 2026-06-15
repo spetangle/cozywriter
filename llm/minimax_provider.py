@@ -177,37 +177,76 @@ class MiniMaxProvider(LLMProvider):
             )
             return text
         except anthropic.AuthenticationError as e:
+            duration_ms = (time.time() - t0) * 1000
             logger.error(f"[LLM:minimax] 401 鉴权失败: {e}")
+            log_llm_payload(
+                provider=self.provider_name, model=self.model, task_type=task_type,
+                system_prompt=system_prompt, user_prompt=prompt, response_text="",
+                duration_ms=duration_ms, success=False, error=str(e),
+            )
             raise RuntimeError(
                 "MiniMax 鉴权失败 (401)。请检查 .env 中 MINIMAX_API_KEY 是否正确。\n"
                 "获取 API Key: https://platform.minimaxi.com/user-center/basic-information/interface-key"
             ) from e
         except anthropic.PermissionDeniedError as e:
+            duration_ms = (time.time() - t0) * 1000
             logger.error(f"[LLM:minimax] 403 模型无权访问: {self.model} ({e})")
+            log_llm_payload(
+                provider=self.provider_name, model=self.model, task_type=task_type,
+                system_prompt=system_prompt, user_prompt=prompt, response_text="",
+                duration_ms=duration_ms, success=False, error=str(e),
+            )
             raise RuntimeError(
                 f"MiniMax 403: 无权访问模型 '{self.model}'。"
                 f"该模型可能需要单独开通权限。可选: MiniMax-M2.7 / M2.5 / M2.1 / M2"
             ) from e
         except anthropic.NotFoundError as e:
+            duration_ms = (time.time() - t0) * 1000
             logger.error(f"[LLM:minimax] 404 模型/URL 错误: {self.model} @ {self.base_url} ({e})")
+            log_llm_payload(
+                provider=self.provider_name, model=self.model, task_type=task_type,
+                system_prompt=system_prompt, user_prompt=prompt, response_text="",
+                duration_ms=duration_ms, success=False, error=str(e),
+                extra={"base_url": self.base_url},
+            )
             raise RuntimeError(
                 f"MiniMax 404: 模型 '{self.model}' 不存在或 base_url '{self.base_url}' 错误。"
             ) from e
         except anthropic.RateLimitError as e:
+            duration_ms = (time.time() - t0) * 1000
             logger.warning(f"[LLM:minimax] 429 限流: {e}")
+            log_llm_payload(
+                provider=self.provider_name, model=self.model, task_type=task_type,
+                system_prompt=system_prompt, user_prompt=prompt, response_text="",
+                duration_ms=duration_ms, success=False, error=str(e),
+            )
             raise RuntimeError("MiniMax 触发限流 (429)，请稍后重试。") from e
         except anthropic.APIStatusError as e:
             # 其他 4xx/5xx
+            duration_ms = (time.time() - t0) * 1000
             logger.error(
                 f"[LLM:minimax] ← {self.model} API 错误 status={e.status_code} body={e.body}"
+            )
+            log_llm_payload(
+                provider=self.provider_name, model=self.model, task_type=task_type,
+                system_prompt=system_prompt, user_prompt=prompt, response_text="",
+                duration_ms=duration_ms, success=False, error=str(e),
+                extra={"status_code": e.status_code, "body": str(e.body)},
             )
             raise RuntimeError(
                 f"MiniMax API 错误 (status={e.status_code}): {e.message or e.body}"
             ) from e
         except anthropic.APIConnectionError as e:
+            duration_ms = (time.time() - t0) * 1000
             logger.error(
-                f"[LLM:minimax] 网络异常 duration={(time.time()-t0)*1000:.0f}ms err={e}",
+                f"[LLM:minimax] 网络异常 duration={duration_ms:.0f}ms err={e}",
                 exc_info=True,
+            )
+            log_llm_payload(
+                provider=self.provider_name, model=self.model, task_type=task_type,
+                system_prompt=system_prompt, user_prompt=prompt, response_text="",
+                duration_ms=duration_ms, success=False, error=str(e),
+                extra={"base_url": self.base_url},
             )
             raise RuntimeError(
                 f"MiniMax 网络请求失败（{self.base_url}）: {e}"

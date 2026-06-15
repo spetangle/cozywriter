@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CozyWriter - 小说编写助手</title>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/style.css?v=7">
 
 <style>
 /* === 流水线进度面板 === */
@@ -228,23 +228,26 @@
                 <button @click="activePanel = 'theme'; subPanel = 'themes'" :class="{ active: activePanel === 'theme' }">🎯 主题/伏笔</button>
                 <button @click="activePanel = 'check'; subPanel = 'consistency'" :class="{ active: activePanel === 'check' }">🔍 检查</button>
                 <button @click="activePanel = 'inspirations'" :class="{ active: activePanel === 'inspirations' }">💡 灵感</button>
+                <button @click="openExportModal()">📤 导出</button>
               </div>
             </div>
 
             <!-- 字数目标进度 -->
-            <div class="sidebar-section" x-show="currentProject">
-              <div class="sidebar-header"><span>字数进度</span></div>
-              <div class="word-progress">
-                <div class="wp-bar">
-                  <div class="wp-fill" :style="`width: ${wordProgressPercent}%`"></div>
+            <template x-if="currentProject">
+              <div class="sidebar-section">
+                <div class="sidebar-header"><span>字数进度</span></div>
+                <div class="word-progress">
+                  <div class="wp-bar">
+                    <div class="wp-fill" :style="`width: ${wordProgressPercent}%`"></div>
+                  </div>
+                  <div class="wp-text">
+                    <span x-text="`${currentProject.word_count || 0} / ${currentProject.target_word_count || 0} 字`"></span>
+                    <span x-text="`${chapters.length} 章`"></span>
+                  </div>
+                  <div class="wp-range" x-text="`目标: ${currentProject.word_count_min || 0}～${currentProject.word_count_max || 0}字/章`"></div>
                 </div>
-                <div class="wp-text">
-                  <span x-text="`${currentProject.word_count} / ${currentProject.target_word_count} 字`"></span>
-                  <span x-text="`${chapters.length} 章`"></span>
-                </div>
-                <div class="wp-range" x-text="`目标: ${currentProject.word_count_min}～${currentProject.word_count_max}字/章`"></div>
               </div>
-            </div>
+            </template>
           </aside>
 
           <!-- 中间：写作台 / 各面板 -->
@@ -266,12 +269,17 @@
                     <h3>已有项目</h3>
                     <template x-for="p in projects" :key="p.id">
                       <div class="project-card" @click="openProject(p)">
-                        <h4 x-text="p.title"></h4>
-                        <p x-text="p.description || '暂无描述'"></p>
-                        <div class="project-meta">
-                          <span x-text="`${p.word_count} 字`"></span>
-                          <span x-text="`风格: ${p.writing_style || '平实'}`"></span>
+                        <div class="project-card-header">
+                          <h4 x-text="p.title"></h4>
+                          <span class="project-genre-tag" x-show="p.genre" x-text="p.genre"></span>
                         </div>
+                        <p class="project-card-desc" x-text="p.description || '暂无描述'"></p>
+                        <div class="project-meta">
+                          <span x-show="p.genre">📚 <span x-text="p.genre"></span></span>
+                          <span>📖 <span x-text="`${p.chapter_count || 0} / ${p.total_chapters || '?'} 章`"></span></span>
+                          <span>📝 <span x-text="`每章 ${(p.target_word_count || 0)} 字`"></span></span>
+                          <span>📅 <span x-text="(p.created_at || '').slice(0,10)"></span></span>
+                      </div>
                       </div>
                     </template>
                   </div>
@@ -314,22 +322,150 @@
             <!-- 写作台 -->
             <template x-if="currentProject && currentChapter">
               <div class="writing-desk">
-                <div class="chapter-header">
-                  <input type="text" class="chapter-title-input" x-model="currentChapter.title" @change="saveChapter()">
-                  <div class="word-badge" :class="getWordCountBadgeClass(currentChapter)" x-text="`${currentChapter.word_count} 字`"></div>
+                <!-- 章节信息栏 + 页签 -->
+                <div class="chapter-header-bar">
+                  <div class="chapter-info-left">
+                    <span class="chapter-num" x-text="`第${currentChapter.order + 1}章`"></span>
+                    <input type="text" class="chapter-title-input" x-model="currentChapter.title" @change="saveChapter()">
+                    <span class="chapter-meta" x-text="`字数: ${currentChapter.word_count}`"></span>
+                    <span class="chapter-score" x-show="previewReview">评分: <strong x-text="previewReview?.overall_score?.toFixed(0) || '-'"></strong></span>
+                  </div>
+                  <div class="writing-tabs">
+                    <button :class="{ active: writingTab === 'content' }" @click="writingTab = 'content'">正文</button>
+                    <button :class="{ active: writingTab === 'outline' }" @click="writingTab = 'outline'">细纲</button>
+                    <button :class="{ active: writingTab === 'review' }" @click="writingTab = 'review'">评审报告</button>
+                  </div>
                 </div>
-                <textarea class="content-editor" x-model="currentChapter.content" @input="onContentChange()" placeholder="开始写作..."></textarea>
+
+                <!-- 正文编辑区 -->
+                <div x-show="writingTab === 'content'" class="writing-tab-content">
+                  <textarea class="content-editor" x-model="currentChapter.content" @input="onContentChange()" placeholder="开始写作..."></textarea>
+                </div>
+
+                <!-- 细纲显示区 -->
+                <div x-show="writingTab === 'outline'" class="writing-tab-content writing-outline-panel">
+                  <template x-if="chapterOutlinesMap[currentChapter.id]">
+                    <div class="outline-detail">
+                      <div class="outline-meta-grid">
+                        <div class="omg-item"><span>位置</span><strong x-text="chapterOutlinesMap[currentChapter.id].chapter_position || '-'"></strong></div>
+                        <div class="omg-item"><span>节拍</span><strong x-text="chapterOutlinesMap[currentChapter.id].pacing || '-'"></strong></div>
+                        <div class="omg-item"><span>字数目标</span><strong x-text="(chapterOutlinesMap[currentChapter.id].target_word_count || 0) + ' 字'"></strong></div>
+                        <div class="omg-item"><span>状态</span><strong x-text="chapterOutlinesMap[currentChapter.id].status || '-'"></strong></div>
+                      </div>
+                      <div class="outline-section">
+                        <h4>核心内容</h4>
+                        <div class="outline-text" x-text="chapterOutlinesMap[currentChapter.id].key_content || '暂无'"></div>
+                      </div>
+                      <div class="outline-section">
+                        <h4>剧情推进</h4>
+                        <div class="outline-text" x-text="chapterOutlinesMap[currentChapter.id].plot_advance || '暂无'"></div>
+                      </div>
+                      <template x-if="(chapterOutlinesMap[currentChapter.id].conflicts || []).length > 0">
+                        <div class="outline-section">
+                          <h4>冲突/矛盾</h4>
+                          <ul>
+                            <template x-for="(c, i) in chapterOutlinesMap[currentChapter.id].conflicts" :key="i">
+                              <li x-text="c"></li>
+                            </template>
+                          </ul>
+                        </div>
+                      </template>
+                      <template x-if="(chapterOutlinesMap[currentChapter.id].highlights || []).length > 0">
+                        <div class="outline-section">
+                          <h4>高光时刻</h4>
+                          <ul>
+                            <template x-for="(h, i) in chapterOutlinesMap[currentChapter.id].highlights" :key="i">
+                              <li x-text="h"></li>
+                            </template>
+                          </ul>
+                        </div>
+                      </template>
+                      <template x-if="(chapterOutlinesMap[currentChapter.id].foreshadows || []).length > 0">
+                        <div class="outline-section">
+                          <h4>伏笔</h4>
+                          <ul>
+                            <template x-for="(f, i) in chapterOutlinesMap[currentChapter.id].foreshadows" :key="i">
+                              <li x-text="f"></li>
+                            </template>
+                          </ul>
+                        </div>
+                      </template>
+                      <template x-if="(chapterOutlinesMap[currentChapter.id].character_changes || []).length > 0">
+                        <div class="outline-section">
+                          <h4>角色变化</h4>
+                          <ul>
+                            <template x-for="(c, i) in chapterOutlinesMap[currentChapter.id].character_changes" :key="i">
+                              <li x-text="c"></li>
+                            </template>
+                          </ul>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                  <template x-if="!chapterOutlinesMap[currentChapter.id]">
+                    <div class="preview-empty">
+                      <p>本章暂无细纲</p>
+                      <p style="font-size:13px;color:var(--text-muted)">点击「一键生成」生成细纲和正文</p>
+                    </div>
+                  </template>
+                </div>
+
+                <!-- 评审报告显示区 -->
+                <div x-show="writingTab === 'review'" class="writing-tab-content writing-review-panel">
+                  <template x-if="previewReview">
+                    <div class="review-detail">
+                      <div class="review-scores">
+                        <div class="score-item"><span>一致性</span><div class="score-bar"><div class="score-fill" :style="`width:${previewReview.score_consistency * 10}%`"></div></div><strong x-text="previewReview.score_consistency?.toFixed(1)"></strong></div>
+                        <div class="score-item"><span>节奏</span><div class="score-bar"><div class="score-fill" :style="`width:${previewReview.score_pacing * 10}%`"></div></div><strong x-text="previewReview.score_pacing?.toFixed(1)"></strong></div>
+                        <div class="score-item"><span>文笔风格</span><div class="score-bar"><div class="score-fill" :style="`width:${previewReview.score_style * 10}%`"></div></div><strong x-text="previewReview.score_style?.toFixed(1)"></strong></div>
+                        <div class="score-item"><span>去AI味</span><div class="score-bar"><div class="score-fill" :style="`width:${previewReview.score_ai_removal * 10}%`"></div></div><strong x-text="previewReview.score_ai_removal?.toFixed(1)"></strong></div>
+                        <div class="score-item"><span>字数合规</span><div class="score-bar"><div class="score-fill" :style="`width:${previewReview.score_word_count * 10}%`"></div></div><strong x-text="previewReview.score_word_count?.toFixed(1)"></strong></div>
+                        <div class="score-item"><span>伏笔管理</span><div class="score-bar"><div class="score-fill" :style="`width:${previewReview.score_foreshadowing * 10}%`"></div></div><strong x-text="previewReview.score_foreshadowing?.toFixed(1)"></strong></div>
+                        <div class="score-item"><span>角色弧光</span><div class="score-bar"><div class="score-fill" :style="`width:${previewReview.score_character_arc * 10}%`"></div></div><strong x-text="previewReview.score_character_arc?.toFixed(1)"></strong></div>
+                        <div class="score-item"><span>主旨契合</span><div class="score-bar"><div class="score-fill" :style="`width:${previewReview.score_thematic * 10}%`"></div></div><strong x-text="previewReview.score_thematic?.toFixed(1)"></strong></div>
+                      </div>
+                      <div class="overall-score">
+                        <span>综合评分</span>
+                        <strong x-text="previewReview.overall_score?.toFixed(1) + ' / 10'"></strong>
+                      </div>
+                      <div class="critique-section">
+                        <h4>评审意见</h4>
+                        <p x-text="previewReview.critique"></p>
+                      </div>
+                      <template x-if="previewReview.suggestions && previewReview.suggestions.length > 0">
+                        <div class="suggestions-section">
+                          <h4>修改建议</h4>
+                          <ul>
+                            <template x-for="(s, i) in previewReview.suggestions" :key="i">
+                              <li x-text="s"></li>
+                            </template>
+                          </ul>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                  <template x-if="!previewReview">
+                    <div class="preview-empty">
+                      <p>本章暂无评审记录</p>
+                      <p style="font-size:13px;color:var(--text-muted)">点击「一键生成」后会自动评审</p>
+                    </div>
+                  </template>
+                </div>
+
+                <!-- 底部操作栏 -->
                 <div class="editor-footer">
                   <div class="footer-left">
                     <span :class="getWordCountBadgeClass(currentChapter)" x-text="wordCountStatus(currentChapter)"></span>
                     <span class="ai-hint" x-show="currentChapter.word_count > (currentProject.word_count_max || 5000)">⚠️ 字数超出上限</span>
                   </div>
                   <div class="footer-actions">
-                    <button class="btn-secondary" @click="saveChapter()">💾 保存</button>
-                    <button class="btn-secondary" @click="showGenerateModal = true">✨ AI 续写</button>
-                    <button class="btn-primary" @click="runChapterPipeline()"
+                    <button class="btn-secondary" @click="saveChapter()" :disabled="!chapterDirty">💾 保存</button>
+                    <button class="btn-primary" @click="pipelineSetupSetupModal()"
                             title="一键启动 9 步流水线（细纲→正文→评审→修订→保存→后处理）"
                             :disabled="!canRunPipeline">🤖 一键生成</button>
+                    <button class="btn-secondary" @click="confirmRevise()"
+                            :disabled="!currentChapter || !currentChapter.content"
+                            title="根据细纲和评审报告重新生成正文，旧正文标记为废稿">📝 修订</button>
                   </div>
                 </div>
               </div>
@@ -1148,8 +1284,9 @@
 
           </main>
         </div>
+      </template>
       </div>
-    </template>
+    
 
     <!-- ═══ 灵感面板 ═══ -->
     <template x-if="activePanel === 'inspirations' && currentProject">
@@ -1319,6 +1456,140 @@
           <div class="modal-actions">
             <button class="btn-secondary" @click="showGenerateModal = false">关闭</button>
             <button class="btn-primary" @click="generateText()" :disabled="generating || !generatePrompt">✨ 生成</button>
+          </div>
+        </div>
+      </div>
+    </template>
+
+
+    <!-- ═══ 导出正文浮层 ═══ -->
+    <template x-if="showExportModal">
+      <div class="modal-overlay" @click.self="showExportModal = false">
+        <div class="modal" style="max-width:560px">
+          <header class="pipeline-header">
+            <h3>📤 导出正文</h3>
+            <button class="modal-close-x" @click="showExportModal = false">×</button>
+          </header>
+          <div style="padding:20px">
+            <!-- 章节选择 -->
+            <div style="margin-bottom:16px">
+              <label style="display:block;font-weight:600;margin-bottom:8px">选择章节</label>
+              <div style="display:flex;gap:8px;margin-bottom:8px">
+                <button class="btn-secondary" style="font-size:12px;padding:4px 8px" @click="selectAllExportChapters()">全选</button>
+                <button class="btn-secondary" style="font-size:12px;padding:4px 8px" @click="invertExportChapters()">反选</button>
+                <span style="font-size:12px;color:var(--text-muted);line-height:28px">已选 <span x-text="exportChapterIds.length"></span> / <span x-text="chapters.length"></span> 章</span>
+              </div>
+              <div style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:8px">
+                <template x-for="ch in chapters" :key="ch.id">
+                  <label style="display:flex;align-items:center;gap:8px;padding:6px;cursor:pointer;border-radius:4px:hover" class="export-chapter-item">
+                    <input type="checkbox" :checked="exportChapterIds.includes(ch.id)" @change="toggleExportChapter(ch.id)">
+                    <span x-text="`${ch.order + 1}. ${ch.title}`"></span>
+                    <span style="color:var(--text-muted);font-size:12px" x-text="`${ch.word_count || 0}字`"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+            
+            <!-- 重新分章 -->
+            <div style="margin-bottom:16px">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" x-model="exportRechapter">
+                <span style="font-weight:600">重新分章</span>
+                <span style="font-size:12px;color:var(--text-muted)">(按段落边界切割，不拆分段落)</span>
+              </label>
+              <div x-show="exportRechapter" style="margin-top:8px;padding:12px;background:var(--bg);border-radius:6px">
+                <label style="display:flex;align-items:center;gap:8px">
+                  <span>每章字数：</span>
+                  <input type="number" x-model.number="exportWordsPerChapter" min="500" max="50000" step="500" style="width:100px;padding:6px;border:1px solid var(--border);border-radius:4px">
+                  <span>字</span>
+                </label>
+                <span style="font-size:12px;color:var(--text-muted);margin-top:4px;display:block">偏差控制在±10%以内</span>
+              </div>
+            </div>
+            
+            
+            <!-- 章节独立保存 -->
+            <div style="margin-bottom:16px">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" x-model="exportSaveIndividual">
+                <span style="font-weight:600">章节独立保存</span>
+                <span style="font-size:12px;color:var(--text-muted)">(每章一个文件，打包为 .zip 下载)</span>
+              </label>
+            </div>
+            
+            <!-- 导出格式 -->
+            <div style="margin-bottom:20px">
+              <label style="display:block;font-weight:600;margin-bottom:8px">导出格式</label>
+              <div style="display:flex;gap:12px">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                  <input type="radio" value="txt" x-model="exportFormat">
+                  <span>TXT 纯文本</span>
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                  <input type="radio" value="markdown" x-model="exportFormat">
+                  <span>Markdown</span>
+                </label>
+              </div>
+            </div>
+            
+            <!-- 操作按钮 -->
+            <div style="display:flex;justify-content:flex-end;gap:8px">
+              <button class="btn-secondary" @click="showExportModal = false">取消</button>
+              <button class="btn-primary" @click="doExport()">📥 导出下载</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ═══ 一键生成设置浮层 ═══ -->
+    <template x-if="showPipelineSetupModal">
+      <div class="modal-overlay" @click.self="showPipelineSetupModal = false">
+        <div class="modal" style="max-width:480px">
+          <header class="pipeline-header">
+            <h3>🤖 一键生成章节</h3>
+            <button class="modal-close-x" @click="showPipelineSetupModal = false">×</button>
+          </header>
+          <div style="padding:20px">
+            <div style="margin-bottom:16px">
+              <label style="display:block;font-weight:600;margin-bottom:6px">生成章节</label>
+              <div style="display:flex;align-items:center;gap:8px">
+                <span>第</span>
+                <input type="number" x-model.number="pipelineSetupChapter" min="1"
+                       style="width:80px;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:15px;text-align:center">
+                <span>章</span>
+                <span style="color:var(--text-muted);font-size:13px;margin-left:8px">（当前共 <span x-text="chapters.length"></span> 章）</span>
+              </div>
+            </div>
+            <div style="margin-bottom:20px">
+              <label style="display:block;font-weight:600;margin-bottom:6px">内容引导 <span style="font-weight:400;color:var(--text-muted)">（选填）</span></label>
+              <textarea x-model="pipelineSetupGuide" rows="4" placeholder="输入一段文字，用于引导本章情节走向..."
+                        style="width:100%;padding:10px;border:1px solid var(--border);border-radius:6px;font-size:14px;resize:vertical"></textarea>
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:8px">
+              <button class="btn-secondary" @click="showPipelineSetupModal = false">取消</button>
+              <button class="btn-primary" @click="startPipelineFromSetup()">🚀 开始生成</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ═══ 修订确认浮层 ═══ -->
+    <template x-if="showReviseConfirmModal">
+      <div class="modal-overlay" @click.self="showReviseConfirmModal = false">
+        <div class="modal" style="max-width:420px">
+          <header class="pipeline-header">
+            <h3>📝 确认修订</h3>
+            <button class="modal-close-x" @click="showReviseConfirmModal = false">×</button>
+          </header>
+          <div style="padding:20px">
+            <p style="margin-bottom:12px">将根据本章已生成的<b>细纲</b>和<b>评审报告</b>，由 LLM 重新生成正文。</p>
+            <p style="margin-bottom:16px;color:var(--text-muted);font-size:13px">⚠️ 之前的旧版正文将标记为废稿，移入废纸篓。</p>
+            <div style="display:flex;justify-content:flex-end;gap:8px">
+              <button class="btn-secondary" @click="showReviseConfirmModal = false">取消</button>
+              <button class="btn-primary" @click="runRevise()">确认修订</button>
+            </div>
           </div>
         </div>
       </div>
@@ -1507,9 +1778,9 @@
                     <span class="task-type" x-text="t.task_type"></span>
                     <span class="task-id" x-text="t.id"></span>
                     <span class="task-duration" x-text="`${t.duration_s}s`"></span>
-                    <!-- 流水线任务：展开/收起子任务详情 -->
+                    <!-- 流水线/修订任务：展开/收起子任务详情 -->
                     <button class="btn-tiny"
-                            x-show="t.task_type === 'chapter_pipeline' && t.result && t.result.stages"
+                            x-show="(t.task_type === 'chapter_pipeline' || t.task_type === 'chapter_revise') && t.result && t.result.stages"
                             @click="toggleTaskDetail(t.id)">
                       <span x-text="expandedTaskIds.includes(t.id) ? '▾ 收起子任务' : '▸ 展开子任务'"></span>
                     </button>
@@ -1518,8 +1789,8 @@
                     <div class="task-error" x-text="t.error"></div>
                   </template>
 
-                  <!-- 流水线子任务详情 -->
-                  <template x-if="t.task_type === 'chapter_pipeline' && t.result && t.result.stages && expandedTaskIds.includes(t.id)">
+                  <!-- 流水线/修订子任务详情 -->
+                  <template x-if="(t.task_type === 'chapter_pipeline' || t.task_type === 'chapter_revise') && t.result && t.result.stages && expandedTaskIds.includes(t.id)">
                     <div class="task-pipeline-detail">
                       <div class="tpd-overall">
                         <span x-text="`总进度: ${(t.result.progress_pct || 0)}%`"></span>
@@ -1536,6 +1807,8 @@
                               failed: '❌'
                             }[sinfo.status] || '○'"></span>
                             <span class="tpd-label" x-text="sinfo.label || sid"></span>
+                            <span class="tpd-score" x-show="sinfo.score"
+                                  x-text="`(${sinfo.score?.toFixed(1) || '-'}分)`"></span>
                             <span class="tpd-time" x-show="sinfo.duration_ms !== null && sinfo.duration_ms !== undefined"
                                   x-text="`${(sinfo.duration_ms/1000).toFixed(1)}s`"></span>
                             <span class="tpd-err" x-show="sinfo.error" x-text="sinfo.error"></span>
@@ -1626,7 +1899,10 @@
                     </template>
                   </select>
                 </label>
-              </div>
+                <label>
+                  预计总章数
+                  <input type="number" x-model.number="newProjectForm.total_chapters" min="1" max="10000" placeholder="100">
+                </label>
 
               <div class="form-row">
                 <label>
@@ -1749,6 +2025,191 @@
       </div>
     </template>
 
+    <!-- ──── 预览面板 ──── -->
+    <template x-if="activePanel === 'preview' && currentProject">
+      <div class="panel-page preview-panel">
+        <!-- 通栏章节信息 -->
+        <div class="preview-chapter-banner">
+          <div class="pcb-main">
+            <h2 x-text="previewChapter ? `第 ${previewChapter.order + 1} 章 · ${previewChapter.title}` : '请选择章节'"></h2>
+            <span class="pcb-meta" x-show="previewChapter">
+              <span x-text="(previewChapter?.word_count || 0) + ' 字'"></span>
+              <span>·</span>
+              <span x-text="'创建于 ' + (previewChapter?.created_at || '').slice(0,10)"></span>
+              <span x-show="previewReview">·</span>
+              <span x-show="previewReview" class="pcb-score">评分: <strong x-text="previewReview?.overall_score?.toFixed(1) || '-'"></strong> / 10</span>
+            </span>
+          </div>
+          <div class="pcb-actions">
+            <button class="btn-secondary" @click="openPreview(previewChapter)" :disabled="!previewChapter">刷新</button>
+          </div>
+        </div>
+
+        <!-- 章节选择（无预览章节时） -->
+        <template x-if="!previewChapter">
+          <div class="preview-select">
+            <p>点击章节列表中的章节，或从下方选择：</p>
+            <div class="preview-chapter-grid">
+              <template x-for="ch in chapters" :key="ch.id">
+                <div class="preview-ch-card" @click="openPreview(ch)">
+                  <strong x-text="`${ch.order + 1}. ${ch.title}`"></strong>
+                  <span x-text="`${ch.word_count} 字`"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+
+        <!-- 标签页 + 内容 -->
+        <template x-if="previewChapter">
+          <div class="preview-body">
+            <div class="preview-tabs">
+              <button :class="{ active: previewSubTab === 'content' }" @click="previewSubTab = 'content'">📖 正文</button>
+              <button :class="{ active: previewSubTab === 'outline' }" @click="previewSubTab = 'outline'">📋 细纲</button>
+              <button :class="{ active: previewSubTab === 'review' }" @click="previewSubTab = 'review'">📊 评审报告</button>
+              <button :class="{ active: previewSubTab === 'foreshadow' }" @click="previewSubTab = 'foreshadow'">🔗 伏笔情况</button>
+            </div>
+
+            <!-- 正文 -->
+            <div x-show="previewSubTab === 'content'" class="preview-content-body">
+              <template x-if="previewChapter.content">
+                <div class="reader-text">
+                  <template x-for="(para, i) in (previewChapter.content || '').split('\n').filter(p => p.trim())" :key="i">
+                    <p x-text="para"></p>
+                  </template>
+                </div>
+              </template>
+              <template x-if="!previewChapter.content">
+                <p class="preview-empty">暂无正文内容</p>
+              </template>
+            </div>
+
+            <!-- 细纲 -->
+            <div x-show="previewSubTab === 'outline'" class="preview-outline-body">
+              <template x-if="chapterOutlinesMap[previewChapter.id]">
+                <div class="outline-detail">
+                  <div class="outline-meta-grid">
+                    <div class="omg-item"><span>位置</span><strong x-text="chapterOutlinesMap[previewChapter.id].chapter_position || '-'"></strong></div>
+                    <div class="omg-item"><span>节拍</span><strong x-text="chapterOutlinesMap[previewChapter.id].pacing || '-'"></strong></div>
+                    <div class="omg-item"><span>字数目标</span><strong x-text="(chapterOutlinesMap[previewChapter.id].target_word_count || 0) + ' 字'"></strong></div>
+                    <div class="omg-item"><span>状态</span><strong x-text="chapterOutlinesMap[previewChapter.id].status || '-'"></strong></div>
+                  </div>
+                  <div class="outline-section">
+                    <h4>核心内容</h4>
+                    <div class="outline-text" x-text="chapterOutlinesMap[previewChapter.id].key_content || '暂无'"></div>
+                  </div>
+                  <div class="outline-section">
+                    <h4>剧情推进</h4>
+                    <div class="outline-text" x-text="chapterOutlinesMap[previewChapter.id].plot_advance || '暂无'"></div>
+                  </div>
+                  <template x-if="(chapterOutlinesMap[previewChapter.id].conflicts || []).length > 0">
+                    <div class="outline-section">
+                      <h4>冲突</h4>
+                      <ul>
+                        <template x-for="(c, i) in chapterOutlinesMap[previewChapter.id].conflicts" :key="i">
+                          <li x-text="c"></li>
+                        </template>
+                      </ul>
+                    </div>
+                  </template>
+                  <template x-if="(chapterOutlinesMap[previewChapter.id].highlights || []).length > 0">
+                    <div class="outline-section">
+                      <h4>亮点</h4>
+                      <ul>
+                        <template x-for="(h, i) in chapterOutlinesMap[previewChapter.id].highlights" :key="i">
+                          <li x-text="h"></li>
+                        </template>
+                      </ul>
+                    </div>
+                  </template>
+                  <template x-if="chapterOutlinesMap[previewChapter.id].foreshadow_notes">
+                    <div class="outline-section">
+                      <h4>伏笔说明</h4>
+                      <div class="outline-text" x-text="chapterOutlinesMap[previewChapter.id].foreshadow_notes"></div>
+                    </div>
+                  </template>
+                  <template x-if="chapterOutlinesMap[previewChapter.id].notes">
+                    <div class="outline-section">
+                      <h4>备注</h4>
+                      <div class="outline-text" x-text="chapterOutlinesMap[previewChapter.id].notes"></div>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <template x-if="!chapterOutlinesMap[previewChapter.id]">
+                <p class="preview-empty">暂无细纲</p>
+              </template>
+            </div>
+
+            <!-- 评审报告 -->
+            <div x-show="previewSubTab === 'review'" class="preview-review-body">
+              <template x-if="previewReview">
+                <div class="review-result">
+                  <div class="review-scores">
+                    <div class="score-item"><span>一致性</span><div class="score-bar"><div class="score-fill" :style="`width:${previewReview.score_consistency * 10}%`"></div></div><strong x-text="previewReview.score_consistency.toFixed(1)"></strong></div>
+                    <div class="score-item"><span>节奏</span><div class="score-bar"><div class="score-fill" :style="`width:${previewReview.score_pacing * 10}%`"></div></div><strong x-text="previewReview.score_pacing.toFixed(1)"></strong></div>
+                    <div class="score-item"><span>文笔风格</span><div class="score-bar"><div class="score-fill" :style="`width:${previewReview.score_style * 10}%`"></div></div><strong x-text="previewReview.score_style.toFixed(1)"></strong></div>
+                    <div class="score-item"><span>去AI味</span><div class="score-bar"><div class="score-fill" :style="`width:${previewReview.score_ai_removal * 10}%`"></div></div><strong x-text="previewReview.score_ai_removal.toFixed(1)"></strong></div>
+                    <div class="score-item"><span>字数合规</span><div class="score-bar"><div class="score-fill" :style="`width:${previewReview.score_word_count * 10}%`"></div></div><strong x-text="previewReview.score_word_count.toFixed(1)"></strong></div>
+                    <div class="score-item"><span>伏笔管理</span><div class="score-bar"><div class="score-fill" :style="`width:${previewReview.score_foreshadowing * 10}%`"></div></div><strong x-text="previewReview.score_foreshadowing.toFixed(1)"></strong></div>
+                    <div class="score-item"><span>角色弧光</span><div class="score-bar"><div class="score-fill" :style="`width:${previewReview.score_character_arc * 10}%`"></div></div><strong x-text="previewReview.score_character_arc.toFixed(1)"></strong></div>
+                    <div class="score-item"><span>主旨契合</span><div class="score-bar"><div class="score-fill" :style="`width:${previewReview.score_thematic * 10}%`"></div></div><strong x-text="previewReview.score_thematic.toFixed(1)"></strong></div>
+                  </div>
+                  <div class="overall-score">
+                    <span>综合评分</span>
+                    <strong x-text="previewReview.overall_score.toFixed(1) + ' / 10'"></strong>
+                  </div>
+                  <div class="critique">
+                    <h4>评审意见</h4>
+                    <p x-text="previewReview.critique"></p>
+                  </div>
+                  <template x-if="previewReview.suggestions && previewReview.suggestions.length > 0">
+                    <div class="suggestions">
+                      <h4>修改建议</h4>
+                      <ul>
+                        <template x-for="(s, i) in previewReview.suggestions" :key="i">
+                          <li x-text="s"></li>
+                        </template>
+                      </ul>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <template x-if="!previewReview">
+                <p class="preview-empty">暂无评审记录。可前往「检查 → 智能评审」对本章进行评审。</p>
+              </template>
+            </div>
+
+            <!-- 伏笔情况 -->
+            <div x-show="previewSubTab === 'foreshadow'" class="preview-foreshadow-body">
+              <template x-if="previewChapter && foreshadowings && foreshadowings.length > 0">
+                <div class="foreshadow-preview-list">
+                  <template x-for="f in foreshadowings.filter(fs => fs.chapter_id === previewChapter.id || fs.plant_chapter === previewChapter.order + 1)" :key="f.id">
+                    <div class="foreshadow-preview-card" :class="`status-${f.status}`">
+                      <div class="fpc-header">
+                        <span class="fpc-title" x-text="f.title"></span>
+                        <span class="fpc-status" :class="`badge-${f.status}`" x-text="f.status === 'active' ? '进行中' : f.status === 'resolved' ? '已回收' : '已废弃'"></span>
+                      </div>
+                      <div class="fpc-content" x-text="f.content || '暂无内容'"></div>
+                      <div class="fpc-meta" x-show="f.plant_chapter || f.resolve_chapter">
+                        <span x-show="f.plant_chapter">埋设: 第 <strong x-text="f.plant_chapter"></strong> 章</span>
+                        <span x-show="f.resolve_chapter">回收: 第 <strong x-text="f.resolve_chapter"></strong> 章</span>
+                      </div>
+                    </div>
+                  </template>
+                  <template x-if="foreshadowings.filter(fs => fs.chapter_id === previewChapter.id || fs.plant_chapter === previewChapter.order + 1).length === 0">
+                    <p class="preview-empty">本章暂无相关伏笔。</p>
+                  </template>
+                </div>
+              </template>
+              <template x-if="!foreshadowings || foreshadowings.length === 0">
+                <p class="preview-empty">暂无伏笔数据。可前往「主题/伏笔」面板添加伏笔。</p>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </template>
     <!-- ═══ 必填缺失时弹出的"问卷补全" ═══ -->
     <template x-if="showMissingFieldsModal">
       <div class="modal-overlay modal-locked">
@@ -1873,7 +2334,10 @@
             </template>
             <template x-if="bootstrapWizard.status === 'completed'">
               <div class="footer-actions">
-                <button class="btn-primary" @click="commitBootstrap()">✓ 全部完成，写入数据库</button>
+                <button class="btn-primary" @click="commitBootstrap()" :disabled="bootstrapWizard.committing">
+                  <span x-show="!bootstrapWizard.committing">✓ 全部完成，写入数据库</span>
+                  <span x-show="bootstrapWizard.committing">⏳ 正在写入数据库，请勿关闭页面...</span>
+                </button>
               </div>
             </template>
             <template x-if="bootstrapWizard.status === 'committed'">
@@ -1896,7 +2360,7 @@
 
   </div>
 
-  <script src="/static/js/app.js?v=3"></script>
+  <script src="/static/js/app.js?v=6"></script>
 </body>
 </html>
 
@@ -2134,3 +2598,7 @@
         </div>
       </div>
     </template>
+    </div>
+
+</body>
+</html>

@@ -36,10 +36,12 @@ class Character(Base):
     arcs = relationship("CharacterArc", back_populates="character", cascade="all, delete-orphan")
     consistency_records = relationship("ConsistencyRecord", back_populates="character")
     relations_from = relationship(
-        "CharacterRelation", foreign_keys="CharacterRelation.from_character_id", back_populates="from_character"
+        "CharacterRelation", foreign_keys="CharacterRelation.from_character_id",
+        back_populates="from_character", passive_deletes=True
     )
     relations_to = relationship(
-        "CharacterRelation", foreign_keys="CharacterRelation.to_character_id", back_populates="to_character"
+        "CharacterRelation", foreign_keys="CharacterRelation.to_character_id",
+        back_populates="to_character", passive_deletes=True
     )
 
 

@@ -31,6 +31,9 @@ class Foreshadowing(Base):
     resolve_chapter_id = Column(Integer, ForeignKey("chapters.id", ondelete="SET NULL"), nullable=True)
     title = Column(String(200), nullable=False)
     content = Column(Text, default="")
+    cycle = Column(String(20), default="短伏笔")  # 短伏笔|中伏笔|长伏笔
+    importance = Column(String(10), default="medium")  # high|medium|low
+    connection_to_mainline = Column(Text, default="")  # 与主线的关联说明
     plant_order = Column(Integer, default=0)
     status = Column(String(20), default="active")
     created_at = Column(DateTime, default=datetime.utcnow)

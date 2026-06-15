@@ -25,12 +25,27 @@ class LLMFactory:
         provider 优先级：参数 > 数据库 SystemSetting > config.py
         db: SQLAlchemy Session，用于从数据库读取默认 provider
         """
-        if not provider and db is not None:
-            try:
-                from storage.models.system_setting import SystemSetting
-                provider = SystemSetting.get(db, SystemSetting.KEY_DEFAULT_LLM_PROVIDER)
-            except Exception:
-                pass
+        if not provider:
+            # db 未传入时，自动创建临时 session 读取数据库默认 provider
+            _db = db
+            if _db is None:
+                try:
+                    from storage.database import SessionLocal
+                    _db = SessionLocal()
+                except Exception:
+                    _db = None
+            if _db is not None:
+                try:
+                    from storage.models.system_setting import SystemSetting
+                    provider = SystemSetting.get(_db, SystemSetting.KEY_DEFAULT_LLM_PROVIDER)
+                except Exception:
+                    pass
+                # 仅在自建 session 时关闭，调用方传入的 session 由调用方管理
+                if db is None and _db is not None:
+                    try:
+                        _db.close()
+                    except Exception:
+                        pass
 
         provider_key = (provider or settings.default_llm_provider or "").strip().lower()
         provider_cls = cls._providers.get(provider_key)

@@ -73,6 +73,7 @@ function app() {
       startedAt: null,
       completedAt: null,
       rerunAllBusy: false,                  // "重新生成全部" 是否正在执行
+      committing: false,                    // 写入数据库时防止重复提交
     },
     // 创建项目表单（12 字段：4 必填 + 8 选填）
     newProjectForm: {
@@ -82,6 +83,8 @@ function app() {
       genre: '',          // 旧版字符串（兼容后端），提交时由 genres 数组覆盖
       genres: [],         // 新版多选（≥1 个）
       description: '',
+      // 扩展字段
+      total_chapters: 100,  // 预计总章节数，默认100
       // 8 选填
       theme: '',
       tone: '',
@@ -176,6 +179,22 @@ function app() {
     activeReviewSession: null,
     reviewResult: null,
 
+    // 预览面板
+    previewSubTab: 'content',   // content / outline / review
+    writingTab: 'content',       // content / outline / review (写作台内页签)
+    
+    // 导出功能
+    showExportModal: false,
+    exportChapterIds: [],        // 选中的章节ID
+    exportRechapter: false,      // 是否重新分章
+    exportWordsPerChapter: 3000, // 重新分章时每章字数
+    exportFormat: 'txt',         // 导出格式: txt / markdown
+    exportSaveIndividual: false, // 章节独立保存（每章一个文件，打包zip）
+    chapterDirty: false,             // 用户手动编辑过内容
+    chapterContentSnapshot: '',      // 进入章节时的内容快照（用于 diff）
+    previewChapter: null,
+    previewReview: null,
+
     // AI 生成
     showGenerateModal: false,
     generateMode: 'continue',
@@ -183,6 +202,14 @@ function app() {
     generateWordCount: '3000',
     generating: false,
     generatedText: null,
+
+    // 一键生成设置浮层
+    showPipelineSetupModal: false,
+    pipelineSetupChapter: 1,  // 默认生成下一章
+    pipelineSetupGuide: '',   // 内容引导
+
+    // 修订功能
+    showReviseConfirmModal: false,
 
     // ─── 9 步章节生成流水线（chapter_pipeline）───
     // 后端：/api/chapters/generate-pipeline (POST) → task_id
@@ -629,6 +656,7 @@ function app() {
         genre: '',
         genres: [],
         description: '',
+        total_chapters: 100,
         theme: '',
         tone: '',
         style: '',
@@ -917,6 +945,7 @@ function app() {
         startedAt: Date.now(),
         completedAt: null,
         rerunAllBusy: false,
+        committing: false,
       };
       // 立即拉一次
       await this._pollBootstrapStatus();
@@ -984,7 +1013,7 @@ function app() {
      * @returns {Promise<object>} 终态 task 对象
      */
     async _pollTask(task_id, opts = {}) {
-      const interval = opts.interval || 1500;
+      const interval = opts.interval || 2000;
       const timeout = opts.timeout || 600_000;
       const onProgress = opts.onProgress || (() => {});
       const t0 = Date.now();
@@ -1148,7 +1177,8 @@ function app() {
 
     async commitBootstrap() {
       const wiz = this.bootstrapWizard;
-      if (!wiz.runId) return;
+      if (!wiz.runId || wiz.committing) return;
+      wiz.committing = true;
       try {
         const res = await fetch(`/api/workflow/run/${wiz.runId}/commit`, {
           method: 'POST',
@@ -1163,7 +1193,7 @@ function app() {
           if (this.currentProject) {
             await this.openProject(this.currentProject);
           }
-          // 修复反馈 bug：之前提交成功后没有任何提示，用户会以为是卡住
+          // 提交成功后提示用户
           const summary = data.summary || {};
           const msg = '✅ AI 补全已成功写入数据库！\n\n' +
             `主题: ${summary.themes || 0} 条\n` +
@@ -1172,13 +1202,15 @@ function app() {
             `角色关系: ${summary.relations || 0} 条\n` +
             `角色弧光: ${summary.arcs || 0} 条\n` +
             `伏笔: ${summary.foreshadowings || 0} 条\n\n` +
-            '点\u786e定后可进入写作台开始创作！';
+            '点确定后可进入写作台开始创作！';
           alert(msg);
         } else {
           alert('提交失败: ' + (data.error || 'unknown'));
         }
       } catch (e) {
         alert('提交失败: ' + e.message);
+      } finally {
+        wiz.committing = false;
       }
     },
 
@@ -1838,15 +1870,70 @@ function app() {
       } catch (e) { alert('创建失败: ' + e.message); }
     },
 
-    selectChapter(chapter) {
-      this.currentChapter = chapter;
+    async selectChapter(chapter) {
+      if (!chapter || !this.currentProject) return;
       this.activePanel = 'writing';
+      this.chapterDirty = false;
+      // 从服务器重新拉取最新章节数据（pipeline 生成后 content 已更新）
+      try {
+        const res = await fetch(`/api/projects/${this.currentProject.id}/chapters/${chapter.id}`);
+        if (res.ok) {
+          this.currentChapter = await res.json();
+        } else {
+          this.currentChapter = chapter;
+        }
+      } catch (e) {
+        this.currentChapter = chapter;
+      }
+      // 记录内容快照（用于保存时对比）
+      this.chapterContentSnapshot = (this.currentChapter && this.currentChapter.content) || '';
+      this.chapterDirty = false;
+      // 如果该章节有进行中的任务，自动打开任务面板
+      this._autoOpenTaskPanelForChapter(this.currentChapter);
+      // 加载该章节的评审数据
+      this._loadChapterReview(this.currentChapter);
     },
 
-    async saveChapter() {
-      if (!this.currentChapter) return;
+    async _loadChapterReview(chapter) {
+      if (!chapter || !this.currentProject) return;
+      this.previewReview = null;
       try {
-        const res = await fetch(`/api/chapters/${this.currentChapter.id}`, {
+        const res = await fetch(`/api/reviews/project/${this.currentProject.id}`);
+        const all = await res.json();
+        const found = all.find(r => r.chapter_id === chapter.id);
+        if (found) this.previewReview = found;
+      } catch (e) { /* ignore */ }
+    },
+
+    _autoOpenTaskPanelForChapter(chapter) {
+      if (!chapter || !this.tasks) return;
+      const runningTask = this.tasks.find(t =>
+        t.status === 'running' &&
+        t.description &&
+        t.description.includes('[' + chapter.id + ']')
+      );
+      if (runningTask) {
+        this.showTaskPanel = true;
+      }
+    },
+
+    async saveChapter(silent) {
+      if (!this.currentChapter) return;
+      // 非静默模式：手动保存，弹确认
+      if (!silent) {
+        if (!this.chapterDirty) {
+          alert('内容未发生变更，无需保存。');
+          return;
+        }
+        const oldLen = this.chapterContentSnapshot.length;
+        const newLen = (this.currentChapter.content || '').length;
+        const diff = newLen - oldLen;
+        const diffText = diff > 0 ? `+${diff} 字` : diff < 0 ? `${diff} 字` : '字数未变（可能修改了内容）';
+        const msg = `确认保存？\n\n章节：${this.currentChapter.title}\n原字数：${oldLen} → 现字数：${newLen}（${diffText}）`;
+        if (!confirm(msg)) return;
+      }
+      try {
+        const res = await fetch(`/api/projects/${this.currentProject.id}/chapters/${this.currentChapter.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1854,15 +1941,26 @@ function app() {
             content: this.currentChapter.content,
           }),
         });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          alert('保存失败: ' + (err.detail || `HTTP ${res.status}`));
+          return;
+        }
         const ch = await res.json();
         this.currentChapter = ch;
+        // 更新快照 + 清除 dirty
+        this.chapterContentSnapshot = ch.content || '';
+        this.chapterDirty = false;
         // 更新章节列表中的记录
         const idx = this.chapters.findIndex(c => c.id === ch.id);
         if (idx >= 0) this.chapters[idx] = ch;
         // 更新项目总字数
         const total = this.chapters.reduce((s, c) => s + (c.word_count || 0), 0);
         this.currentProject.word_count = total;
-      } catch (e) { console.error('保存失败:', e); }
+      } catch (e) {
+        console.error('保存失败:', e);
+        alert('保存失败: ' + e.message);
+      }
     },
 
     onContentChange() {
@@ -1872,6 +1970,7 @@ function app() {
       if (this.currentChapter) {
         this.currentChapter.word_count = chinese + english;
       }
+      this.chapterDirty = true;
     },
 
     // ─── 字数辅助 ───
@@ -2071,7 +2170,7 @@ function app() {
     async loadReviewHistory() {
       if (!this.currentProject) return;
       try {
-        const res = await fetch(`/api/projects/${this.currentProject.id}/reviews`);
+        const res = await fetch(`/api/reviews/project/${this.currentProject.id}`);
         this.reviewHistory = await res.json();
       } catch (e) { console.error(e); }
     },
@@ -2127,6 +2226,22 @@ function app() {
       } catch (e) { alert('修订失败: ' + e.message); }
     },
 
+    // ─── 预览面板 ───
+    async openPreview(chapter) {
+      if (!chapter) return;
+      this.previewChapter = chapter;
+      this.previewSubTab = 'content';
+      this.previewReview = null;
+      this.activePanel = 'writing';
+      // 静默加载该章节最新的评审结果
+      try {
+        const res = await fetch(`/api/reviews/project/${this.currentProject.id}`);
+        const all = await res.json();
+        const found = all.find(r => r.chapter_id === chapter.id);
+        if (found) this.previewReview = found;
+      } catch (e) { /* ignore */ }
+    },
+
     // ─── 章节生成 9 步流水线 ───
 
     // 9 步元数据（与后端 llm.chapter_pipeline.PIPELINE_STAGES_META 对齐）
@@ -2154,7 +2269,7 @@ function app() {
      *  3. setInterval 轮询 /api/tasks/{id}，每次把 result.stages 推进 UI
      *  4. 终态（completed/failed/cancelled）停止轮询
      */
-    async runChapterPipeline() {
+    async runChapterPipeline(guide) {
       if (!this.canRunPipeline) {
         alert('请先选择项目和章节');
         return;
@@ -2172,6 +2287,7 @@ function app() {
             chapter_id: this.currentChapter.id,
             auto_revise: true,
             revision_threshold: 6.5,
+            guide: guide || '',
           }),
         });
         const data = await res.json();
@@ -2184,7 +2300,7 @@ function app() {
         this.pipelineStartTs = Date.now();
         this.showPipelineProgress = true;
         // 开始轮询
-        this.pipelinePollHandle = setInterval(() => this._pollPipelineTask(), 1200);
+        this.pipelinePollHandle = setInterval(() => this._pollPipelineTask(), 2000);
         this._pollPipelineTask();  // 立即拉一次
         // 同时刷新任务管理列表
         if (this.refreshAllTasks) this.refreshAllTasks();
@@ -2323,7 +2439,7 @@ function app() {
       // 若任务还在跑，启轮询
       if (['pending','running'].includes(t.status)) {
         if (this.pipelinePollHandle) clearInterval(this.pipelinePollHandle);
-        this.pipelinePollHandle = setInterval(() => this._pollPipelineTask(), 1200);
+        this.pipelinePollHandle = setInterval(() => this._pollPipelineTask(), 2000);
       }
     },
 
@@ -2361,6 +2477,189 @@ function app() {
         this.generatedText = null;
         this.showGenerateModal = false;
         this.generatePrompt = '';
+        // AI 生成内容自动保存，防止丢失
+        this.saveChapter(true);
+      }
+    },
+
+    pipelineSetupSetupModal() {
+      // 默认生成下一章
+      this.pipelineSetupChapter = this.currentChapter ? this.currentChapter.order + 2 : 1;
+      this.pipelineSetupGuide = '';
+      this.showPipelineSetupModal = true;
+    },
+
+    // ─── 一键生成设置浮层 ───
+    startPipelineFromSetup() {
+      const targetChapter = this.pipelineSetupChapter;
+      if (!targetChapter || targetChapter < 1) {
+        alert('请输入有效的章节序号');
+        return;
+      }
+      // 关闭设置浮层
+      this.showPipelineSetupModal = false;
+
+      // 如果目标章节不是当前章节，先切换
+      const target = this.chapters.find(ch => ch.order + 1 === targetChapter);
+      if (target) {
+        this.currentChapter = target;
+        // 延迟一帧再启动pipeline，确保currentChapter已更新
+        this.$nextTick(() => {
+          this.runChapterPipeline(this.pipelineSetupGuide);
+        });
+      } else {
+        // 章节不存在，创建新章节
+        this.createChapterWithGuide(targetChapter, this.pipelineSetupGuide);
+      }
+      // 重置设置
+      this.pipelineSetupGuide = '';
+    },
+
+    async createChapterWithGuide(chapterNum, guide) {
+      try {
+        const res = await fetch('/api/projects/' + this.currentProject.id + '/chapters', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: '第' + chapterNum + '章',
+            order: chapterNum - 1,
+          }),
+        });
+        if (!res.ok) throw new Error('创建章节失败');
+        const ch = await res.json();
+        this.chapters.push(ch);
+        this.currentChapter = ch;
+        await this.$nextTick();
+        this.runChapterPipeline(guide);
+      } catch (e) {
+        alert('创建章节失败: ' + e.message);
+      }
+    },
+
+    // ─── 修订功能 ───
+    confirmRevise() {
+      if (!this.currentChapter || !this.currentChapter.content) {
+        alert('当前章节没有正文内容，无法修订');
+        return;
+      }
+      this.showReviseConfirmModal = true;
+    },
+
+    async runRevise() {
+      this.showReviseConfirmModal = false;
+      try {
+        const res = await fetch('/api/chapters/revise', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            project_id: this.currentProject.id,
+            chapter_id: this.currentChapter.id,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          alert('修订失败：' + (data.detail || JSON.stringify(data)));
+          return;
+        }
+        if (data.task_id) {
+          // 打开任务管理面板并刷新
+          this.showTaskManager = true;
+          await this.refreshAllTasks();
+          // 启动轮询
+          if (this._taskPollHandle) clearInterval(this._taskPollHandle);
+          this._taskPollHandle = setInterval(() => {
+            if (this.showTaskManager) this.refreshAllTasks();
+          }, 3000);
+        }
+      } catch (e) {
+        alert('修订请求失败: ' + e.message);
+      }
+    },
+
+    // ─── 导出功能 ───
+    openExportModal() {
+      this.exportChapterIds = this.chapters.map(c => c.id);
+      this.exportRechapter = false;
+      this.exportWordsPerChapter = 3000;
+      this.exportFormat = 'txt';
+      this.exportSaveIndividual = false;
+      this.showExportModal = true;
+    },
+    
+    toggleExportChapter(chapterId) {
+      const idx = this.exportChapterIds.indexOf(chapterId);
+      if (idx === -1) {
+        this.exportChapterIds.push(chapterId);
+      } else {
+        this.exportChapterIds.splice(idx, 1);
+      }
+    },
+    
+    selectAllExportChapters() {
+      this.exportChapterIds = this.chapters.map(c => c.id);
+    },
+    
+    invertExportChapters() {
+      this.exportChapterIds = this.chapters
+        .filter(c => !this.exportChapterIds.includes(c.id))
+        .map(c => c.id);
+    },
+    
+    async doExport() {
+      if (this.exportChapterIds.length === 0) {
+        alert('请至少选择一个章节');
+        return;
+      }
+      
+      try {
+        const res = await fetch('/api/export/chapters', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            project_id: this.currentProject.id,
+            chapter_ids: this.exportChapterIds,
+            rechapter: this.exportRechapter,
+            words_per_chapter: this.exportWordsPerChapter,
+            format: this.exportFormat,
+            save_individual: this.exportSaveIndividual,
+          }),
+        });
+        
+        if (!res.ok) {
+          const err = await res.json();
+          alert('导出失败: ' + (err.detail || '未知错误'));
+          return;
+        }
+        
+        // 获取文件名
+        const disposition = res.headers.get('Content-Disposition');
+        let filename = 'export.txt';
+        if (disposition) {
+          // RFC 5987: filename*=UTF-8''encoded_name
+          const rfc5987 = disposition.match(/filename\*=UTF-8''(.+)/i);
+          if (rfc5987) {
+            filename = decodeURIComponent(rfc5987[1]);
+          } else {
+            const match = disposition.match(/filename="?([^"]+)"?/);
+            if (match) filename = match[1];
+          }
+        }
+        
+        // 下载文件
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        this.showExportModal = false;
+        alert('导出成功！');
+      } catch (e) {
+        alert('导出失败: ' + e.message);
       }
     },
 

@@ -29,10 +29,20 @@ def render_column_for_add(col) -> str:
     if default is not None and default.arg is not None:
         # 把 Python 字面量塞回去（只处理简单值）
         arg = default.arg
-        if isinstance(arg, str):
-            parts.append(f"DEFAULT '{arg.replace(chr(39), chr(39)*2)}'")
-        else:
-            parts.append(f"DEFAULT {arg}")
+        if callable(arg):
+            # default=dict / default=list 等 callable default → 调用获取实际值
+            try:
+                arg = arg()
+            except Exception:
+                arg = None
+        if arg is not None:
+            if isinstance(arg, (dict, list)):
+                import json
+                parts.append(f"DEFAULT '{json.dumps(arg, ensure_ascii=False)}'")
+            elif isinstance(arg, str):
+                parts.append(f"DEFAULT '{arg.replace(chr(39), chr(39)*2)}'")
+            else:
+                parts.append(f"DEFAULT {arg}")
     elif not col.nullable and col.name not in ("id",):
         # 非空无默认值 → SQLite 不允许；实际表都是允许 NULL 的情况较多
         pass

@@ -219,6 +219,7 @@ class PipelineRequest(BaseModel):
     provider: str | None = None
     auto_revise: bool = True
     revision_threshold: float = 6.5
+    guide: str = ""  # 内容引导，用于在LLM生成细纲时引导情节走向
 
 
 class PipelineResponse(BaseModel):
@@ -306,6 +307,8 @@ def _async_pipeline_task(task_id: str, req: PipelineRequest):
                 entry["label"] = info["label"]
             if "error" in info:
                 entry["error"] = info["error"]
+            if "score" in info:
+                entry["score"] = info["score"]
             stages[stage_id] = entry
             r["stages"] = stages
             r["current_stage"] = stage_id if status == "running" else r.get("current_stage")
@@ -322,6 +325,7 @@ def _async_pipeline_task(task_id: str, req: PipelineRequest):
             auto_revise=req.auto_revise,
             revision_threshold=req.revision_threshold,
             progress_cb=_on_progress,
+            guide=req.guide,
         )
 
         # 收尾：把完整 stages 列表 + 终态写进 task.result
@@ -340,3 +344,109 @@ def _async_pipeline_task(task_id: str, req: PipelineRequest):
     finally:
         db.close()
 
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# 章节修订 API（根据细纲和评审报告重新生成正文）
+# ═══════════════════════════════════════════════════════════════
+
+class ReviseRequest(BaseModel):
+    project_id: int
+    chapter_id: int
+    provider: str | None = None
+
+
+@pipeline_router.post("/revise", response_model=PipelineResponse)
+async def revise_chapter(req: ReviseRequest, db: Session = Depends(get_db)):
+    """
+    章节修订：根据已生成的细纲和评审报告，由LLM重新生成正文。
+    旧版正文标记为废稿，移入废纸篓。
+    """
+    from api.tasks import submit_llm_task
+
+    # 验证章节存在且有正文
+    chapter = db.query(Chapter).filter(Chapter.id == req.chapter_id).first()
+    if not chapter:
+        raise HTTPException(status_code=404, detail="章节不存在")
+    if not chapter.content:
+        raise HTTPException(status_code=400, detail="章节没有正文内容，无法修订")
+
+    task = submit_llm_task(
+        task_type="chapter_revise",
+        llm_call_fn=_async_revise_task,
+        project_id=req.project_id,
+        description=f"修订章节 [{req.chapter_id}]",
+        req=req,
+    )
+    return PipelineResponse(
+        status="submitted",
+        task_id=task.id,
+        project_id=req.project_id,
+        chapter_id=req.chapter_id,
+    )
+
+
+def _async_revise_task(task_id: str, req: ReviseRequest):
+    from storage.database import SessionLocal
+    from llm.chapter_pipeline import run_chapter_revise
+
+    db = SessionLocal()
+    try:
+        # 初始化 task.result.stages
+        from api.tasks import get_task
+        task = get_task(task_id)
+        if task is not None:
+            revise_stages = [
+                "1_get_outline", "2_save_old", "3_get_review",
+                "4_generate", "5_adjust", "6_review", "7_save", "8_post"
+            ]
+            task.result = {
+                "stages": {
+                    sid: {"id": sid, "label": sid, "status": "pending", "duration_ms": None}
+                    for sid in revise_stages
+                },
+                "current_stage": None,
+                "progress_pct": 0,
+            }
+            task.progress = 5
+
+        # 进度回调
+        def _on_progress(stage_id: str, status: str, info: dict):
+            t = get_task(task_id)
+            if t is None:
+                return
+            r = dict(t.result or {})
+            stages = dict(r.get("stages") or {})
+            entry = dict(stages.get(stage_id) or {"id": stage_id})
+            entry["status"] = status
+            if "duration_ms" in info:
+                entry["duration_ms"] = info["duration_ms"]
+            if "label" in info:
+                entry["label"] = info["label"]
+            if "error" in info:
+                entry["error"] = info["error"]
+            if "score" in info:
+                entry["score"] = info["score"]
+            stages[stage_id] = entry
+            r["stages"] = stages
+            r["current_stage"] = stage_id if status == "running" else r.get("current_stage")
+            r["progress_pct"] = info.get("progress_pct", r.get("progress_pct", 0))
+            t.result = r
+            t.progress = max(t.progress or 0, min(95, r["progress_pct"] + 5))
+            logger.info(
+                f"[ReviseTask {task_id}] stage {stage_id} -> {status} "
+                f"({entry.get('duration_ms') or 0:.0f}ms) progress={r['progress_pct']}%"
+            )
+
+        result = run_chapter_revise(
+            db=db,
+            project_id=req.project_id,
+            chapter_id=req.chapter_id,
+            provider=req.provider,
+            task_id=task_id,
+            progress_cb=_on_progress,
+        )
+        return result
+    finally:
+        db.close()

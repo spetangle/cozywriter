@@ -12,6 +12,7 @@ class Project(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     title = Column(String(255), nullable=False)
     description = Column(Text, default="")
+    genre = Column(String(200), default="")  # 题材（逗号分隔）
     word_count = Column(Integer, default=0)
     writing_style = Column(String(50), default="平实")
     ai味去除程度 = Column(Integer, default=7)
