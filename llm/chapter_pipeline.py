@@ -217,6 +217,16 @@ def build_chapter_prep_info(
         latest_prev = prev_chapters[0]
         prev_chapter_ending = (latest_prev.content or "")[-800:]
 
+    # 下一章开头（中间章节衔接用，避免重新生成时与后文脱节）
+    next_chapter = (
+        db.query(Chapter)
+        .filter(Chapter.project_id == project_id, Chapter.order == chapter.order + 1)
+        .first()
+    )
+    next_chapter_opening = ""
+    if next_chapter and (next_chapter.content or "").strip():
+        next_chapter_opening = (next_chapter.content or "")[:600]
+
     # 登场人物：本章细纲的 character_ids + 当前活跃角色
     character_ids = list(chapter_outline.character_ids or []) if chapter_outline else []
     if not character_ids:
@@ -298,6 +308,7 @@ def build_chapter_prep_info(
         } if chapter_outline else None,
         "prev_chapters_summary": prev_chapters_summary,
         "prev_chapter_ending": prev_chapter_ending,
+        "next_chapter_opening": next_chapter_opening,  # 下一章开头（中间章节衔接用）
         "characters": character_blocks,
         "active_foreshadowings": foreshadowings_text,
         "consistency_issues": issues_text,
@@ -400,10 +411,33 @@ def adjust_word_count(
     content: str, target: int, min_w: int, max_w: int,
     outline: dict, provider: str | None = None,
 ) -> str:
-    """根据目标字数调整正文（过多缩写 / 过少扩写）"""
+    """根据目标字数调整正文（过多缩写 / 过少扩写）
+
+    流程日志：
+    - 调整前：当前字数 / 目标字数 / 计划动作（缩写 or 扩写）/ 偏差
+    - 调整后：调整前字数 → 调整后字数（净增/减 + 是否落进 min~max 区间）
+    """
     actual = _count_chinese_chars(content)
     if min_w <= actual <= max_w:
+        logger.info(
+            f"[WordAdjust] 调整前={actual}字, 目标={target}字, 范围={min_w}~{max_w}字, "
+            f"动作=无需调整（在区间内）, 偏差={actual - target:+d}字"
+        )
         return content
+
+    # ── 决定动作方向 ──
+    if actual > max_w:
+        action = "缩写"
+        delta = actual - max_w
+    else:
+        action = "扩写"
+        delta = min_w - actual
+
+    logger.info(
+        f"[WordAdjust] 调整前={actual}字, 目标={target}字, 范围={min_w}~{max_w}字, "
+        f"动作={action}, 预计需调整={delta}字 (偏差={actual - target:+d}字)"
+    )
+
     ctx = {
         "target_word_count": target,
         "current_word_count": actual,
@@ -411,16 +445,30 @@ def adjust_word_count(
         "content": content[:6000],  # 截断避免超长
     }
     try:
+        t0 = time.time()
         if actual > max_w:
             raw = _call_llm("compressor", ctx, "", provider)
             data = _parse_json(raw)
-            return data.get("compressed_text", content)
+            new_content = data.get("compressed_text", content)
         else:
             raw = _call_llm("expander", ctx, "", provider)
             data = _parse_json(raw)
-            return data.get("expanded_text", content)
+            new_content = data.get("expanded_text", content)
+        duration_ms = (time.time() - t0) * 1000
+        new_actual = _count_chinese_chars(new_content)
+        in_range = min_w <= new_actual <= max_w
+        logger.info(
+            f"[WordAdjust] 调整完成: 调整前={actual}字 → 调整后={new_actual}字 "
+            f"(净{'减' if new_actual < actual else '增'}{abs(actual - new_actual)}字, "
+            f"用时={duration_ms:.0f}ms), "
+            f"{'✅ 已落进目标区间' if in_range else f'⚠️ 仍未落进区间 {min_w}~{max_w}'}"
+        )
+        return new_content
     except (json.JSONDecodeError, ValueError) as e:
-        logger.warning(f"[adjust_word_count] JSON parse failed: {e}, returning original content")
+        logger.warning(
+            f"[WordAdjust] 调整失败: JSON parse error={e}, "
+            f"调整前={actual}字, 保持原内容"
+        )
         return content
 
 
@@ -799,10 +847,18 @@ def _format_prep_for_llm(prep: dict) -> str:
         f"  伏笔动作: {co.get('foreshadow_notes', '')}",
         f"【前 3 章摘要】\n{prep['prev_chapters_summary']}",
         f"【上章结尾】\n{prep['prev_chapter_ending'][-500:]}",
+    ]
+    # 中间章节（前后都有正文）追加"下章开头"用于衔接
+    if prep.get("next_chapter_opening"):
+        parts.append(
+            f"【下章开头（用于衔接，必须自然过渡到这里）】\n{prep['next_chapter_opening']}\n"
+            f"⚠️ 本章结尾必须能自然衔接下章开头，避免剧情跳跃。"
+        )
+    parts.extend([
         f"【登场人物】\n" + "\n".join(prep["characters"]),
         f"【活跃伏笔】\n{prep['active_foreshadowings']}",
         f"【未解决的一致性问题】\n{prep['consistency_issues']}",
-    ]
+    ])
     return "\n\n".join(parts)
 
 

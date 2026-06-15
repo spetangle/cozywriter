@@ -2785,3 +2785,98 @@ color: #92400e;
   padding: 48px 20px;
   color: var(--text-muted);
 }
+.batch-progress-panel {
+  position:fixed;
+  bottom:60px;
+  right:20px;
+  width:420px;
+  max-height:70vh;
+  overflow-y:auto;
+  background:white;
+  border-radius:12px;
+  box-shadow:0 8px 30px rgba(0,0,0,0.15);
+  z-index:9999;
+  border:1px solid var(--border);
+}
+
+/* ═══ 起承转合四阶段结构（写作面板 - 细纲标签）═══ */
+.qczh-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 4px;
+}
+.qczh-card {
+  background: #f8fafc;
+  border-radius: 6px;
+  padding: 8px 10px;
+  border-left: 3px solid #cbd5e1;
+}
+.qczh-qi    { border-left-color: #06b6d4; }  /* 起 · 青 */
+.qczh-cheng { border-left-color: #3b82f6; }  /* 承 · 蓝 */
+.qczh-zhuan { border-left-color: #ef4444; }  /* 转 · 红 */
+.qczh-he    { border-left-color: #10b981; }  /* 合 · 绿 */
+.qczh-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.qczh-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.qczh-wc {
+  font-size: 11px;
+  color: #64748b;
+  background: #fff;
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+.qczh-summary {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #1e293b;
+  margin-bottom: 4px;
+}
+.qczh-extra {
+  font-size: 12px;
+  color: #475569;
+  line-height: 1.5;
+  margin-top: 3px;
+}
+.qczh-beats {
+  margin: 4px 0 0 0;
+  padding-left: 18px;
+  font-size: 11.5px;
+  color: #475569;
+  line-height: 1.5;
+}
+.qczh-beats li { list-style: disc; }
+
+/* 章内钩子列表 */
+.hook-pos { font-weight: 600; color: #6d28d9; margin-right: 6px; }
+.hook-type { font-size: 11px; background: #ede9fe; color: #6d28d9; padding: 1px 6px; border-radius: 8px; margin-right: 6px; }
+.hook-desc { color: #1e293b; }
+
+/* 反转安排列表 */
+.rev-type { font-weight: 600; margin-right: 6px; }
+.qczh-zhuan ~ .rev-type, .qczh-card .rev-type, .outline-section .rev-type { color: #ef4444; }
+.rev-desc { color: #1e293b; }
+.rev-impact { font-size: 11.5px; color: #64748b; margin-left: 4px; }
+
+/* 工具栏模型标签 */
+.toolbar-llm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 4px 10px;
+  background: #f1f5f9;
+  border-radius: 12px;
+  cursor: default;
+}
+.toolbar-llm-icon { font-size: 13px; }
+.toolbar-llm-name { font-weight: 500; color: #475569; }

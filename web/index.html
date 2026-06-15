@@ -331,6 +331,12 @@
                     <span class="chapter-score" x-show="previewReview">评分: <strong x-text="previewReview?.overall_score?.toFixed(1) || '-'"></strong> / 100</span>
                   </div>
                   <div class="writing-tabs">
+                    <!-- 当前 LLM 模型指示（点击可在后续跳到全局设置）-->
+                    <span class="toolbar-llm" x-show="currentLlmLabel"
+                          title="当前使用的 LLM（来自项目默认 provider）">
+                      <span class="toolbar-llm-icon">🤖</span>
+                      <span class="toolbar-llm-name" x-text="currentLlmLabel"></span>
+                    </span>
                     <button :class="{ active: writingTab === 'content' }" @click="writingTab = 'content'">正文</button>
                     <button :class="{ active: writingTab === 'outline' }" @click="writingTab = 'outline'">细纲</button>
                     <button :class="{ active: writingTab === 'review' }" @click="writingTab = 'review'">评审报告</button>
@@ -380,22 +386,82 @@
                           </ul>
                         </div>
                       </template>
-                      <template x-if="(chapterOutlinesMap[currentChapter.id].foreshadows || []).length > 0">
+                      <template x-if="chapterOutlinesMap[currentChapter.id].foreshadow_notes">
                         <div class="outline-section">
-                          <h4>伏笔</h4>
+                          <h4>伏笔操作</h4>
+                          <div class="outline-text" x-text="chapterOutlinesMap[currentChapter.id].foreshadow_notes"></div>
+                        </div>
+                      </template>
+
+                      <!-- ═══ 起承转合四阶段结构 ═══ -->
+                      <template x-if="chapterOutlinesMap[currentChapter.id].qi_cheng_zhuan_he && Object.keys(chapterOutlinesMap[currentChapter.id].qi_cheng_zhuan_he || {}).length > 0">
+                        <div class="outline-section">
+                          <h4>起承转合结构</h4>
+                          <div class="qczh-grid">
+                            <template x-for="phase in ['qi','cheng','zhuan','he']" :key="phase">
+                              <template x-if="chapterOutlinesMap[currentChapter.id].qi_cheng_zhuan_he[phase]">
+                                <div class="qczh-card" :class="`qczh-${phase}`">
+                                  <div class="qczh-head">
+                                    <span class="qczh-label" x-text="{qi:'起 · 开篇',cheng:'承 · 推进',zhuan:'转 · 高潮',he:'合 · 收束'}[phase]"></span>
+                                    <span class="qczh-wc" x-show="chapterOutlinesMap[currentChapter.id].qi_cheng_zhuan_he[phase].word_count"
+                                          x-text="`${chapterOutlinesMap[currentChapter.id].qi_cheng_zhuan_he[phase].word_count}字`"></span>
+                                  </div>
+                                  <div class="qczh-summary" x-text="chapterOutlinesMap[currentChapter.id].qi_cheng_zhuan_he[phase].summary || ''"></div>
+                                  <template x-if="chapterOutlinesMap[currentChapter.id].qi_cheng_zhuan_he[phase].hook">
+                                    <div class="qczh-extra">🪝 <span x-text="chapterOutlinesMap[currentChapter.id].qi_cheng_zhuan_he[phase].hook"></span></div>
+                                  </template>
+                                  <template x-if="chapterOutlinesMap[currentChapter.id].qi_cheng_zhuan_he[phase].turning_point">
+                                    <div class="qczh-extra">⚡ <span x-text="chapterOutlinesMap[currentChapter.id].qi_cheng_zhuan_he[phase].turning_point"></span></div>
+                                  </template>
+                                  <template x-if="chapterOutlinesMap[currentChapter.id].qi_cheng_zhuan_he[phase].climax">
+                                    <div class="qczh-extra">🔥 <span x-text="chapterOutlinesMap[currentChapter.id].qi_cheng_zhuan_he[phase].climax"></span></div>
+                                  </template>
+                                  <template x-if="chapterOutlinesMap[currentChapter.id].qi_cheng_zhuan_he[phase].hook_for_next">
+                                    <div class="qczh-extra">➡️ <span x-text="chapterOutlinesMap[currentChapter.id].qi_cheng_zhuan_he[phase].hook_for_next"></span></div>
+                                  </template>
+                                  <template x-if="(chapterOutlinesMap[currentChapter.id].qi_cheng_zhuan_he[phase].beats || []).length > 0">
+                                    <ul class="qczh-beats">
+                                      <template x-for="(b, i) in chapterOutlinesMap[currentChapter.id].qi_cheng_zhuan_he[phase].beats" :key="i">
+                                        <li x-text="b"></li>
+                                      </template>
+                                    </ul>
+                                  </template>
+                                </div>
+                              </template>
+                            </template>
+                          </div>
+                        </div>
+                      </template>
+
+                      <!-- ═══ 章内钩子（每 500 字一个）═══ -->
+                      <template x-if="(chapterOutlinesMap[currentChapter.id].pacing_hooks || []).length > 0">
+                        <div class="outline-section">
+                          <h4>章内钩子</h4>
                           <ul>
-                            <template x-for="(f, i) in chapterOutlinesMap[currentChapter.id].foreshadows" :key="i">
-                              <li x-text="f"></li>
+                            <template x-for="(h, i) in chapterOutlinesMap[currentChapter.id].pacing_hooks" :key="'ph-' + i">
+                              <li>
+                                <span class="hook-pos" x-text="h.position || ''"></span>
+                                <span class="hook-type" x-text="h.type || ''"></span>
+                                <span class="hook-desc" x-text="h.description || ''"></span>
+                              </li>
                             </template>
                           </ul>
                         </div>
                       </template>
-                      <template x-if="(chapterOutlinesMap[currentChapter.id].character_changes || []).length > 0">
+
+                      <!-- ═══ 反转安排 ═══ -->
+                      <template x-if="(chapterOutlinesMap[currentChapter.id].reversals || []).length > 0">
                         <div class="outline-section">
-                          <h4>角色变化</h4>
+                          <h4>反转安排</h4>
                           <ul>
-                            <template x-for="(c, i) in chapterOutlinesMap[currentChapter.id].character_changes" :key="i">
-                              <li x-text="c"></li>
+                            <template x-for="(r, i) in chapterOutlinesMap[currentChapter.id].reversals" :key="'rv-' + i">
+                              <li>
+                                <span class="rev-type" x-text="{small:'小反转',medium:'中反转',large:'大反转'}[r.type] || r.type || ''"></span>
+                                <span class="rev-desc" x-text="r.description || ''"></span>
+                                <template x-if="r.emotional_impact">
+                                  <span class="rev-impact" x-text="`(情绪: ${r.emotional_impact})`"></span>
+                                </template>
+                              </li>
                             </template>
                           </ul>
                         </div>
@@ -1495,9 +1561,7 @@
 
     <!-- ═══ 批量生成进度面板（浮动在右下角） ═══ -->
     <template x-if="batchGenerating && batchProgressInfo">
-      <div style="position:fixed;bottom:20px;right:20px;width:420px;max-height:70vh;overflow-y:auto;
-                  background:white;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,0.15);z-index:9999;
-                  border:1px solid var(--border);">
+      <div class="batch-progress-panel" style="">
         <header style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--border);background:#f8fafc;border-radius:12px 12px 0 0;">
           <div>
             <strong>📦 批量生成</strong>

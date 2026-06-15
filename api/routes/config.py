@@ -31,6 +31,8 @@ class ConfigStatusResponse(BaseModel):
     minimax_configured: bool
     mimo_configured: bool
     default_provider: str
+    # 当前激活的 provider 实际使用的模型名（用于前端工具栏展示）
+    current_model: str = ""
 
 
 def _load_env() -> dict[str, str]:
@@ -66,9 +68,22 @@ def _save_env(updates: dict[str, str]):
 
 @router.get("/status", response_model=ConfigStatusResponse)
 async def get_config_status(db: Session = Depends(get_db)):
-    """查询当前 provider 配置状态"""
+    """查询当前 provider 配置状态 + 当前默认模型名"""
     env_vars = _load_env()
     default_provider = SystemSetting.get(db, SystemSetting.KEY_DEFAULT_LLM_PROVIDER, "")
+
+    # 根据 default_provider 找到当前实际使用的模型名
+    # 优先级：xxx_MODEL 环境变量 > provider 内置默认模型名
+    default_models = {
+        "anthropic": lambda e: "claude-sonnet-4-5",
+        "openai": lambda e: e.get("OPENAI_MODEL", "gpt-4o"),
+        "ollama": lambda e: e.get("OLLAMA_MODEL", "llama3.1"),
+        "minimax": lambda e: e.get("MINIMAX_MODEL", "MiniMax-Text-01"),
+        "mimo": lambda e: e.get("MIMO_MODEL", "mimo-vl-7b"),
+    }
+    resolver = default_models.get(default_provider.lower())
+    current_model = resolver(env_vars) if resolver else ""
+
     return ConfigStatusResponse(
         anthropic_configured=bool(env_vars.get("ANTHROPIC_API_KEY", "")),
         openai_configured=bool(env_vars.get("OPENAI_API_KEY", "")),
@@ -76,6 +91,7 @@ async def get_config_status(db: Session = Depends(get_db)):
         minimax_configured=bool(env_vars.get("MINIMAX_API_KEY", "")),
         mimo_configured=bool(env_vars.get("MIMO_API_KEY", "")),
         default_provider=default_provider,
+        current_model=current_model,
     )
 
 

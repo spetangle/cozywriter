@@ -70,6 +70,9 @@ class ChapterOutlineCreate(BaseModel):
     character_ids: list[int] = []
     status: str = "planning"
     notes: str = ""
+    qi_cheng_zhuan_he: dict = {}
+    pacing_hooks: list = []
+    reversals: list = []
 
 
 class ChapterOutlineUpdate(BaseModel):
@@ -88,6 +91,9 @@ class ChapterOutlineUpdate(BaseModel):
     character_ids: list[int] | None = None
     status: str | None = None
     notes: str | None = None
+    qi_cheng_zhuan_he: dict | None = None
+    pacing_hooks: list | None = None
+    reversals: list | None = None
 
 
 class ChapterOutlineResponse(BaseModel):
@@ -108,6 +114,10 @@ class ChapterOutlineResponse(BaseModel):
     character_ids: list
     status: str
     notes: str
+    # 丰富结构（来自 chapter_outline_gen role 的 qi_cheng_zhuan_he 等输出）
+    qi_cheng_zhuan_he: dict = {}
+    pacing_hooks: list = []
+    reversals: list = []
     created_at: datetime
 
     class Config:
@@ -228,6 +238,9 @@ async def create_or_update_chapter_outline(
             character_ids=data.character_ids,
             status=data.status,
             notes=data.notes,
+            qi_cheng_zhuan_he=data.qi_cheng_zhuan_he,
+            pacing_hooks=data.pacing_hooks,
+            reversals=data.reversals,
         )
         db.add(outline)
 

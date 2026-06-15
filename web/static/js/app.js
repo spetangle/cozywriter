@@ -186,6 +186,9 @@ function app() {
     activeReviewSession: null,
     reviewResult: null,
 
+    // 当前使用的 LLM provider + 模型名（顶部工具栏展示用）
+    currentLlmLabel: '',
+
     // 预览面板
     previewSubTab: 'content',   // content / outline / review
     writingTab: 'content',       // content / outline / review (写作台内页签)
@@ -256,6 +259,10 @@ function app() {
           // 加载全局数据（不阻塞 wizard 恢复）
           this.loadGenres();
           this.loadInspirationCount();
+          // 加载当前 LLM provider / 模型名（顶部工具栏展示）
+          this._loadCurrentLlm();
+          // 恢复批量生成任务（页面刷新后）
+          this._rehydrateBatchTask();
           // 检查是否有进行中的 workflow run，有则自动恢复 wizard
           await this._rehydrateBootstrapIfNeeded();
         } else {
@@ -263,6 +270,58 @@ function app() {
         }
       } catch (e) {
         console.error('初始化检查失败:', e);
+      }
+    },
+
+    async _loadCurrentLlm() {
+      try {
+        const res = await fetch('/api/config/status');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.default_provider) {
+          const providerMap = {
+            anthropic: 'Claude', openai: 'OpenAI', ollama: 'Ollama',
+            minimax: 'MiniMax', mimo: 'MiMo',
+          };
+          const name = providerMap[data.default_provider.toLowerCase()] || data.default_provider;
+          this.currentLlmLabel = data.current_model
+            ? `${name} · ${data.current_model}`
+            : name;
+        }
+      } catch (e) { /* ignore */ }
+    },
+
+    // 页面刷新后恢复批量生成任务（从 localStorage）
+    async _rehydrateBatchTask() {
+      try {
+        const raw = localStorage.getItem('cozywriter.batchTask');
+        if (!raw) return;
+        const saved = JSON.parse(raw);
+        if (!saved || !saved.id) {
+          localStorage.removeItem('cozywriter.batchTask');
+          return;
+        }
+        // 查询后端 task 状态
+        const res = await fetch('/api/tasks/' + saved.id);
+        if (!res.ok) {
+          // 后端已无此 task（重启后丢失），清掉 localStorage
+          localStorage.removeItem('cozywriter.batchTask');
+          return;
+        }
+        const data = await res.json();
+        if (['completed', 'failed', 'cancelled'].includes(data.status)) {
+          // 已结束：清掉 localStorage，不恢复浮层（用户看到时已晚）
+          localStorage.removeItem('cozywriter.batchTask');
+          return;
+        }
+        // 仍在进行：恢复轮询 + 浮层
+        console.log('[BatchTask] 恢复批量任务:', saved.id);
+        this.batchTask = data;
+        this.batchGenerating = true;
+        this.startBatchPolling();
+      } catch (e) {
+        console.warn('[BatchTask] rehydrate failed:', e);
+        try { localStorage.removeItem('cozywriter.batchTask'); } catch (_) {}
       }
     },
 
@@ -2594,14 +2653,20 @@ function app() {
     },
 
     pipelineSetupSetupModal() {
-      // 默认生成下一章：找到最小未生成的章节序号
-      const orders = this.chapters.map(ch => ch.order + 1).sort((a, b) => a - b);
-      let nextChapter = 1;
-      for (const n of orders) {
-        if (n === nextChapter) nextChapter++;
-        else break;
+      // 同步当前章节：
+      // 1. 优先用 currentChapter（用户在侧边栏选中的章节）
+      // 2. 否则默认下一章：找到最小未生成的章节序号
+      if (this.currentChapter) {
+        this.pipelineSetupChapter = this.currentChapter.order + 1;
+      } else {
+        const orders = this.chapters.map(ch => ch.order + 1).sort((a, b) => a - b);
+        let nextChapter = 1;
+        for (const n of orders) {
+          if (n === nextChapter) nextChapter++;
+          else break;
+        }
+        this.pipelineSetupChapter = nextChapter;
       }
-      this.pipelineSetupChapter = nextChapter;
       this.pipelineSetupGuide = '';
       this.showPipelineSetupModal = true;
     },
@@ -2683,11 +2748,18 @@ function app() {
 
     // ─── 批量生成 ───
     openBatchGenerateModal() {
-      // 默认从当前最后一章之后开始
-      const maxOrder = this.chapters.length > 0
-        ? Math.max(...this.chapters.map(ch => ch.order + 1))
-        : 0;
-      this.batchGenerateStart = maxOrder;
+      // 同步当前章节：
+      // 1. 优先用 currentChapter.order 作为起点（"从当前章节之后开始"）
+      // 2. 否则默认从最后一章之后开始
+      let start;
+      if (this.currentChapter) {
+        start = this.currentChapter.order;  // batchGenerateStart 语义是"从第几章之后开始"
+      } else {
+        start = this.chapters.length > 0
+          ? Math.max(...this.chapters.map(ch => ch.order + 1))
+          : 0;
+      }
+      this.batchGenerateStart = start;
       this.batchGenerateCount = 5;
       this.batchGenerateGuide = '';
       this.showBatchGenerateModal = true;
@@ -2728,6 +2800,16 @@ function app() {
 
         // 启动轮询
         this.batchTask = { id: data.task_id, status: 'pending', result: { batch: true, chapters_status: {} } };
+        // 持久化 batch task_id 到 localStorage（页面刷新后可恢复）
+        try {
+          localStorage.setItem('cozywriter.batchTask', JSON.stringify({
+            id: data.task_id,
+            project_id: this.currentProject.id,
+            start_chapter: this.batchGenerateStart,
+            count: this.batchGenerateCount,
+            started_at: Date.now(),
+          }));
+        } catch (e) { /* localStorage may be disabled */ }
         this.startBatchPolling();
 
       } catch (e) {
@@ -2748,6 +2830,8 @@ function app() {
             clearInterval(this.batchPollHandle);
             this.batchPollHandle = null;
             this.batchGenerating = false;
+            // 任务终结：清掉 localStorage
+            try { localStorage.removeItem('cozywriter.batchTask'); } catch (e) {}
 
             if (this.currentProject) {
               await this.loadChapters(this.currentProject.id);
@@ -2778,6 +2862,7 @@ function app() {
       }
       this.batchGenerating = false;
       this.batchTask = null;
+      try { localStorage.removeItem('cozywriter.batchTask'); } catch (e) {}
     },
 
     get batchProgressInfo() {

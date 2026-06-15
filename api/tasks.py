@@ -235,10 +235,19 @@ def run_task_async(task_id: str, fn: Callable, *args, **kwargs):
     """
     在线程池中运行任务，不阻塞 FastAPI 事件循环
     通过 BackgroundTasks 调用
+
+    任务超时按 task_type 决定：
+    - batch_generate: 3600 秒（1 小时），批量生成多章时需要
+    - 其他: 600 秒（10 分钟）
     """
     task = get_task(task_id)
     if not task:
         return
+
+    # 根据任务类型选择超时时间
+    # batch_pipeline: 批量生成多章，可能跑 30+ 分钟，给 1 小时
+    # 其他 LLM 任务: 10 分钟
+    timeout_seconds = 3600.0 if task.task_type in ("batch_pipeline", "batch_generate") else 600.0
 
     def _run():
         # 启动前检查是否已被标记取消（极小概率：submit 后立即终止）
@@ -249,7 +258,10 @@ def run_task_async(task_id: str, fn: Callable, *args, **kwargs):
         task.status = "running"
         task.started_at = time.time()
         task.progress = 10
-        logger.info(f"[Task {task_id}] START ({fn.__name__}) project={task.project_id} run={task.run_id}")
+        logger.info(
+            f"[Task {task_id}] START ({fn.__name__}) type={task.task_type} "
+            f"timeout={int(timeout_seconds)}s project={task.project_id} run={task.run_id}"
+        )
 
         # 超时机制：用 threading.Timer 跨平台兼容（Windows 没有 Unix 的 alarm 信号）
         timeout_holder = {"hit": False}
@@ -259,7 +271,7 @@ def run_task_async(task_id: str, fn: Callable, *args, **kwargs):
             def _on_timeout():
                 timeout_holder["hit"] = True
                 # 不能从 timer 线程里 raise（不会传到主线程），仅标记
-            timer = threading.Timer(600.0, _on_timeout)
+            timer = threading.Timer(timeout_seconds, _on_timeout)
             timer.daemon = True
             timer.start()
 
@@ -273,9 +285,12 @@ def run_task_async(task_id: str, fn: Callable, *args, **kwargs):
             # 检查超时
             if timeout_holder["hit"]:
                 task.status = "failed"
-                task.error = "任务超时（600秒）"
+                task.error = f"任务超时（{int(timeout_seconds)}秒）"
                 task.completed_at = time.time()
-                logger.warning(f"[Task {task_id}] timeout (180s)")
+                logger.warning(
+                    f"[Task {task_id}] TIMEOUT after {int(timeout_seconds)}s "
+                    f"type={task.task_type}"
+                )
                 return
 
             task.progress = 100

@@ -230,6 +230,12 @@ async def revise_review(review_id: int, project_id: int, db: Session = Depends(g
 
 @router.get("/project/{project_id}", response_model=list[dict])
 async def list_reviews(project_id: int, chapter_id: int | None = None, db: Session = Depends(get_db)):
+    """列出项目下所有评审会话（按时间倒序）。
+
+    返回完整字段（包括 8 维度评分、critique、suggestions），
+    前端的 `_loadChapterReview` 会直接拿第一条当作 `previewReview` 渲染，
+    所以必须返回完整数据。如果只返回 summary，UI 上的"评审意见/分项评分"会全空。
+    """
     query = db.query(ReviewSession).filter(ReviewSession.project_id == project_id)
     if chapter_id:
         query = query.filter(ReviewSession.chapter_id == chapter_id)
@@ -237,8 +243,19 @@ async def list_reviews(project_id: int, chapter_id: int | None = None, db: Sessi
     return [
         {
             "id": s.id,
+            "project_id": s.project_id,
             "chapter_id": s.chapter_id,
+            "score_consistency": s.score_consistency,
+            "score_pacing": s.score_pacing,
+            "score_style": s.score_style,
+            "score_ai_removal": s.score_ai_removal,
+            "score_word_count": s.score_word_count,
+            "score_foreshadowing": s.score_foreshadowing,
+            "score_character_arc": s.score_character_arc,
+            "score_thematic": s.score_thematic,
             "overall_score": s.overall_score,
+            "critique": s.critique,
+            "suggestions": s.suggestions or [],
             "revised": s.revised,
             "created_at": s.created_at.isoformat() if s.created_at else None,
         }
