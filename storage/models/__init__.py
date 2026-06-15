@@ -14,3 +14,4 @@ from storage.models.custom_genre import CustomGenre
 from storage.models.creative_questionnaire import CreativeQuestionnaire
 from storage.models.workflow import WorkflowRun
 from storage.models.system_setting import SystemSetting
+from storage.models.provider import Provider

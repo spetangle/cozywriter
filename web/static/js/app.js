@@ -14,6 +14,13 @@ function app() {
     showProjectSettings: false,
     settings: { defaultProvider: 'anthropic' },
 
+    // 服务商管理
+    providers: [],
+    editingProvider: null,    // 正在编辑的服务商（null = 查看模式）
+    providerForm: { id: '', name: '', api_key: '', base_url: '', model: '' },
+    showAddProvider: false,
+    providerSaving: false,
+
     // 任务管理
     showTaskManager: false,
     allTasks: [],
@@ -208,6 +215,16 @@ function app() {
     pipelineSetupChapter: 1,  // 默认生成下一章
     pipelineSetupGuide: '',   // 内容引导
 
+    // ─── 批量生成 ───
+    showBatchGenerateModal: false,
+    batchGenerateStart: 1,     // 从第几章之后开始
+    batchGenerateCount: 5,     // 生成章节数量
+    batchGenerateGuide: '',    // 内容引导（选填）
+    batchGenerating: false,
+    batchTask: null,           // { id, status, result }
+    batchPollHandle: null,     // setInterval handle
+
+    // 修订功能
     // 修订功能
     showReviseConfirmModal: false,
 
@@ -289,28 +306,121 @@ function app() {
 
     // ─── 全局设置 ───
     async openGlobalSettings() {
-      await this.loadSettings();
+      await this.loadProviders();
       this.showSettings = true;
     },
 
-    async loadSettings() {
+    async loadProviders() {
       try {
-        const res = await fetch('/api/config/status');
-        const data = await res.json();
-        this.settings.defaultProvider = data.default_provider || 'minimax';
-      } catch (e) { console.error('加载设置失败:', e); }
+        const res = await fetch('/api/providers');
+        this.providers = await res.json();
+        const def = this.providers.find(p => p.is_default);
+        if (def) this.settings.defaultProvider = def.id;
+      } catch (e) { console.error('加载服务商失败:', e); }
     },
 
-    async saveDefaultProvider() {
+    async setDefaultProvider(providerId) {
       try {
-        await fetch('/api/config/set-default-provider', {
+        await fetch('/api/providers/set-default', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ provider: this.settings.defaultProvider }),
+          body: JSON.stringify({ provider_id: providerId }),
         });
-        this.showSettings = false;
-        alert('默认 LLM Provider 已更新为 ' + this.settings.defaultProvider);
+        await this.loadProviders();
+      } catch (e) { alert('切换失败: ' + e.message); }
+    },
+
+    startEditProvider(provider) {
+      this.editingProvider = provider.id;
+      this.providerForm = {
+        id: provider.id,
+        name: provider.name,
+        api_key: '',
+        base_url: provider.base_url || '',
+        model: provider.model || '',
+      };
+    },
+
+    cancelEditProvider() {
+      this.editingProvider = null;
+      this.providerForm = { id: '', name: '', api_key: '', base_url: '', model: '' };
+    },
+
+    async saveProviderEdit() {
+      if (this.providerSaving) return;
+      this.providerSaving = true;
+      try {
+        const pid = this.editingProvider;
+        const body = {};
+        if (this.providerForm.name) body.name = this.providerForm.name;
+        if (this.providerForm.api_key) body.api_key = this.providerForm.api_key;
+        if (this.providerForm.base_url !== undefined) body.base_url = this.providerForm.base_url;
+        if (this.providerForm.model !== undefined) body.model = this.providerForm.model;
+
+        const res = await fetch(`/api/providers/${pid}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.detail || '保存失败');
+        }
+        this.editingProvider = null;
+        await this.loadProviders();
       } catch (e) { alert('保存失败: ' + e.message); }
+      finally { this.providerSaving = false; }
+    },
+
+    startAddProvider() {
+      this.showAddProvider = true;
+      this.providerForm = { id: '', name: '', api_key: '', base_url: '', model: '' };
+    },
+
+    cancelAddProvider() {
+      this.showAddProvider = false;
+      this.providerForm = { id: '', name: '', api_key: '', base_url: '', model: '' };
+    },
+
+    async createProvider() {
+      if (this.providerSaving) return;
+      if (!this.providerForm.id || !this.providerForm.name) {
+        alert('ID 和名称为必填');
+        return;
+      }
+      this.providerSaving = true;
+      try {
+        const res = await fetch('/api/providers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: this.providerForm.id,
+            name: this.providerForm.name,
+            api_key: this.providerForm.api_key || undefined,
+            base_url: this.providerForm.base_url || undefined,
+            model: this.providerForm.model || undefined,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.detail || '创建失败');
+        }
+        this.showAddProvider = false;
+        await this.loadProviders();
+      } catch (e) { alert('创建失败: ' + e.message); }
+      finally { this.providerSaving = false; }
+    },
+
+    async deleteProvider(providerId) {
+      if (!confirm(`确认删除服务商 "${providerId}"？`)) return;
+      try {
+        const res = await fetch(`/api/providers/${providerId}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.detail || '删除失败');
+        }
+        await this.loadProviders();
+      } catch (e) { alert('删除失败: ' + e.message); }
     },
 
     async downloadModel() {
@@ -2483,8 +2593,14 @@ function app() {
     },
 
     pipelineSetupSetupModal() {
-      // 默认生成下一章
-      this.pipelineSetupChapter = this.currentChapter ? this.currentChapter.order + 2 : 1;
+      // 默认生成下一章：找到最小未生成的章节序号
+      const orders = this.chapters.map(ch => ch.order + 1).sort((a, b) => a - b);
+      let nextChapter = 1;
+      for (const n of orders) {
+        if (n === nextChapter) nextChapter++;
+        else break;
+      }
+      this.pipelineSetupChapter = nextChapter;
       this.pipelineSetupGuide = '';
       this.showPipelineSetupModal = true;
     },
@@ -2534,6 +2650,134 @@ function app() {
       } catch (e) {
         alert('创建章节失败: ' + e.message);
       }
+    },
+
+    // ─── 批量生成 ───
+    openBatchGenerateModal() {
+      // 默认从当前最后一章之后开始
+      const maxOrder = this.chapters.length > 0
+        ? Math.max(...this.chapters.map(ch => ch.order + 1))
+        : 0;
+      this.batchGenerateStart = maxOrder;
+      this.batchGenerateCount = 5;
+      this.batchGenerateGuide = '';
+      this.showBatchGenerateModal = true;
+    },
+
+    async startBatchGenerate() {
+      if (this.batchGenerating) return;
+      if (!this.currentProject) { alert('请先选择项目'); return; }
+      if (this.batchGenerateCount < 1) { alert('生成数量至少为 1'); return; }
+
+      // 二次确认
+      const startFrom = this.batchGenerateStart + 1;
+      const endAt = this.batchGenerateStart + this.batchGenerateCount;
+      if (!confirm(`确认批量生成第 ${startFrom} 章到第 ${endAt} 章（共 ${this.batchGenerateCount} 章）？\n\n每章将执行完整的 9 步生成流水线，可能需要较长时间。`)) {
+        return;
+      }
+
+      this.batchGenerating = true;
+      this.showBatchGenerateModal = false;
+
+      try {
+        const res = await fetch('/api/chapters/batch-generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            project_id: this.currentProject.id,
+            start_chapter: this.batchGenerateStart,
+            count: this.batchGenerateCount,
+            guide: this.batchGenerateGuide || '',
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.task_id) {
+          alert('批量生成提交失败：' + (data.detail || JSON.stringify(data)));
+          this.batchGenerating = false;
+          return;
+        }
+
+        // 启动轮询
+        this.batchTask = { id: data.task_id, status: 'pending', result: { batch: true, chapters_status: {} } };
+        this.startBatchPolling();
+
+      } catch (e) {
+        alert('批量生成提交失败：' + e.message);
+        this.batchGenerating = false;
+      }
+    },
+
+    startBatchPolling() {
+      if (this.batchPollHandle) clearInterval(this.batchPollHandle);
+      this.batchPollHandle = setInterval(async () => {
+        try {
+          const res = await fetch('/api/tasks/' + this.batchTask.id);
+          const data = await res.json();
+          this.batchTask = data;
+
+          if (['completed', 'failed', 'cancelled'].includes(data.status)) {
+            clearInterval(this.batchPollHandle);
+            this.batchPollHandle = null;
+            this.batchGenerating = false;
+
+            if (this.currentProject) {
+              await this.loadChapters(this.currentProject.id);
+            }
+
+            if (data.status === 'completed') {
+              const r = data.result || {};
+              const failed = r.failed_chapters || [];
+              if (failed.length > 0) {
+                alert(`批量生成完成，但第 ${failed.join(', ')} 章生成失败。`);
+              } else {
+                alert(`批量生成完成！共生成 ${r.completed_chapters || '?'} 章。`);
+              }
+            } else if (data.status === 'failed') {
+              alert('批量生成失败：' + (data.error || '未知错误'));
+            }
+          }
+        } catch (e) {
+          console.error('Batch poll error:', e);
+        }
+      }, 2000);
+    },
+
+    cancelBatchGenerate() {
+      if (this.batchPollHandle) {
+        clearInterval(this.batchPollHandle);
+        this.batchPollHandle = null;
+      }
+      this.batchGenerating = false;
+      this.batchTask = null;
+    },
+
+    get batchProgressInfo() {
+      const r = (this.batchTask && this.batchTask.result) || {};
+      if (!r.batch) return null;
+      return {
+        total: r.total_chapters || 0,
+        completed: r.completed_chapters || 0,
+        currentIndex: r.current_chapter_index || 0,
+        currentOrder: r.current_chapter_order || 0,
+        chaptersStatus: r.chapters_status || {},
+        pipelineStages: r.current_pipeline_stages || {},
+        pipelineProgress: r.current_pipeline_progress_pct || 0,
+      };
+    },
+
+    get batchPipelineStagesView() {
+      const info = this.batchProgressInfo;
+      if (!info) return [];
+      const meta = this.PIPELINE_STAGES_META;
+      return meta.map(m => {
+        const s = info.pipelineStages[m.id] || {};
+        return {
+          id: m.id,
+          label: s.label || m.label,
+          status: s.status || 'pending',
+          duration_ms: s.duration_ms,
+        };
+      });
     },
 
     // ─── 修订功能 ───

@@ -126,9 +126,10 @@ STAGE_DEFS = {
 STAGE_PROMPTS = {
     "stage_1_base": {
         "task": (
-            "根据用户提供的 4 项必填信息，推导项目基础参数。\n"
+            "根据用户提供的必填信息，推导项目基础参数。\n"
             "要求：\n"
-            "1. 根据【题材】+【创意信息】估算合适的总章节数（玄幻 30~50，都市 25~35，科幻 25~40，"
+            "1. 如果用户已在【硬约束】中指定了 total_chapters（预计总章节数），**必须原样采用**，不得修改；"
+            "否则根据【题材】+【创意信息】估算合适的总章节数（玄幻 30~50，都市 25~35，科幻 25~40，"
             "武侠/仙侠 30~50，历史 25~40，悬疑 20~30，现实主义 15~25，奇幻 30~50）\n"
             "2. 根据【章节字数】估算总字数 = total_chapters * chapter_word_count * 1000\n"
             "3. 推荐去 AI 味强度（1-10，默认 7；冷峻/平实风格偏高 8-9，优美/诗意偏低 5-6）\n"
@@ -287,9 +288,10 @@ STAGE_PROMPTS = {
     "stage_4a_outline": {
         "task": (
             "根据所有已确定的角色与世界设定，设计完整的项目大纲。\n"
+            "【重要】总章节数已在硬约束或上一阶段产物中确定（total_chapters），大纲必须严格覆盖该章数范围，不得自行增减。\n"
             "要求：\n"
             "1. plot_lines：3-5 条剧情线，每条包含 title, description, from_chapter, to_chapter, priority\n"
-            "2. structure.acts：4 幕结构（开局/发展/高潮/结局），每幕给 from_chapter / to_chapter\n"
+            "2. structure.acts：4 幕结构（开局/发展/高潮/结局），每幕给 from_chapter / to_chapter，所有幕合计必须覆盖 1 ~ total_chapters\n"
             "3. pacing_notes：整体节奏规划（2-3 句）\n"
             "4. outline_text：完整大纲文本（200-500 字概述）\n"
             "\n"
@@ -462,6 +464,11 @@ def run_bootstrap_sync(run_id: int, user_input: dict, db=None) -> dict:
             "genre": user_input.get("genre", ""),
             "description": user_input.get("description", ""),
         }
+
+        # 如果用户指定了预计总章节数（> 0），也作为硬约束传入 LLM
+        user_total_chapters = user_input.get("total_chapters", 0)
+        if user_total_chapters and int(user_total_chapters) > 0:
+            locked["total_chapters"] = int(user_total_chapters)
 
         # 用户已填的选填
         user_filled = {
@@ -1069,6 +1076,7 @@ def _rebuild_user_input_from_project(project_id: int, db) -> dict:
             "description": proj.description or "",
             "chapter_word_count": proj.target_word_count or 0,
             "genre": "",  # Project 模型无此字段，重跑时 LLM 上下文会缺 genre（可接受）
+            "total_chapters": proj.total_chapters or 0,
             # 8 选填：Project 也没存这些，无法还原，留空（user_filled 全是 falsy 不会影响）
             "theme": "",
             "tone": "",

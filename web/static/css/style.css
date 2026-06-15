@@ -158,17 +158,24 @@ button {
   color: var(--text-muted);
 }
 
-.project-list { margin-top: 24px; max-width: 500px; }
+.project-list { margin-top: 24px; max-width: 860px; min-width: 320px;}
 .project-list h3 { margin-bottom: 12px; font-size: 14px; color: var(--text-muted); }
 .project-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 16px;
-  margin-bottom: 8px;
+  margin: 10px;
   cursor: pointer;
+  max-width: 410px;
+  min-width: 300px;
+  float: left;
+  display: flexbox;
 }
 .project-card:hover { border-color: var(--primary); }
+.project-card:first-of-type {
+  border-color: rgba(255, 166, 0, 0.65);
+}
 .project-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .project-card-header h4 { margin: 0; flex: 1; }
 .project-genre-tag { font-size: 11px; background: var(--primary-bg, #e8f0fe); color: var(--primary); padding: 2px 8px; border-radius: 4px; white-space: nowrap; }
@@ -534,7 +541,7 @@ button {
   padding: 12px;
 }
 .char-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-.char-role-badge { font-size: 11px; background: #e0e7ff; color: var(--primary); padding: 2px 6px; border-radius: 4px; }
+.char-role-badge { font-size: 11px; background: #e0e7ff; color: var(--primary); padding: 2px 6px; border-radius: 4px; margin-right: 20px; }
 
 /* ─── Relation Matrix ─── */
 .relation-matrix { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
@@ -2213,8 +2220,8 @@ color: #92400e;
 .ai-character-card::after {
   content: "AI";
   position: absolute;
-  top: 8px;
-  right: 8px;
+  top: 13px;
+  right: 4px;
   font-size: 10px;
   font-weight: 600;
   color: #6d28d9;

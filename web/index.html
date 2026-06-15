@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CozyWriter - 小说编写助手</title>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-  <link rel="stylesheet" href="/static/css/style.css?v=7">
+  <link rel="stylesheet" href="/static/css/style.css?v=8">
 
 <style>
 /* === 流水线进度面板 === */
@@ -275,7 +275,7 @@
                         </div>
                         <p class="project-card-desc" x-text="p.description || '暂无描述'"></p>
                         <div class="project-meta">
-                          <span x-show="p.genre">📚 <span x-text="p.genre"></span></span>
+                          <span x-show="p.genre" style="display: none;">📚 <span x-text="p.genre" style="display: none;"></span></span>
                           <span>📖 <span x-text="`${p.chapter_count || 0} / ${p.total_chapters || '?'} 章`"></span></span>
                           <span>📝 <span x-text="`每章 ${(p.target_word_count || 0)} 字`"></span></span>
                           <span>📅 <span x-text="(p.created_at || '').slice(0,10)"></span></span>
@@ -463,6 +463,9 @@
                     <button class="btn-primary" @click="pipelineSetupSetupModal()"
                             title="一键启动 9 步流水线（细纲→正文→评审→修订→保存→后处理）"
                             :disabled="!canRunPipeline">🤖 一键生成</button>
+                    <button class="btn-secondary" @click="openBatchGenerateModal()"
+                            title="批量生成多章（自动创建章节并逐章执行完整 9 步流水线）"
+                            :disabled="batchGenerating">📦 批量生成</button>
                     <button class="btn-secondary" @click="confirmRevise()"
                             :disabled="!currentChapter || !currentChapter.content"
                             title="根据细纲和评审报告重新生成正文，旧正文标记为废稿">📝 修订</button>
@@ -1285,7 +1288,7 @@
           </main>
         </div>
       </template>
-      </div>
+      
     
 
     <!-- ═══ 灵感面板 ═══ -->
@@ -1575,6 +1578,117 @@
       </div>
     </template>
 
+    <!-- ═══ 批量生成配置弹窗 ═══ -->
+    <template x-if="showBatchGenerateModal">
+      <div class="modal-overlay" @click.self="showBatchGenerateModal = false">
+        <div class="modal" style="max-width:500px">
+          <header class="pipeline-header">
+            <h3>📦 批量生成章节</h3>
+            <button class="modal-close-x" @click="showBatchGenerateModal = false">×</button>
+          </header>
+          <div style="padding:20px">
+            <div style="margin-bottom:16px">
+              <label style="display:block;font-weight:600;margin-bottom:6px">起始位置</label>
+              <div style="display:flex;align-items:center;gap:8px">
+                <span>从第</span>
+                <input type="number" x-model.number="batchGenerateStart" min="0"
+                       style="width:80px;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:15px;text-align:center">
+                <span>章之后开始</span>
+                <span style="color:var(--text-muted);font-size:13px;margin-left:8px">
+                  （即从第 <strong x-text="batchGenerateStart + 1"></strong> 章起）
+                </span>
+              </div>
+              <p style="font-size:12px;color:var(--text-muted);margin-top:4px">
+                当前共 <span x-text="chapters.length"></span> 章，
+                最新一章为第 <span x-text="chapters.length > 0 ? Math.max(...chapters.map(c => c.order + 1)) : 0"></span> 章
+              </p>
+            </div>
+            <div style="margin-bottom:16px">
+              <label style="display:block;font-weight:600;margin-bottom:6px">生成数量</label>
+              <div style="display:flex;align-items:center;gap:8px">
+                <input type="number" x-model.number="batchGenerateCount" min="1" max="100"
+                       style="width:80px;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:15px;text-align:center">
+                <span>章</span>
+                <span style="color:var(--text-muted);font-size:13px;margin-left:8px">
+                  → 到第 <strong x-text="batchGenerateStart + batchGenerateCount"></strong> 章
+                </span>
+              </div>
+            </div>
+            <div style="margin-bottom:20px">
+              <label style="display:block;font-weight:600;margin-bottom:6px">内容引导 <span style="font-weight:400;color:var(--text-muted)">（选填）</span></label>
+              <textarea x-model="batchGenerateGuide" rows="3"
+                        placeholder="对这几章内容的总体引导，如：主角进入秘境修炼，遇到各种挑战..."
+                        style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:14px;resize:vertical"></textarea>
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:8px">
+              <button class="btn-secondary" @click="showBatchGenerateModal = false">取消</button>
+              <button class="btn-primary" @click="startBatchGenerate()">🚀 开始批量生成</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ═══ 批量生成进度面板（浮动在右下角） ═══ -->
+    <template x-if="batchGenerating && batchProgressInfo">
+      <div style="position:fixed;bottom:20px;right:20px;width:420px;max-height:70vh;overflow-y:auto;
+                  background:white;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,0.15);z-index:9999;
+                  border:1px solid var(--border);">
+        <header style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--border);background:#f8fafc;border-radius:12px 12px 0 0;">
+          <div>
+            <strong>📦 批量生成</strong>
+            <span style="font-size:13px;color:var(--text-muted);margin-left:8px"
+                  x-text="'第 ' + batchProgressInfo.currentOrder + ' 章 (' + (batchProgressInfo.currentIndex + 1) + '/' + batchProgressInfo.total + ')'"></span>
+          </div>
+          <button class="btn-icon" @click="cancelBatchGenerate()" title="关闭面板" style="font-size:16px">✕</button>
+        </header>
+        <div style="padding:14px 16px">
+          <!-- 总体进度条 -->
+          <div style="margin-bottom:12px">
+            <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px">
+              <span>总体进度</span>
+              <span x-text="batchProgressInfo.completed + '/' + batchProgressInfo.total + ' 章'"></span>
+            </div>
+            <div style="height:6px;background:#e5e7eb;border-radius:3px;overflow:hidden">
+              <div style="height:100%;background:#3b82f6;border-radius:3px;transition:width .3s"
+                   :style="'width:' + (batchProgressInfo.total > 0 ? (batchProgressInfo.completed / batchProgressInfo.total * 100) : 0) + '%'"></div>
+            </div>
+          </div>
+
+          <!-- 已完成章节列表 -->
+          <div style="max-height:120px;overflow-y:auto;margin-bottom:12px">
+            <template x-for="(info, chNum) in batchProgressInfo.chaptersStatus" :key="chNum">
+              <div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px">
+                <span x-text="'第' + chNum + '章'" style="min-width:50px"></span>
+                <span x-show="info.status === 'running'" style="color:#3b82f6">⏳ 生成中...</span>
+                <span x-show="info.status === 'completed'" style="color:#10b981">
+                  ✅ <span x-text="(info.word_count || 0) + '字'"></span>
+                </span>
+                <span x-show="info.status === 'failed'" style="color:#ef4444">❌ 失败</span>
+              </div>
+            </template>
+          </div>
+
+          <!-- 当前章节 9 步流水线进度 -->
+          <div style="border-top:1px solid var(--border);padding-top:10px">
+            <div style="font-size:13px;font-weight:600;margin-bottom:8px"
+                 x-text="'第 ' + batchProgressInfo.currentOrder + ' 章流水线'"></div>
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <template x-for="s in batchPipelineStagesView" :key="s.id">
+                <div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:3px 0"
+                     :style="s.status === 'running' ? 'color:#3b82f6;font-weight:600' : s.status === 'completed' ? 'color:#10b981' : s.status === 'failed' ? 'color:#ef4444' : 'color:#9ca3af'">
+                  <span x-text="s.status === 'completed' ? '✅' : s.status === 'running' ? '⏳' : s.status === 'failed' ? '❌' : '⬜'" style="font-size:11px"></span>
+                  <span x-text="s.label"></span>
+                  <span x-show="s.duration_ms" style="margin-left:auto;color:#9ca3af"
+                        x-text="(s.duration_ms / 1000).toFixed(1) + 's'"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+
     <!-- ═══ 修订确认浮层 ═══ -->
     <template x-if="showReviseConfirmModal">
       <div class="modal-overlay" @click.self="showReviseConfirmModal = false">
@@ -1851,23 +1965,118 @@
     <!-- ═══ 全局设置弹窗 ═══ -->
     <template x-if="showSettings">
       <div class="modal-overlay" @click.self="showSettings = false">
-        <div class="modal">
-          <h3>🔧 全局设置</h3>
+        <div class="modal" style="max-width: 680px; max-height: 85vh; overflow-y: auto;">
+          <h3>🔧 全局设置 — 服务商管理</h3>
+
+          <!-- 新增服务商表单 -->
+          <template x-if="showAddProvider">
+            <div style="border: 1px solid #3b82f6; border-radius: 8px; padding: 16px; margin-bottom: 16px; background: #f0f7ff;">
+              <h4 style="margin: 0 0 12px;">➕ 新增服务商</h4>
+              <div class="setting-row">
+                <label>服务商 ID（英文 slug）</label>
+                <input type="text" x-model="providerForm.id" placeholder="my-provider" style="width:100%">
+              </div>
+              <div class="setting-row">
+                <label>显示名称</label>
+                <input type="text" x-model="providerForm.name" placeholder="我的服务商" style="width:100%">
+              </div>
+              <div class="setting-row">
+                <label>API Key</label>
+                <input type="password" x-model="providerForm.api_key" placeholder="sk-..." style="width:100%">
+              </div>
+              <div class="setting-row">
+                <label>Base URL</label>
+                <input type="text" x-model="providerForm.base_url" placeholder="https://api.example.com/v1" style="width:100%">
+              </div>
+              <div class="setting-row">
+                <label>默认模型</label>
+                <input type="text" x-model="providerForm.model" placeholder="model-name" style="width:100%">
+              </div>
+              <div class="modal-actions" style="margin-top: 12px;">
+                <button class="btn-secondary" @click="cancelAddProvider()">取消</button>
+                <button class="btn-primary" @click="createProvider()" :disabled="providerSaving">
+                  <span x-show="!providerSaving">创建</span>
+                  <span x-show="providerSaving">保存中...</span>
+                </button>
+              </div>
+            </div>
+          </template>
+
+          <!-- 服务商列表 -->
           <div class="settings-content">
-            <div class="setting-row">
-              <label>默认 LLM Provider</label>
-              <select x-model="settings.defaultProvider">
-                <option value="minimax">MiniMax</option>
-                <option value="mimo">Xiaomi MiMo</option>
-                <option value="anthropic">Anthropic (Claude)</option>
-                <option value="openai">OpenAI (GPT)</option>
-                <option value="ollama">Ollama (本地)</option>
-              </select>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+              <span style="font-weight: 600; color: #374151;">服务商列表</span>
+              <button class="btn-icon" @click="startAddProvider()" title="新增服务商" style="font-size: 18px;">➕</button>
+            </div>
+
+            <template x-for="p in providers" :key="p.id">
+              <div style="border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; margin-bottom: 8px;"
+                   :style="p.is_default ? 'border-color: #3b82f6; background: #f8faff;' : ''">
+                <!-- 查看模式 -->
+                <template x-if="editingProvider !== p.id">
+                  <div>
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                      <div>
+                        <span style="font-weight: 600;" x-text="p.name"></span>
+                        <span style="font-size: 12px; color: #6b7280; margin-left: 8px;" x-text="'(' + p.id + ')'"></span>
+                        <span x-show="p.is_default" style="background: #3b82f6; color: white; font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-left: 8px;">默认</span>
+                      </div>
+                      <div style="display: flex; gap: 6px;">
+                        <button class="btn-icon" @click="startEditProvider(p)" title="编辑" style="font-size: 14px;">✏️</button>
+                        <button class="btn-icon" @click="setDefaultProvider(p.id)" x-show="!p.is_default" title="设为默认" style="font-size: 14px;">⭐</button>
+                        <button class="btn-icon" @click="deleteProvider(p.id)" x-show="!p.is_default" title="删除" style="font-size: 14px;">🗑️</button>
+                      </div>
+                    </div>
+                    <div style="font-size: 13px; color: #6b7280; margin-top: 6px;">
+                      <span x-show="p.base_url" x-text="'URL: ' + p.base_url"></span>
+                      <span x-show="p.model" x-text="' · 模型: ' + p.model"></span>
+                      <span x-show="p.has_api_key" style="color: #10b981;"> · ✅ 已配置 Key</span>
+                      <span x-show="!p.has_api_key" style="color: #f59e0b;"> · ⚠️ 未配置 Key</span>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- 编辑模式 -->
+                <template x-if="editingProvider === p.id">
+                  <div>
+                    <div style="font-weight: 600; margin-bottom: 10px;">
+                      ✏️ 编辑：<span x-text="p.name"></span>
+                    </div>
+                    <div class="setting-row">
+                      <label>显示名称</label>
+                      <input type="text" x-model="providerForm.name" style="width:100%">
+                    </div>
+                    <div class="setting-row">
+                      <label>API Key <span style="font-size: 12px; color: #9ca3af;" x-text="p.has_api_key ? '(已有，留空则不修改)' : '(未配置)'"></span></label>
+                      <input type="password" x-model="providerForm.api_key" placeholder="留空则不修改" style="width:100%">
+                    </div>
+                    <div class="setting-row">
+                      <label>Base URL</label>
+                      <input type="text" x-model="providerForm.base_url" style="width:100%">
+                    </div>
+                    <div class="setting-row">
+                      <label>默认模型</label>
+                      <input type="text" x-model="providerForm.model" style="width:100%">
+                    </div>
+                    <div class="modal-actions" style="margin-top: 10px;">
+                      <button class="btn-secondary" @click="cancelEditProvider()">取消</button>
+                      <button class="btn-primary" @click="saveProviderEdit()" :disabled="providerSaving">
+                        <span x-show="!providerSaving">保存</span>
+                        <span x-show="providerSaving">保存中...</span>
+                      </button>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <div x-show="providers.length === 0" style="text-align: center; color: #9ca3af; padding: 20px;">
+              暂无服务商，点击上方 ➕ 添加
             </div>
           </div>
+
           <div class="modal-actions">
             <button class="btn-secondary" @click="showSettings = false">关闭</button>
-            <button class="btn-primary" @click="saveDefaultProvider()">保存</button>
           </div>
         </div>
       </div>
@@ -1903,6 +2112,7 @@
                   预计总章数
                   <input type="number" x-model.number="newProjectForm.total_chapters" min="1" max="10000" placeholder="100">
                 </label>
+              </div>
 
               <div class="form-row">
                 <label>
@@ -2360,7 +2570,7 @@
 
   </div>
 
-  <script src="/static/js/app.js?v=6"></script>
+  <script src="/static/js/app.js?v=9"></script>
 </body>
 </html>
 
