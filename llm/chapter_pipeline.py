@@ -401,14 +401,21 @@ def build_chapter_prep_info(
     Returns:
         {
             "project_meta": ...,
-            "project_outline": ...,
-            "chapter_outline": ...,  # 本章细纲
-            "prev_chapters_summary": "...",  # 前 N 章摘要
-            "prev_chapter_ending": "...",  # 上一章结尾
-            "characters": [...],  # 登场人物 + 弧光
-            "active_foreshadowings": [...],
-            "consistency_issues": [...],  # 当前未解决的一致性问题
+            "project_outline_text": ...,
+            "chapter_outline": ...,
+            "prev_chapters_summary": "...",  # 前 3 章摘要（每章 2000 字）
+            "prev_chapter_ending": "...",
+            "next_chapter_opening": "...",
+            "characters": [...],
+            "active_foreshadowings": "...",
+            "consistency_issues": "...",
             "themes": "...",
+            # === 新增：去重相关 ===
+            "previous_event_signatures": [...],  # 全部前章的 event_signature
+            "previous_event_signatures_text": "...",  # 格式化文本（给 prompt 用）
+            "event_dedup_matches": [...],  # RAG 检索到的相似过去事件
+            "event_dedup_text": "...",  # 格式化文本（给 prompt 用）
+            "max_dedup_similarity": 0.0,  # 最高相似度（评审 role 用）
         }
     """
     from storage.models import (
@@ -430,7 +437,7 @@ def build_chapter_prep_info(
         db.query(ChapterOutline).filter(ChapterOutline.chapter_id == chapter_id).first()
     )
 
-    # 前 3 章摘要
+    # 前 3 章摘要（从 500 字扩到 2000 字，覆盖关键中段剧情）
     prev_chapters = (
         db.query(Chapter)
         .filter(Chapter.project_id == project_id, Chapter.order < chapter.order)
@@ -439,7 +446,7 @@ def build_chapter_prep_info(
         .all()
     )
     prev_chapters_summary = "\n\n".join(
-        [f"【第{c.order + 1}章 {c.title}】\n{(c.content or c.synopsis or '')[:500]}"
+        [f"【第{c.order + 1}章 {c.title}】\n{(c.content or c.synopsis or '')[:2000]}"
          for c in reversed(prev_chapters)]
     ) or "（这是第一章）"
 
@@ -515,6 +522,72 @@ def build_chapter_prep_info(
         [f"- [{t.theme_type}] {t.title}: {t.description}" for t in themes]
     ) or "（暂无主旨）"
 
+    # ════════════════════════════════════════════════════════════════
+    # 新增：去重相关 - 聚合全部前章事件签名
+    # ════════════════════════════════════════════════════════════════
+    all_prev_chapters = (
+        db.query(Chapter)
+        .filter(Chapter.project_id == project_id, Chapter.order < chapter.order)
+        .order_by(Chapter.order)
+        .all()
+    )
+    # 关联 ChapterOutline 取 key_content
+    prev_outlines = {
+        co.chapter_id: co
+        for co in db.query(ChapterOutline).filter(
+            ChapterOutline.chapter_id.in_([c.id for c in all_prev_chapters] or [0])
+        ).all()
+    }
+    previous_event_signatures = []
+    for c in all_prev_chapters:
+        co = prev_outlines.get(c.id)
+        # 优先级: event_signature > chapter_outline.key_content > synopsis
+        sig = (c.event_signature or "").strip()
+        if not sig and co:
+            sig = (co.key_content or "").strip()
+        if not sig:
+            sig = (c.synopsis or "").strip()
+        if sig:
+            previous_event_signatures.append({
+                "chapter": c.order + 1,
+                "chapter_id": c.id,
+                "title": c.title,
+                "signature": sig[:200],
+            })
+    previous_event_signatures_text = "\n".join(
+        [f"- 第{e['chapter']}章《{e['title']}》: {e['signature']}" for e in previous_event_signatures]
+    ) or "（暂无已发生事件，这是首章）"
+
+    # RAG 检索相似过去事件（基于本章 tentative key_content）
+    event_dedup_matches = []
+    max_dedup_similarity = 0.0
+    try:
+        from rag.retrieval import RetrievalService
+        # 用 chapter_outline.key_content 或 plot_advance 作为查询
+        query_text = ""
+        if chapter_outline:
+            query_text = (chapter_outline.key_content or "") + " " + (chapter_outline.plot_advance or "")
+        query_text = query_text.strip() or chapter.title or ""
+        if query_text:
+            retrieval = RetrievalService()
+            dedup_ctx = retrieval.build_event_dedup_context(
+                project_id=project_id,
+                query=query_text,
+                exclude_chapter_id=chapter_id,
+                db=db,
+                top_k=3,
+                similarity_threshold=0.45,  # 阈值偏宽，让 LLM 看到更多候选
+            )
+            event_dedup_matches = dedup_ctx.get("matches", [])
+            max_dedup_similarity = dedup_ctx.get("max_similarity", 0.0)
+    except Exception as e:
+        logger.warning(f"[build_chapter_prep_info] RAG dedup 检索失败: {e}")
+
+    event_dedup_text = "\n".join(
+        [f"- 第{m['chapter']}章《{m['title']}》(相似度 {m['similarity']:.2f}): {m['signature'][:150]}"
+         for m in event_dedup_matches]
+    ) or "（RAG 未检索到相似过去事件）"
+
     return {
         "project_meta": {
             "title": project.title,
@@ -545,6 +618,12 @@ def build_chapter_prep_info(
         "active_foreshadowings": foreshadowings_text,
         "consistency_issues": issues_text,
         "themes": themes_text,
+        # === 新增字段 ===
+        "previous_event_signatures": previous_event_signatures,
+        "previous_event_signatures_text": previous_event_signatures_text,
+        "event_dedup_matches": event_dedup_matches,
+        "event_dedup_text": event_dedup_text,
+        "max_dedup_similarity": max_dedup_similarity,
     }
 
 
@@ -568,6 +647,7 @@ def generate_chapter_outline(db, project_id: int, chapter_id: int, provider: str
         "key_content": (prep["chapter_outline"] or {}).get("key_content", ""),
         "plot_advance": (prep["chapter_outline"] or {}).get("plot_advance", ""),
         "prep_info": _format_prep_for_llm(prep),
+        "previous_events": prep.get("previous_event_signatures_text", "（暂无，这是首章）"),
         "target_word_count": prep["project_meta"]["target_word_count"],
         "guide": guide,
     }
@@ -611,12 +691,22 @@ def review_chapter_outline(outline: dict, prep_info: dict, provider: str | None 
 
     失败兜底：JSON 解析失败时返回 verdict=pass（默认通过），pipeline 继续。
     """
+    # 准备 RAG 检索的过去事件（给评审 role 看）
+    dedup_matches = prep_info.get("event_dedup_matches", []) if isinstance(prep_info, dict) else []
+    dedup_text_for_reviewer = "\n".join(
+        [f"- 第{m['chapter']}章《{m['title']}》(相似度 {m['similarity']:.2f}): {m['signature'][:150]}"
+         for m in dedup_matches]
+    ) or "（RAG 未命中）"
+
+    previous_events = prep_info.get("previous_event_signatures_text", "（暂无）") if isinstance(prep_info, dict) else "（暂无）"
+
     ctx = {
         "outline": json.dumps(outline, ensure_ascii=False, indent=2),
+        "previous_events": previous_events,
     }
     raw = _call_llm("outline_reviewer", ctx, "", provider)
     try:
-        return _parse_json(raw)
+        data = _parse_json(raw)
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning(
             f"[review_chapter_outline] JSON 解析失败，默认通过: {e}\n"
@@ -624,9 +714,51 @@ def review_chapter_outline(outline: dict, prep_info: dict, provider: str | None 
         )
         return {
             "issues": [],
+            "duplicate_risk": [],
             "verdict": "pass",
             "summary": "（评审解析失败，已默认通过）",
         }
+
+    # ════════════════════════════════════════════════════════════════
+    # 兜底去重：RAG 已命中的高相似事件直接进 issues + 强制 needs_revision
+    # 即便 LLM 评审没看出来，我们也要挡住
+    # ════════════════════════════════════════════════════════════════
+    max_sim = prep_info.get("max_dedup_similarity", 0.0) if isinstance(prep_info, dict) else 0.0
+    if dedup_matches:
+        # 取相似度最高的 1 条作为"硬去重依据"
+        top_match = max(dedup_matches, key=lambda x: x.get("similarity", 0))
+        if top_match.get("similarity", 0) >= 0.65:
+            # 加进 issues（如果 LLM 没加的话）
+            has_dup_issue = any(
+                (iss.get("type") == "duplicate") for iss in data.get("issues", [])
+            )
+            if not has_dup_issue:
+                data.setdefault("issues", []).append({
+                    "severity": "high",
+                    "type": "duplicate",
+                    "description": (
+                        f"RAG 命中第{top_match['chapter']}章《{top_match['title']}》(相似度 {top_match['similarity']:.2f})，"
+                        f"事件签名: {top_match['signature'][:100]}"
+                    ),
+                    "suggestion": "必须换角度展开本章，避免与上章同一关键事件重复",
+                })
+            data.setdefault("duplicate_risk", []).append({
+                "past_chapter": top_match["chapter"],
+                "similarity": top_match["similarity"],
+                "reason": f"RAG 命中事件签名高度相似: {top_match['signature'][:100]}",
+            })
+            # 强制 needs_revision
+            if data.get("verdict") == "pass":
+                logger.warning(
+                    f"[review_chapter_outline] RAG 命中相似度 {top_match['similarity']:.2f} 强制 needs_revision"
+                )
+                data["verdict"] = "needs_revision"
+                data["summary"] = (
+                    f"（RAG 自动拦截）{data.get('summary', '')} "
+                    f"与第{top_match['chapter']}章《{top_match['title']}》事件签名相似度过高"
+                ).strip()
+
+    return data
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1080,6 +1212,38 @@ def run_post_chapter_processing(
                 "requires_user_action": True,
             })
 
+    # ════════════════════════════════════════════════════════════════
+    # 9.5 事件签名抽取 + RAG 索引（用于下一章去重）
+    # ════════════════════════════════════════════════════════════════
+    try:
+        sig_ctx = {
+            "title": chapter.title or "",
+            "chapter_num": chapter.order + 1,
+            "content": (content or chapter.content or "")[:6000],
+        }
+        sig_raw = _call_llm("event_signature_extractor", sig_ctx, "", provider)
+        sig_data = _parse_json(sig_raw)
+        sig = (sig_data.get("signature") or "").strip()[:500]
+        if sig:
+            chapter.event_signature = sig
+            db.commit()
+            result["event_signature"] = sig
+            result["event_signature_chars"] = sig_data.get("characters_involved", [])
+
+            # 索引到 ChromaDB chapter_events 集合
+            try:
+                from rag.knowledge_base import KnowledgeBase
+                kb = KnowledgeBase()
+                kb.add_chapter_event(chapter)
+                result["rag_indexed"] = True
+            except Exception as rag_err:
+                logger.warning(f"[PostChapter] RAG event index failed: {rag_err}")
+                result["rag_indexed"] = False
+        else:
+            logger.warning(f"[PostChapter] event_signature 抽取为空 (chapter {chapter_id})")
+    except Exception as sig_err:
+        logger.warning(f"[PostChapter] event_signature 抽取失败: {sig_err}")
+
     return result
 
 
@@ -1180,7 +1344,11 @@ def _format_prep_for_llm(prep: dict) -> str:
         f"  关键内容: {co.get('key_content', '')}\n"
         f"  剧情推进: {co.get('plot_advance', '')}\n"
         f"  伏笔动作: {co.get('foreshadow_notes', '')}",
-        f"【前 3 章摘要】\n{prep['prev_chapters_summary']}",
+        # === 新增：硬约束 - 已发生事件清单（必须紧贴细纲，让 LLM 看到） ===
+        f"【⚠️ 已发生事件清单（硬约束：不得重复以下任一事件）】\n{prep.get('previous_event_signatures_text', '（暂无，这是首章）')}",
+        # === 新增：RAG 检索的相似过去事件（语义层去重） ===
+        f"【⚠️ RAG 检索到的相似过去事件（高相似度事件需规避）】\n{prep.get('event_dedup_text', '（RAG 未命中）')}",
+        f"【前 3 章摘要（供文风/衔接参考）】\n{prep['prev_chapters_summary']}",
         f"【上章结尾】\n{prep['prev_chapter_ending'][-500:]}",
     ]
     # 中间章节（前后都有正文）追加"下章开头"用于衔接
@@ -1218,6 +1386,92 @@ PIPELINE_STAGES_META = [
     {"id": "9_post",          "label": "后处理",       "weight": 2},
 ]
 _TOTAL_WEIGHT = sum(s["weight"] for s in PIPELINE_STAGES_META)  # 17
+
+
+def reindex_project_rag(project_id: int, db, with_signatures: bool = True) -> dict:
+    """全量 reindex 一个项目的所有数据到 ChromaDB。
+
+    用于：
+    - 迁移后回填（老项目没 event_signature 时回填索引）
+    - 手动触发（修复索引漂移）
+
+    Args:
+        project_id: 项目 ID
+        db: SQLAlchemy Session
+        with_signatures: 若 True，对没有 event_signature 的章节调 LLM 抽取（慢）
+
+    Returns:
+        {"characters": N, "world_entries": N, "chapters": N, "chapter_events": N}
+    """
+    from storage.models import Character, WorldEntry, Chapter, ChapterOutline
+    from rag.knowledge_base import KnowledgeBase
+
+    kb = KnowledgeBase()
+    counts = {"characters": 0, "world_entries": 0, "chapters": 0, "chapter_events": 0}
+
+    # 1. 角色
+    for c in db.query(Character).filter(Character.project_id == project_id).all():
+        try:
+            kb.add_character(c)
+            counts["characters"] += 1
+        except Exception as e:
+            logger.warning(f"[reindex] char {c.id} 失败: {e}")
+
+    # 2. 世界观
+    for w in db.query(WorldEntry).filter(WorldEntry.project_id == project_id).all():
+        try:
+            kb.add_world_entry(w)
+            counts["world_entries"] += 1
+        except Exception as e:
+            logger.warning(f"[reindex] world {w.id} 失败: {e}")
+
+    # 3. 章节（chapters 集合：摘要 500 字）
+    for ch in db.query(Chapter).filter(Chapter.project_id == project_id).all():
+        try:
+            kb.add_chapter(ch)
+            counts["chapters"] += 1
+        except Exception as e:
+            logger.warning(f"[reindex] chapter {ch.id} 失败: {e}")
+
+    # 4. 章节事件（chapter_events 集合：用于去重检索）
+    #    对没有 event_signature 的章节，若 with_signatures=True 则调 LLM 抽取
+    chapters = db.query(Chapter).filter(Chapter.project_id == project_id).all()
+    for ch in chapters:
+        try:
+            if not (ch.event_signature or "").strip() and with_signatures and (ch.content or "").strip():
+                # 调 LLM 抽取事件签名
+                from llm.factory import LLMFactory
+                sig_ctx = {
+                    "title": ch.title or "",
+                    "chapter_num": ch.order + 1,
+                    "content": (ch.content or "")[:6000],
+                }
+                role = ROLES.get("event_signature_extractor")
+                if role:
+                    system = role.build_system(sig_ctx)
+                    user = role.build_user(sig_ctx)
+                    llm = LLMFactory.create(db=db)
+                    raw = llm.generate(
+                        prompt=user, system_prompt=system,
+                        max_tokens=role.max_tokens, temperature=role.temperature,
+                        task_type="rag_reindex_event_sig",
+                    )
+                    try:
+                        sig_data = _parse_json(raw)
+                        sig = (sig_data.get("signature") or "").strip()[:500]
+                        if sig:
+                            ch.event_signature = sig
+                            db.commit()
+                    except Exception as parse_err:
+                        logger.warning(f"[reindex] event_sig 解析失败 ch {ch.id}: {parse_err}")
+            # 索引
+            kb.add_chapter_event(ch)
+            counts["chapter_events"] += 1
+        except Exception as e:
+            logger.warning(f"[reindex] chapter_event {ch.id} 失败: {e}")
+
+    logger.info(f"[reindex_project_rag] project={project_id} counts={counts}")
+    return counts
 
 
 def run_chapter_generation_pipeline(

@@ -345,6 +345,42 @@
 
                 <!-- 正文编辑区 -->
                 <div x-show="writingTab === 'content'" class="writing-tab-content">
+                  <!-- 已发生事件清单 + RAG 相似事件（防重复写作辅助） -->
+                  <details class="prep-info-card" x-show="currentChapter && currentChapter.id" style="margin-bottom: 10px;">
+                    <summary style="cursor: pointer; padding: 8px 12px; background: #f5f5f5; border-radius: 6px; user-select: none;">
+                      📚 已发生事件 + RAG 相似过去章节
+                      <span x-show="chapterPrepInfo?.max_dedup_similarity > 0" style="color: #d9534f; margin-left: 8px;">
+                        (最高相似度 <span x-text="(chapterPrepInfo?.max_dedup_similarity || 0).toFixed(2)"></span>)
+                      </span>
+                    </summary>
+                    <div style="padding: 10px 14px; border: 1px solid #e0e0e0; border-top: none; border-radius: 0 0 6px 6px;">
+                      <h4 style="margin: 8px 0 6px 0; color: #d9534f;">⚠️ 已发生事件 (硬约束：不得重复)</h4>
+                      <div x-show="!chapterPrepInfo || (chapterPrepInfo.previous_events || []).length === 0"
+                           style="color: #888; font-size: 0.9em;">暂无（这是首章）</div>
+                      <ul style="margin: 4px 0 12px 16px; font-size: 0.92em;">
+                        <template x-for="ev in (chapterPrepInfo?.previous_events || [])" :key="'pe-' + ev.chapter">
+                          <li>
+                            <strong>第<span x-text="ev.chapter"></span>章《<span x-text="ev.title"></span>》</strong>:
+                            <span x-text="ev.signature"></span>
+                          </li>
+                        </template>
+                      </ul>
+
+                      <h4 style="margin: 8px 0 6px 0; color: #f0ad4e;">🔍 RAG 相似过去事件（高相似度需规避）</h4>
+                      <div x-show="!chapterPrepInfo || (chapterPrepInfo.dedup_matches || []).length === 0"
+                           style="color: #888; font-size: 0.9em;">RAG 未命中相似事件</div>
+                      <ul style="margin: 4px 0 4px 16px; font-size: 0.92em;">
+                        <template x-for="m in (chapterPrepInfo?.dedup_matches || [])" :key="'dm-' + m.chapter">
+                          <li :style="{ color: m.similarity >= 0.65 ? '#d9534f' : '#666' }">
+                            第<span x-text="m.chapter"></span>章《<span x-text="m.title"></span>》
+                            <span style="font-weight: bold;">(相似度 <span x-text="m.similarity?.toFixed(2)"></span>)</span>:
+                            <span x-text="m.signature"></span>
+                          </li>
+                        </template>
+                      </ul>
+                    </div>
+                  </details>
+
                   <textarea class="content-editor" x-model="currentChapter.content" @input="onContentChange()" placeholder="开始写作..."></textarea>
                 </div>
 
@@ -1604,7 +1640,7 @@
               <span x-text="batchProgressInfo.completed + '/' + batchProgressInfo.total + ' 章'"></span>
             </div>
             <div style="height:6px;background:#e5e7eb;border-radius:3px;overflow:hidden">
-              <div style="height:100%;background:#3b82f6;border-radius:3px;transition:width .3s"
+              <div class="batch-progress-bar-inside" style=""
                    :style="'width:' + (batchProgressInfo.total > 0 ? (batchProgressInfo.completed / batchProgressInfo.total * 100) : 0) + '%'"></div>
             </div>
           </div>

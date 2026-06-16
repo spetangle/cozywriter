@@ -200,6 +200,7 @@ async def update_chapter(project_id: int, chapter_id: int, data: ChapterUpdate, 
     )
     db.add(version)
 
+    content_changed = False
     if data.title is not None:
         chapter.title = data.title
     if data.synopsis is not None:
@@ -209,9 +210,21 @@ async def update_chapter(project_id: int, chapter_id: int, data: ChapterUpdate, 
     if data.content is not None:
         chapter.content = data.content
         chapter.word_count = _count_words(data.content)
+        content_changed = True
 
     db.commit()
     db.refresh(chapter)
+
+    # 若正文变了 → 触发 RAG chapter_events 集合重新索引（失败仅 warning，不影响保存）
+    if content_changed:
+        try:
+            from rag.knowledge_base import KnowledgeBase
+            kb = KnowledgeBase()
+            kb.add_chapter_event(chapter)
+            logger.info(f"[update_chapter] RAG chapter_events 已重新索引 (chapter {chapter_id})")
+        except Exception as rag_err:
+            logger.warning(f"[update_chapter] RAG 重新索引失败 (chapter {chapter_id}): {rag_err}")
+
     return chapter
 
 
@@ -219,9 +232,56 @@ async def update_chapter(project_id: int, chapter_id: int, data: ChapterUpdate, 
 async def delete_chapter(project_id: int, chapter_id: int, db: Session = Depends(get_db)):
     """删除章节"""
     chapter = _verify_chapter(chapter_id, project_id, db)
+    chapter_id_to_clean = chapter_id
     db.delete(chapter)
     db.commit()
+    # 同步从 RAG 清理
+    try:
+        from rag.knowledge_base import KnowledgeBase
+        KnowledgeBase().delete_chapter_event(chapter_id_to_clean)
+    except Exception as rag_err:
+        logger.warning(f"[delete_chapter] RAG 清理失败: {rag_err}")
     return {"status": "ok"}
+
+
+@router.post("/projects/{project_id}/chapters/reindex-rag")
+async def reindex_project_rag_endpoint(project_id: int, with_signatures: bool = True, db: Session = Depends(get_db)):
+    """全量 reindex 一个项目的 RAG 索引（含 chapter_events 集合）。
+
+    用于：
+    - 迁移后回填
+    - 索引漂移修复
+    - 给老章节补 event_signature
+
+    Args:
+        with_signatures: 是否对无 event_signature 的章节调 LLM 抽取（耗时）
+
+    Returns:
+        {"status": "ok", "counts": {"characters": N, "world_entries": N, "chapters": N, "chapter_events": N}}
+    """
+    from llm.chapter_pipeline import reindex_project_rag
+    counts = reindex_project_rag(project_id, db, with_signatures=with_signatures)
+    return {"status": "ok", "counts": counts}
+
+
+@router.get("/projects/{project_id}/chapters/{chapter_id}/prep-info")
+async def get_chapter_prep_info(project_id: int, chapter_id: int, db: Session = Depends(get_db)):
+    """获取章节的"已发生事件清单 + RAG 相似事件"（给前端展示）。
+
+    复用 build_chapter_prep_info()，只取其中 RAG / 去重相关字段返回。
+    """
+    _verify_chapter(chapter_id, project_id, db)
+    from llm.chapter_pipeline import build_chapter_prep_info
+    prep = build_chapter_prep_info(db, project_id, chapter_id)
+    return {
+        "chapter_id": chapter_id,
+        "previous_events": prep.get("previous_event_signatures", []),
+        "previous_events_text": prep.get("previous_event_signatures_text", ""),
+        "dedup_matches": prep.get("event_dedup_matches", []),
+        "dedup_text": prep.get("event_dedup_text", ""),
+        "max_dedup_similarity": prep.get("max_dedup_similarity", 0.0),
+        "event_signature": (prep.get("chapter_outline") or {}).get("key_content", ""),  # 当前 key_content（不是已发生事件）
+    }
 
 
 @router.get("/projects/{project_id}/chapters/{chapter_id}/versions", response_model=list[VersionResponse])

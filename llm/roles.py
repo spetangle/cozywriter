@@ -75,6 +75,9 @@ STYLE_SYSTEM = """你是一位专业的小说作家，文字功底深厚，擅�
 【已写章节摘要】
 {chapters}
 
+【⚠️ 已发生事件（硬约束：不得重复）】
+{previous_events}
+
 【字数要求】
 目标字数：{target_word_count} 字
 允许范围：{word_count_range}
@@ -88,6 +91,10 @@ STYLE_SYSTEM = """你是一位专业的小说作家，文字功底深厚，擅�
 6. 回复只输出小说正文，不要输出任何其他内容
 7. 文字要有文学性和人文感，不要机械模板化
 8. 【重要】尽量避免使用短句（如三字句、四字句），多使用长短句交替的叙述方式，增加文字的节奏感和文学性
+9. 【重要】不得重复【已发生事件】中列出的关键事件：
+   - 同一人物的关键事件（如"觉醒""加入团队""收到警告"）只能发生 1 次
+   - 同一场景、同一对话、同一结果都不得重演
+   - 如需"回忆/呼应"前事，必须明确标注为"回忆"片段且不能完整重演
 """
 
 STYLE_USER = """请根据上下文继续撰写下一段小说内容：
@@ -452,6 +459,16 @@ CHAPTER_OUTLINE_GEN_SYSTEM = """你是一位专业的小说架构师，擅长按
 {prep_info}
 
 ═══════════════════════════════════════════════════════════════
+【硬约束：禁止重复以下已发生事件】
+═══════════════════════════════════════════════════════════════
+{previous_events}
+
+⚠️ 重要规则：
+1. 本章 key_content 与上述任一事件重合度 > 60% 视为失败，必须换角度
+2. 同一人物的关键事件（如「林战觉醒」「收到短信警告」「与XX首次见面」）只能发生 1 次
+3. 同一场景、同一对话、同一结果都不得重演
+4. 如确实需要「回忆/呼应」前事，必须明确标注为"回忆"，且不能完整重演
+═══════════════════════════════════════════════════════════════
 【核心规划原则】
 ═══════════════════════════════════════════════════════════════
 
@@ -503,7 +520,7 @@ CHAPTER_OUTLINE_GEN_SYSTEM = """你是一位专业的小说架构师，擅长按
   "title": "本章标题（4-15 字，必须和章节内容有关联，不要「第 N 章」这种纯序号标题，例如「初入诡秘都市」「玄机子的阴谋」等）",
   "chapter_position": "开局|发展|高潮|回落|结局",
   "pacing": "铺垫|推进|高潮|回落|平稳",
-  "key_content": "本章核心内容（1-2 句话概述）",
+  "key_content": "本章核心内容（1-2 句话概述，必须与上述已发生事件不重合）",
   "plot_advance": "本章剧情如何推进主线（1-2 句话）",
   "foreshadow_notes": "本章对伏笔的操作（埋设/推进/回收哪些伏笔，1-2 句话）",
   "conflicts": ["冲突/矛盾点1", "冲突/矛盾点2"],
@@ -587,6 +604,7 @@ OUTLINE_REVIEW_SYSTEM = """你是一位细纲评审专家，专门审查小说�
 - 与世界观的硬规则冲突
 - 关键情节设置与项目大纲冲突
 - 关键人物 OOC（out of character）
+- 【重复】本章与已发生事件高度重复（同一人物/同一关键事件/同一场景重合度 > 60%）
 
 【非严重性】(score=low/medium) - 不需要修订
 - 文字细节、文笔润色
@@ -595,6 +613,9 @@ OUTLINE_REVIEW_SYSTEM = """你是一位细纲评审专家，专门审查小说�
 
 【细纲】
 {outline}
+
+【已发生事件 (RAG 检索)】
+{previous_events}
 
 【判定标准】
 - high: 必须修订
@@ -606,9 +627,16 @@ OUTLINE_REVIEW_SYSTEM = """你是一位细纲评审专家，专门审查小说�
   "issues": [
     {{
       "severity": "high|medium|low",
-      "type": "character_trait_conflict | foreshadow_timeline | world_rule_violation | plot_inconsistency | ooc",
+      "type": "character_trait_conflict | foreshadow_timeline | world_rule_violation | plot_inconsistency | ooc | duplicate",
       "description": "具体问题",
       "suggestion": "具体修复建议"
+    }}
+  ],
+  "duplicate_risk": [
+    {{
+      "past_chapter": 2,
+      "similarity": 0.78,
+      "reason": "都涉及'接触林战并试探旧伤'，同一关键事件重复"
     }}
   ],
   "verdict": "pass" | "needs_revision",
@@ -814,6 +842,40 @@ ROLE_FORESHADOW_UPDATER = Role(
 )
 
 
+# 9.9 事件签名抽取器（Step 9 后处理使用，输出存入 chapters.event_signature）
+EVENT_SIG_SYSTEM = """你是小说事件抽取器。从章节正文中抽取本章的核心事件签名，用于后续章节的 RAG 检索去重。
+
+【输入】
+章节标题：{title}
+章节号：第 {chapter_num} 章
+章节正文：
+{content}
+
+【要求】
+1. signature：用第三人称写 1-2 句话事件签名（不超过 60 字）
+   - 只写本章发生的 1 个核心事件
+   - 不带情感词（"令人震撼""紧张"等）
+   - 不带修辞（"仿佛""似乎"等）
+   - 用"主角/余凌/某角色名 + 动词 + 对象"结构
+2. key_events：数组，列出本章涉及的 2-4 个关键动作（每个 ≤ 15 字）
+3. characters_involved：数组，列出本章明确登场的角色名（精确匹配角色表）
+
+返回 JSON：
+{{
+  "signature": "1-2 句事件签名",
+  "key_events": ["事件1", "事件2", "事件3"],
+  "characters_involved": ["角色A", "角色B"]
+}}
+"""
+ROLE_EVENT_SIG_EXTRACTOR = Role(
+    name="event_signature_extractor",
+    system_prompt=EVENT_SIG_SYSTEM,
+    user_prompt_template="抽取本章事件签名：",
+    max_tokens=512,
+    temperature=0.2,
+)
+
+
 # 9.9 黄金三章检查（前 3 章写完后）
 GOLDEN_3_SYSTEM = """你是新书开局诊断专家。
 
@@ -929,6 +991,7 @@ ROLES = {
     "foreshadow_updater": ROLE_FORESHADOW_UPDATER,
     "golden_3_checker": ROLE_GOLDEN_3_CHECKER,
     "chapter_director": ROLE_CHAPTER_DIRECTOR,
+    "event_signature_extractor": ROLE_EVENT_SIG_EXTRACTOR,
 }
 
 

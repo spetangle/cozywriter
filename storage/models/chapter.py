@@ -16,12 +16,23 @@ class Chapter(Base):
     content = Column(Text, default="")
     word_count = Column(Integer, default=0)
     synopsis = Column(Text, default="")
+    event_signature = Column(Text, default="")  # LLM 抽取的 1-2 句事件签名（用于 RAG 去重检索）
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     @property
     def summary(self) -> str:
         return f"【第{self.order + 1}章 {self.title}】\n{self.synopsis or self.content[:500]}"
+
+    @property
+    def event_signature_text(self) -> str:
+        """用于 RAG chapter_events 集合的文档文本。优先级:event_signature > synopsis > content[:300]。"""
+        sig = (self.event_signature or "").strip()
+        if sig:
+            return f"【第{self.order + 1}章 {self.title}】\n{sig}"
+        # 降级:无 event_signature 时,用 synopsis 或正文前 300 字
+        body = (self.synopsis or (self.content or "")[:300]).strip()
+        return f"【第{self.order + 1}章 {self.title}】\n{body}"
 
     project = relationship("Project", back_populates="chapters")
     versions = relationship("ChapterVersion", back_populates="chapter", cascade="all, delete-orphan")

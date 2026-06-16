@@ -205,3 +205,130 @@ class RetrievalService:
         if not results.get("documents") or not results["documents"][0]:
             return ""
         return "\n".join(results["documents"][0])
+
+    # ─── 9 步流水线专用方法 ───
+
+    def build_event_dedup_context(
+        self,
+        project_id: int,
+        query: str,
+        exclude_chapter_id: int | None = None,
+        db: Session | None = None,
+        top_k: int = 3,
+        similarity_threshold: float = 0.5,
+    ) -> dict:
+        """为新章节构建"已发生相似事件"清单（用于防重复写作）。
+
+        Args:
+            query: 本章的 tentative key_content / plot_advance，用于语义检索
+            exclude_chapter_id: 排除自身（重写场景）
+            top_k: 最多返回几条
+            similarity_threshold: 低于此相似度的不返回（避免噪音）
+
+        Returns:
+            {
+                "matches": [
+                    {"chapter": 2, "title": "...", "signature": "...", "similarity": 0.78},
+                    ...
+                ],
+                "max_similarity": 0.78,  # 用于评审 role 判定
+                "raw_query": query,
+            }
+        """
+        if not query or not query.strip():
+            return {"matches": [], "max_similarity": 0.0, "raw_query": query or ""}
+        try:
+            raw = self.kb.search_chapter_events(
+                query=query.strip(),
+                project_id=project_id,
+                top_k=top_k,
+                exclude_chapter_id=exclude_chapter_id,
+            )
+        except Exception as e:
+            from logger import logger
+            logger.warning(f"[RetrievalService] build_event_dedup_context failed: {e}")
+            return {"matches": [], "max_similarity": 0.0, "raw_query": query}
+
+        matches = [
+            {
+                "chapter": m["order"] + 1,  # 1-based 给前端/LLM 看
+                "chapter_id": m["chapter_id"],
+                "title": m["title"],
+                "signature": m["signature"],
+                "similarity": round(m["similarity"], 3),
+            }
+            for m in raw
+            if m["similarity"] >= similarity_threshold
+        ]
+        max_sim = max((m["similarity"] for m in matches), default=0.0)
+        return {
+            "matches": matches,
+            "max_similarity": round(max_sim, 3),
+            "raw_query": query,
+        }
+
+    def build_chapter_rag_context(
+        self,
+        project_id: int,
+        chapter_id: int | None,
+        query: str,
+        db: Session | None = None,
+        top_k_chars: int = 3,
+        top_k_events: int = 3,
+    ) -> dict:
+        """9 步流水线专用：拉取相关 characters + chapter_events，作为"软上下文"。
+
+        与 build_context() 的区别：
+        - build_context() 用于手动 AI 续写（生成.py），是全量拼 system prompt
+        - build_chapter_rag_context() 只返回"语义相关"的子集，给 build_chapter_prep_info 注入
+
+        Returns:
+            {
+                "characters": [  # 语义相关角色
+                    {"name": "...", "role": "...", "profile_text": "..."},
+                ],
+                "events": [  # 语义相关过去事件
+                    {"chapter": 2, "title": "...", "signature": "...", "similarity": 0.78},
+                ],
+            }
+        """
+        if not query or not query.strip():
+            return {"characters": [], "events": []}
+        try:
+            char_hits = self.kb.search_characters(query, top_k=top_k_chars)
+        except Exception:
+            char_hits = {"documents": [[]], "metadatas": [[]]}
+        try:
+            event_hits = self.kb.search_chapter_events(
+                query=query.strip(),
+                project_id=project_id,
+                top_k=top_k_events,
+                exclude_chapter_id=chapter_id,
+            )
+        except Exception:
+            event_hits = []
+
+        characters = []
+        try:
+            docs = (char_hits.get("documents") or [[]])[0]
+            metas = (char_hits.get("metadatas") or [[]])[0]
+            for doc, meta in zip(docs, metas):
+                characters.append({
+                    "name": (meta or {}).get("name", ""),
+                    "role": (meta or {}).get("role", ""),
+                    "profile_text": doc or "",
+                })
+        except Exception:
+            pass
+
+        events = [
+            {
+                "chapter": h["order"] + 1,
+                "chapter_id": h["chapter_id"],
+                "title": h["title"],
+                "signature": h["signature"],
+                "similarity": round(h["similarity"], 3),
+            }
+            for h in event_hits
+        ]
+        return {"characters": characters, "events": events}

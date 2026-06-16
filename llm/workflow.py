@@ -289,13 +289,34 @@ STAGE_PROMPTS = {
         "task": (
             "根据所有已确定的角色与世界设定，设计完整的项目大纲。\n"
             "【重要】总章节数已在硬约束或上一阶段产物中确定（total_chapters），大纲必须严格覆盖该章数范围，不得自行增减。\n"
-            "要求：\n"
+            "\n"
+            "═══════════════════════════════════════════════════════════════\n"
+            "【分卷结构 - 必须首先输出】\n"
+            "═══════════════════════════════════════════════════════════════\n"
+            "整本书按【卷（Volume）】组织，每一卷是一个相对完整的剧情阶段：\n"
+            "1. volumes：数组，推荐 3-5 卷（短篇 20 章可 2-3 卷，长篇 100 章可 4-6 卷）\n"
+            "   每个卷包含：\n"
+            "   - volume_num：卷号（1, 2, 3...）\n"
+            "   - title：卷名（4-10 字，如「异能觉醒」「暗流涌动」「外星入侵」）\n"
+            "   - from_chapter / to_chapter：该卷覆盖的章节范围（必须连续且不重叠）\n"
+            "   - summary：该卷核心主线概述（2-3 句话，只讲本卷大事件）\n"
+            "   - core_event：本卷最核心的 1 个剧情事件（1 句话，如「主角觉醒异能」「与反派首次正面交锋」）\n"
+            "   所有卷合计覆盖 1 ~ total_chapters，不得有缺漏。\n"
+            "\n"
+            "【分卷的意义】分卷是为了在 100 章等长篇下，把整体故事分成阶段；每卷内部再细分到章。\n"
+            "分卷不是用来承载具体情节的——具体情节必须放到下面的 chapter_outlines 数组中。\n"
+            "\n"
+            "═══════════════════════════════════════════════════════════════\n"
+            "【剧情线 + 节奏】\n"
+            "═══════════════════════════════════════════════════════════════\n"
             "1. plot_lines：3-5 条剧情线，每条包含 title, description, from_chapter, to_chapter, priority\n"
             "2. structure.acts：4 幕结构（开局/发展/高潮/结局），每幕给 from_chapter / to_chapter，所有幕合计必须覆盖 1 ~ total_chapters\n"
             "3. pacing_notes：整体节奏规划（2-3 句）\n"
             "4. outline_text：完整大纲文本（200-500 字概述）\n"
             "\n"
-            "【宏观节奏规划 - 必须包含以下内容】\n"
+            "═══════════════════════════════════════════════════════════════\n"
+            "【宏观节奏规划】\n"
+            "═══════════════════════════════════════════════════════════════\n"
             "5. reversal_schedule：反转/高潮时刻表，严格遵循以下节奏：\n"
             "   - 小反转/小爽点（约每 3 章）：压力积累 + 爆发式爽点循环\n"
             "     例：反派挑衅 → 资源争夺 → 绝地反击 → 获得奖励\n"
@@ -304,18 +325,48 @@ STAGE_PROMPTS = {
             "   请列出每个小爽点和大爽点的章节号和简要描述\n"
             "6. climax_map：每个幕的高潮点安排，确保读者追更动力\n"
             "\n"
-            "【每章节细纲 - 必须包含，覆盖 1~total_chapters 全部章节】\n"
-            "7. chapter_outlines：数组，每个元素对应一章：\n"
-            "   - chapter_num：1..total_chapters（不能漏）\n"
-            "   - title：本章标题（4-15 字，与内容有关联，不要「第 N 章」这种纯序号）\n"
+            "═══════════════════════════════════════════════════════════════\n"
+            "【每章节细纲 - 严格 1 章 1 句，必须覆盖 1~total_chapters 全部章节】\n"
+            "═══════════════════════════════════════════════════════════════\n"
+            "7. chapter_outlines：数组，每个元素对应一章，**禁止 1-N 章共用同一段描述**！\n"
+            "\n"
+            "【硬性约束 - 必须严格遵守】\n"
+            "   ⚠️ 绝对禁止把多章合并成一段情节描述。\n"
+            "   ⚠️ 每一章必须有自己独立的核心事件；相邻章可以有关联但不能是同一件事。\n"
+            "   ⚠️ 数组长度必须 === total_chapters（少 1 章或多 1 章都会失败）。\n"
+            "\n"
+            "   每一章包含：\n"
+            "   - chapter_num：1..total_chapters（**严格按顺序连续**，不能漏）\n"
+            "   - volume_num：本章所属的卷号（1, 2, 3...）\n"
+            "   - title：本章标题（4-15 字，与内容有关联，不要「第 N 章」这种纯序号，例如「初入诡秘都市」「玄机子的阴谋」）\n"
             "   - chapter_position：本章定位（开局/发展/高潮/回落/结局）\n"
             "   - pacing：节奏（铺垫/推进/高潮/回落/平稳）\n"
-            "   - key_content：核心内容（1-2 句话）\n"
-            "   - plot_advance：剧情如何推进主线（1-2 句话）\n"
+            "   - key_content：核心内容（**严格 1 句话**，不超过 35 字。\n"
+            "       必须只描述本章发生的 1 件事。\n"
+            "       禁止出现「并」「以及」「同时」「还」连接的两件事。\n"
+            "       错误示范：「余凌找到林战试探其旧伤，并收到神秘短信」（这是 2 件事）\n"
+            "       正确示范：「余凌在健身房试探林战的旧伤反应」）\n"
+            "   - plot_advance：剧情如何推进主线（1 句话，不超过 30 字）\n"
             "   - highlights：本章看点/爽点数组（1-3 条）\n"
             "   - target_word_count：目标字数（默认 3000）\n"
+            "\n"
+            "【去重自检】\n"
+            "   生成完毕后请逐章检查：\n"
+            "   1. 相邻两章的 key_content 不能描述同一件事\n"
+            "   2. 同一人物的关键事件（如「林战觉醒」「收到短信」）只能出现在 1 章中\n"
+            "   3. 任意两章的 key_content 文字重合度不能超过 40%\n"
         ),
         "json_schema": {
+            "volumes": [
+                {
+                    "volume_num": 1,
+                    "title": "卷名（4-10 字）",
+                    "from_chapter": 1,
+                    "to_chapter": 25,
+                    "summary": "本卷主线概述（2-3 句话）",
+                    "core_event": "本卷最核心事件（1 句话）",
+                }
+            ],
             "plot_lines": [
                 {
                     "title": "...",
@@ -352,11 +403,12 @@ STAGE_PROMPTS = {
             "chapter_outlines": [
                 {
                     "chapter_num": 1,
-                    "title": "本章标题",
+                    "volume_num": 1,
+                    "title": "本章标题（4-15 字，非纯序号）",
                     "chapter_position": "开局",
                     "pacing": "铺垫",
-                    "key_content": "核心内容概述",
-                    "plot_advance": "主线推进",
+                    "key_content": "本章核心事件的 1 句话描述（≤35 字，只 1 件事）",
+                    "plot_advance": "主线如何推进（1 句话 ≤30 字）",
                     "highlights": ["看点1", "看点2"],
                     "target_word_count": 3000,
                 },
@@ -972,6 +1024,7 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
                 outline_text=data.get("outline_text", ""),
                 reversal_schedule=data.get("reversal_schedule", {}),
                 climax_map=data.get("climax_map", []),
+                volumes=data.get("volumes", []),
             )
             db.add(outline)
 
@@ -1000,7 +1053,12 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
         db.commit()
 
         # 索引 RAG（失败不影响主流程）
-        _index_to_rag(project_id, db)
+        # 使用新的统一 reindex_project_rag（包含 chapter_events 集合）
+        try:
+            from llm.chapter_pipeline import reindex_project_rag
+            reindex_project_rag(project_id, db, with_signatures=True)
+        except Exception as rag_err:
+            logger.warning(f"[Bootstrap commit] reindex RAG 失败: {rag_err}")
 
         return {
             "status": "committed",

@@ -227,11 +227,15 @@ async def get_bootstrap_data(project_id: int, db: Session = Depends(get_db)):
         "notes": user_input.get("notes", ""),
     }
 
-    # 各 stage 的 data（如果 stage ok，data 是 dict；failed 则是 None）
+    # 各 stage 的 data（如果 stage ok，data 是 dict；user_filled 时从 user_values 读）
     def _data(stage_id: str) -> dict | None:
         s = sr.get(stage_id) or {}
-        if s.get("status") == "ok":
+        status = s.get("status")
+        if status == "ok":
             return s.get("data") or {}
+        if status == "user_filled":
+            # user_filled 时把 user_values 包装成 data 形态（让下游按 dict 处理）
+            return s.get("user_values") or {}
         return None
 
     # ── 基础外推（stage_1） ──
@@ -244,8 +248,17 @@ async def get_bootstrap_data(project_id: int, db: Session = Depends(get_db)):
     style_data = _data("stage_2b_style") or {}
 
     # ── 世界观（stage_2c）：按 category 分组 ──
+    #     修复：之前只读 status=="ok"，导致用户填了 premise 时（status=="user_filled"）返回空
     world_data = _data("stage_2c_world") or {}
     world_entries = world_data.get("world_entries", [])
+    # 兜底：user_filled 时把 premise 包装成单个 world_entries（与 commit 时写入 WorldEntry 的格式一致）
+    if not world_entries and world_data.get("premise"):
+        world_entries = [{
+            "category": "背景设定",
+            "title": "世界观背景",
+            "content": world_data["premise"],
+            "tags": [],
+        }]
     world_by_category: dict[str, list] = {}
     for entry in world_entries:
         cat = entry.get("category", "其他")

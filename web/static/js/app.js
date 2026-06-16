@@ -179,6 +179,8 @@ function app() {
     outlineSubPanel: 'overview',
     chapterOutlines: [],
     chapterOutlinesMap: {},
+    // 章节的"已发生事件 + RAG 相似事件"（防重复写作辅助面板）
+    chapterPrepInfo: null,
 
     // 评审
     reviewSubPanel: 'new',
@@ -2136,6 +2138,23 @@ function app() {
       this._autoOpenTaskPanelForChapter(this.currentChapter);
       // 加载该章节的评审数据
       this._loadChapterReview(this.currentChapter);
+      // 加载该章节的 prep-info（已发生事件 + RAG 相似事件）
+      this.loadChapterPrepInfo(chapter.id);
+    },
+
+    async loadChapterPrepInfo(chapterId) {
+      if (!chapterId || !this.currentProject) return;
+      this.chapterPrepInfo = null;
+      try {
+        const res = await fetch(
+          `/api/projects/${this.currentProject.id}/chapters/${chapterId}/prep-info`
+        );
+        if (res.ok) {
+          this.chapterPrepInfo = await res.json();
+        }
+      } catch (e) {
+        console.warn('[loadChapterPrepInfo] failed:', e);
+      }
     },
 
     async _loadChapterReview(chapter) {

@@ -94,7 +94,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="CozyWriter",
     description="小说编写辅助系统 - LLM 生成 + RAG 知识管理 + 一致性检查 + 智能评审 + 大纲细纲 + 灵感收集 + 创意问卷",
-    version="0.5.0",
+    version="0.6.0",
     lifespan=lifespan,
 )
 

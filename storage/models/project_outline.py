@@ -17,6 +17,7 @@ class ProjectOutline(Base):
     outline_text = Column(Text, default="")
     reversal_schedule = Column(JSON, default=dict)  # 宏观节奏：小爽点(每3章) + 大爽点(每10章)
     climax_map = Column(JSON, default=list)  # 每幕高潮点安排
+    volumes = Column(JSON, default=list)  # 分卷结构：每卷一个完整剧情阶段（title/summary/from_chapter/to_chapter/core_event）
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -31,6 +32,7 @@ class ChapterOutline(Base):
     chapter_id = Column(Integer, ForeignKey("chapters.id", ondelete="CASCADE"), nullable=False, unique=True)
     chapter_position = Column(String(30), default="")
     act_name = Column(String(50), default="")
+    volume_num = Column(Integer, default=0)  # 所属卷号（1-based，0=未分卷）
     key_content = Column(Text, default="")
     plot_advance = Column(Text, default="")
     foreshadow_ids = Column(JSON, default=list)
