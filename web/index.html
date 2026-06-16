@@ -217,17 +217,17 @@
             <div class="sidebar-section">
               <div class="sidebar-header"><span>工具</span></div>
               <div class="tool-buttons">
-                <button @click="activePanel = 'writing'" :class="{ active: activePanel === 'writing' }">✍️ 写作</button>
+                <button @click="activePanel = 'writing'; _saveLastView()" :class="{ active: activePanel === 'writing' }">✍️ 写作</button>
                 <!--
                   子面板同步：点击面板时同时设置默认子页签，
                   避免进入角色/主题/检查面板后默认显示空白。
                 -->
-                <button @click="activePanel = 'outline-plan'; outlineSubPanel = 'overview'" :class="{ active: activePanel === 'outline-plan' }">📋 大纲</button>
-                <button @click="activePanel = 'character-matrix'; subPanel = 'characters'" :class="{ active: activePanel === 'character-matrix' }">👥 角色</button>
-                <button @click="activePanel = 'worldbuilding'" :class="{ active: activePanel === 'worldbuilding' }">🌍 世界观</button>
-                <button @click="activePanel = 'theme'; subPanel = 'themes'" :class="{ active: activePanel === 'theme' }">🎯 主题/伏笔</button>
-                <button @click="activePanel = 'check'; subPanel = 'consistency'" :class="{ active: activePanel === 'check' }">🔍 检查</button>
-                <button @click="activePanel = 'inspirations'" :class="{ active: activePanel === 'inspirations' }">💡 灵感</button>
+                <button @click="activePanel = 'outline-plan'; outlineSubPanel = 'overview'; _saveLastView()" :class="{ active: activePanel === 'outline-plan' }">📋 大纲</button>
+                <button @click="activePanel = 'character-matrix'; subPanel = 'characters'; _saveLastView()" :class="{ active: activePanel === 'character-matrix' }">👥 角色</button>
+                <button @click="activePanel = 'worldbuilding'; _saveLastView()" :class="{ active: activePanel === 'worldbuilding' }">🌍 世界观</button>
+                <button @click="activePanel = 'theme'; subPanel = 'themes'; _saveLastView()" :class="{ active: activePanel === 'theme' }">🎯 主题/伏笔</button>
+                <button @click="activePanel = 'check'; subPanel = 'consistency'; _saveLastView()" :class="{ active: activePanel === 'check' }">🔍 检查</button>
+                <button @click="activePanel = 'inspirations'; _saveLastView()" :class="{ active: activePanel === 'inspirations' }">💡 灵感</button>
                 <button @click="openExportModal()">📤 导出</button>
               </div>
             </div>
@@ -333,13 +333,13 @@
                   <div class="writing-tabs">
                     <!-- 当前 LLM 模型指示（点击可在后续跳到全局设置）-->
                     <span class="toolbar-llm" x-show="currentLlmLabel"
-                          title="当前使用的 LLM（来自项目默认 provider）">
-                      <span class="toolbar-llm-icon">🤖</span>
+                          title="当前使用的 LLM（来自项目默认 provider）" style="margin-right: 10px;">
+                      <span class="toolbar-llm-icon">当前模型：🤖</span>
                       <span class="toolbar-llm-name" x-text="currentLlmLabel"></span>
                     </span>
-                    <button :class="{ active: writingTab === 'content' }" @click="writingTab = 'content'">正文</button>
-                    <button :class="{ active: writingTab === 'outline' }" @click="writingTab = 'outline'">细纲</button>
-                    <button :class="{ active: writingTab === 'review' }" @click="writingTab = 'review'">评审报告</button>
+                    <button :class="{ active: writingTab === 'content' }" @click="writingTab = 'content'; _saveLastView()">正文</button>
+                    <button :class="{ active: writingTab === 'outline' }" @click="writingTab = 'outline'; _saveLastView()">细纲</button>
+                    <button :class="{ active: writingTab === 'review' }" @click="writingTab = 'review'; _saveLastView()">评审报告</button>
                   </div>
                 </div>
 
@@ -532,6 +532,9 @@
                     <button class="btn-secondary" @click="openBatchGenerateModal()"
                             title="批量生成多章（自动创建章节并逐章执行完整 9 步流水线）"
                             :disabled="batchGenerating">📦 批量生成</button>
+                    <button class="btn-secondary" @click="openWordAdjustModal()"
+                            :disabled="!currentChapter || !currentChapter.content"
+                            title="只调整字数（缩写或扩写），不动剧情结构">📐 字数调整</button>
                     <button class="btn-secondary" @click="confirmRevise()"
                             :disabled="!currentChapter || !currentChapter.content"
                             title="根据细纲和评审报告重新生成正文，旧正文标记为废稿">📝 修订</button>
@@ -625,7 +628,25 @@
                 <!-- 伏笔管理 -->
                 <template x-if="subPanel === 'foreshadowings'">
                   <div class="panel-section">
-                    <button class="btn-primary" @click="showForeshadowingForm = true">➕ 添加伏笔</button>
+                    <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+                      <button class="btn-primary" @click="showForeshadowingForm = true">➕ 添加伏笔</button>
+                      <!-- 状态筛选 -->
+                      <div style="display:flex;gap:4px;align-items:center;margin-left:auto">
+                        <span style="font-size:12px;color:var(--text-muted)">筛选：</span>
+                        <template x-for="opt in [
+                          {key: 'all', label: '全部', count: foreshadowings.length},
+                          {key: 'planted', label: '🌱 待开始', count: foreshadowings.filter(f => f.status === 'planted').length},
+                          {key: 'active',  label: '🔥 进行中', count: foreshadowings.filter(f => f.status === 'active').length},
+                          {key: 'resolved',label: '✅ 已回收', count: foreshadowings.filter(f => f.status === 'resolved').length},
+                          {key: 'abandoned',label: '❌ 已废弃', count: foreshadowings.filter(f => f.status === 'abandoned').length}
+                        ]" :key="opt.key">
+                          <button type="button" class="btn-tiny"
+                                  :class="foreshadowingFilter === opt.key ? 'btn-primary' : ''"
+                                  @click="foreshadowingFilter = opt.key"
+                                  x-text="`${opt.label} (${opt.count})`"></button>
+                        </template>
+                      </div>
+                    </div>
 
                     <!--
                       🤖 AI 生成的伏笔（来自 bootstrapData.foreshadowings.by_period）
@@ -666,17 +687,22 @@
                     </template>
 
                     <div class="foreshadowing-list">
-                      <template x-for="f in foreshadowings" :key="f.id">
+                      <template x-for="f in filteredForeshadowings" :key="f.id">
                         <div class="foreshadowing-card" :class="`status-${f.status}`">
                           <div class="fs-header">
                             <span class="fs-title" x-text="f.title"></span>
-                            <span class="fs-status" :class="`badge-${f.status}`" x-text="f.status === 'active' ? '进行中' : f.status === 'resolved' ? '已回收' : '已废弃'"></span>
+                            <span class="fs-status" :class="`badge-${f.status}`" x-text="f.status === 'active' ? '进行中' : f.status === 'resolved' ? '已回收' : f.status === 'planted' ? '待开始' : '已废弃'"></span>
                           </div>
                           <div class="fs-content" x-text="f.content || '暂无内容'"></div>
                           <div class="fs-actions">
                             <button class="btn-small" @click="resolveForeshadowing(f)" x-show="f.status === 'active'">标记回收</button>
                             <button class="btn-small" @click="abandonForeshadowing(f)" x-show="f.status === 'active'">废弃</button>
                           </div>
+                        </div>
+                      </template>
+                      <template x-if="filteredForeshadowings.length === 0 && foreshadowings.length > 0">
+                        <div style="text-align:center;padding:24px;color:var(--text-muted);font-size:13px">
+                          没有符合当前筛选条件的伏笔（共 {{ foreshadowings.length }} 条）
                         </div>
                       </template>
                     </div>
@@ -1676,6 +1702,130 @@
       </div>
     </template>
 
+    <!-- ═══ 字数调整确认浮层 ═══ -->
+    <template x-if="showWordAdjustModal">
+      <div class="modal-overlay" @click.self="closeWordAdjustModal()">
+        <div class="modal" style="max-width:480px">
+          <header class="pipeline-header">
+            <h3>📐 字数调整</h3>
+            <button class="modal-close-x" @click="closeWordAdjustModal()">×</button>
+          </header>
+          <div style="padding:20px">
+            <p style="margin-bottom:12px">
+              第 <strong x-text="currentChapter ? currentChapter.order + 1 : '?'"></strong> 章
+              《<strong x-text="currentChapter ? currentChapter.title : ''"></strong>》
+            </p>
+
+            <!-- 字数现状信息 -->
+            <div style="background:#f8fafc;border-radius:6px;padding:12px;margin-bottom:14px">
+              <div style="display:flex;justify-content:space-between;font-size:13px">
+                <span>当前字数</span>
+                <strong x-text="(currentChapter && currentChapter.word_count) || 0"></strong>
+              </div>
+            </div>
+
+            <!-- 自定义字数上下限（输入框默认填项目设定值，方便直接修改） -->
+            <div style="border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:14px">
+              <div style="font-size:12px;font-weight:600;color:#475569;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">
+                <span>调整范围（默认填项目设定）</span>
+                <label style="display:flex;align-items:center;gap:4px;font-weight:normal;cursor:pointer">
+                  <input type="checkbox" x-model="wordAdjustUseCustom"
+                         @change="recalcWordAdjustPlan()">
+                  <span style="font-size:12px">自定义</span>
+                </label>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+                <div>
+                  <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:2px">下限（min）</label>
+                  <input type="number" min="0" step="100"
+                         x-model.number="wordAdjustCustomMin"
+                         @input="recalcWordAdjustPlan()"
+                         style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">
+                </div>
+                <div>
+                  <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:2px">目标（target）</label>
+                  <input type="number" min="0" step="100"
+                         x-model.number="wordAdjustCustomTarget"
+                         @input="recalcWordAdjustPlan()"
+                         style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">
+                </div>
+                <div>
+                  <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:2px">上限（max）</label>
+                  <input type="number" min="0" step="100"
+                         x-model.number="wordAdjustCustomMax"
+                         @input="recalcWordAdjustPlan()"
+                         style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">
+                </div>
+              </div>
+
+              <!-- 按目标字数百分比快捷设置 -->
+              <div style="margin-top:10px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                <span style="font-size:11px;color:var(--text-muted)">按目标 ±</span>
+                <template x-for="pct in [5, 10, 15, 20, 30]" :key="pct">
+                  <button type="button" class="btn-tiny" style="font-size:11px"
+                          @click="applyWordAdjustPctPreset(pct)"
+                          x-text="`${pct}%`"></button>
+                </template>
+                <input type="number" min="1" max="100" step="1"
+                       x-model.number="wordAdjustPctInput"
+                       placeholder="自定义%"
+                       style="width:70px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+                <span style="font-size:11px;color:var(--text-muted)">%</span>
+                <button type="button" class="btn-tiny" style="font-size:11px"
+                        @click="applyWordAdjustPctPreset(wordAdjustPctInput)">应用</button>
+                <span style="font-size:11px;color:var(--text-muted);flex:1;text-align:right">
+                  将在当前 target 的 ±<span x-text="wordAdjustPctInput || 10"></span>% 区间内调整
+                </span>
+              </div>
+
+              <p style="font-size:11px;color:var(--text-muted);margin-top:8px">
+                💡 留空 = 用项目默认 min/target/max。点 ±% 按钮可一键以 target 为中心扩展区间。
+              </p>
+            </div>
+
+            <!-- 动作提示 -->
+            <template x-if="wordAdjustPlan">
+              <div style="background:#fef3c7;padding:10px 12px;border-radius:4px;margin-bottom:14px;font-size:13px">
+                <div style="margin-bottom:6px;color:#475569">
+                  📐 当前生效区间：<strong x-text="wordAdjustPlan.min"></strong> ~ <strong x-text="wordAdjustPlan.max"></strong> 字
+                  <span style="font-size:11px;color:var(--text-muted)" x-text="wordAdjustUseCustom ? '（自定义）' : '（项目默认）'"></span>
+                </div>
+                <template x-if="wordAdjustPlan.action === 'compress'">
+                  <div>
+                    📉 当前超出上限 <strong x-text="wordAdjustPlan.delta"></strong> 字，将调用 LLM <b>缩写</b>。
+                  </div>
+                </template>
+                <template x-if="wordAdjustPlan.action === 'expand'">
+                  <div>
+                    📈 当前低于下限 <strong x-text="wordAdjustPlan.delta"></strong> 字，将调用 LLM <b>扩写</b>。
+                  </div>
+                </template>
+                <template x-if="wordAdjustPlan.action === 'none'">
+                  <div style="color:#10b981">
+                    ✅ 当前字数已在区间内，<b>无需调整</b>。
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">
+              ⚠️ 旧版正文会作为新版本存入废纸篓，可在「章节版本」中回滚。本操作<strong>不会</strong>修改细纲或评审。
+            </p>
+
+            <div style="display:flex;justify-content:flex-end;gap:8px">
+              <button class="btn-secondary" @click="closeWordAdjustModal()">取消</button>
+              <button class="btn-primary"
+                      :disabled="!wordAdjustPlan || wordAdjustPlan.action === 'none' || wordAdjustSubmitting"
+                      @click="runWordAdjust()">
+                <span x-show="!wordAdjustSubmitting">确认调整</span>
+                <span x-show="wordAdjustSubmitting">调整中…</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+
     <!-- ═══ 章节生成 9 步流水线进度面板 ═══ -->
     <template x-if="showPipelineProgress">
       <div class="modal-overlay" @click.self="closePipelinePanel(false)">
@@ -1986,19 +2136,19 @@
                       <div>
                         <span style="font-weight: 600;" x-text="p.name"></span>
                         <span style="font-size: 12px; color: #6b7280; margin-left: 8px;" x-text="'(' + p.id + ')'"></span>
-                        <span x-show="p.is_default" style="background: #3b82f6; color: white; font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-left: 8px;">默认</span>
+                        <span x-show="p.is_default" style="background: #3b67f6; color: white; font-size: 12px; padding: 2px 6px; border-radius: 4px; margin-left: 8px;">正在使用</span>
                       </div>
                       <div style="display: flex; gap: 6px;">
-                        <button class="btn-icon" @click="startEditProvider(p)" title="编辑" style="font-size: 14px;">✏️</button>
-                        <button class="btn-icon" @click="setDefaultProvider(p.id)" x-show="!p.is_default" title="设为默认" style="font-size: 14px;">⭐</button>
-                        <button class="btn-icon" @click="deleteProvider(p.id)" x-show="!p.is_default" title="删除" style="font-size: 14px;">🗑️</button>
+                        <button class="btn-icon" @click="startEditProvider(p)" title="编辑" style="font-size: 14px;">✏️ 编辑</button>
+                        <button class="btn-icon" @click="setDefaultProvider(p.id)" x-show="!p.is_default" title="设为默认" style="font-size: 14px;">🔵 选用</button>
+                        <button class="btn-icon" @click="deleteProvider(p.id)" x-show="!p.is_default" title="删除" style="font-size: 14px;">🗑️ 删除</button>
                       </div>
                     </div>
                     <div style="font-size: 13px; color: #6b7280; margin-top: 6px;">
                       <span x-show="p.base_url" x-text="'URL: ' + p.base_url"></span>
                       <span x-show="p.model" x-text="' · 模型: ' + p.model"></span>
-                      <span x-show="p.has_api_key" style="color: #10b981;"> · ✅ 已配置 Key</span>
-                      <span x-show="!p.has_api_key" style="color: #f59e0b;"> · ⚠️ 未配置 Key</span>
+                      <span x-show="p.has_api_key" style="color: #10b981;">（🔑 已配置 Key）</span>
+                      <span x-show="!p.has_api_key" style="color: #f59e0b;">（⚠️ 未配置 Key）</span>
                     </div>
                   </div>
                 </template>

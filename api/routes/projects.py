@@ -194,8 +194,8 @@ async def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
         description=data.description.strip(),
         genre=genre_str,
         target_word_count=data.chapter_word_count * 1000,  # 千字 → 字
-        word_count_min=int(data.chapter_word_count * 1000 * 0.7),
-        word_count_max=int(data.chapter_word_count * 1000 * 1.3),
+        word_count_min=int(data.chapter_word_count * 1000 * 0.9),
+        word_count_max=int(data.chapter_word_count * 1000 * 1.1),
         total_chapters=data.total_chapters,
         writing_style=data.style or "平实",
     )

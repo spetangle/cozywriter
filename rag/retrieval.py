@@ -164,8 +164,8 @@ class RetrievalService:
 
         # 字数要求
         target = project_info.get("target_word_count", 3000)
-        wc_min = project_info.get("word_count_min", 2000)
-        wc_max = project_info.get("word_count_max", 5000)
+        wc_min = project_info.get("word_count_min", 2700)
+        wc_max = project_info.get("word_count_max", 3300)
         wc_range = f"{wc_min}～{wc_max} 字"
 
         # 拼接 system prompt

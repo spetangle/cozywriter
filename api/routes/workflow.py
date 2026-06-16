@@ -264,6 +264,8 @@ async def get_bootstrap_data(project_id: int, db: Session = Depends(get_db)):
 
     # ── 项目大纲（stage_4a）──
     outline_data = _data("stage_4a_outline") or {}
+    # 兼容：之前没有 chapter_outlines 字段（早期版本）
+    chapter_outlines = outline_data.get("chapter_outlines", []) if isinstance(outline_data, dict) else []
 
     # ── 伏笔（stage_4b）：按 type/周期分组 ──
     # 实际数据结构：{"title", "content", "type": "短/中/长" 或 "short/medium/long", "suggested_plant_chapter", "suggested_resolve_chapter"}
@@ -288,9 +290,11 @@ async def get_bootstrap_data(project_id: int, db: Session = Depends(get_db)):
                 break
         foreshadow_by_period[period].append(f)
 
-    # ── 章节细纲（stage_5）──
+    # ── 章节细纲（兼容旧版 stage_5_chapters，新版走 stage_4a 的 chapter_outlines）──
     chap_data = _data("stage_5_chapters") or {}
-    chapter_outlines = chap_data.get("chapter_outlines", [])
+    legacy_chapter_outlines = chap_data.get("chapter_outlines", [])
+    if not chapter_outlines:
+        chapter_outlines = legacy_chapter_outlines
 
     return {
         "project_id": project_id,

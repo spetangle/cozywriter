@@ -303,6 +303,17 @@ STAGE_PROMPTS = {
             "     例：身世揭秘、阵营反转、核心秘密揭露\n"
             "   请列出每个小爽点和大爽点的章节号和简要描述\n"
             "6. climax_map：每个幕的高潮点安排，确保读者追更动力\n"
+            "\n"
+            "【每章节细纲 - 必须包含，覆盖 1~total_chapters 全部章节】\n"
+            "7. chapter_outlines：数组，每个元素对应一章：\n"
+            "   - chapter_num：1..total_chapters（不能漏）\n"
+            "   - title：本章标题（4-15 字，与内容有关联，不要「第 N 章」这种纯序号）\n"
+            "   - chapter_position：本章定位（开局/发展/高潮/回落/结局）\n"
+            "   - pacing：节奏（铺垫/推进/高潮/回落/平稳）\n"
+            "   - key_content：核心内容（1-2 句话）\n"
+            "   - plot_advance：剧情如何推进主线（1-2 句话）\n"
+            "   - highlights：本章看点/爽点数组（1-3 条）\n"
+            "   - target_word_count：目标字数（默认 3000）\n"
         ),
         "json_schema": {
             "plot_lines": [
@@ -337,6 +348,18 @@ STAGE_PROMPTS = {
             "climax_map": [
                 {"act": "第一幕", "climax_chapter": 7, "description": "幕高潮描述"},
                 {"act": "第二幕", "climax_chapter": 17, "description": "幕高潮描述"},
+            ],
+            "chapter_outlines": [
+                {
+                    "chapter_num": 1,
+                    "title": "本章标题",
+                    "chapter_position": "开局",
+                    "pacing": "铺垫",
+                    "key_content": "核心内容概述",
+                    "plot_advance": "主线推进",
+                    "highlights": ["看点1", "看点2"],
+                    "target_word_count": 3000,
+                },
             ],
         },
     },
@@ -864,6 +887,9 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
                     db.add(we)
 
         # ── Stage 3A/3B/3C: Characters + Relations ──
+        # 复用 chapter_pipeline 里的去重 helper（LLM 经常把同一个角色用不同名字
+        # 拆成 3A/3B/3C 三个 stage，导致同一个人被创建多次）
+        from llm.chapter_pipeline import _find_existing_character
         char_map = {}  # name → id
         for stage_id, role_default in [
             ("stage_3a_protagonist", "主角"),
@@ -875,17 +901,29 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
                 data = stage_info["data"]
                 chars = _extract_characters(data, stage_id, role_default)
                 for c in chars:
+                    cname = c.get("name", "").strip()
+                    if not cname or cname == "未命名":
+                        continue
+                    # 去重：同项目下已有同名的就跳过新建，复用旧 id
+                    existing = _find_existing_character(db, project_id, cname)
+                    if existing:
+                        logger.info(
+                            f"[Bootstrap] 跳过新角色「{cname}」：已存在（id={existing.id}, 当前名={existing.name}）"
+                        )
+                        if cname:
+                            char_map[cname] = existing.id
+                        continue
                     char = Character(
                         project_id=project_id,
-                        name=c.get("name", "未命名"),
+                        name=cname,
                         role=c.get("role", role_default),
                         profile=c.get("profile", {}),
                         description=c.get("description", ""),
                     )
                     db.add(char)
                     db.flush()
-                    if c.get("name"):
-                        char_map[c["name"]] = char.id
+                    if cname:
+                        char_map[cname] = char.id
 
         # Stage 3C 的 relations
         if results.get("stage_3c_supporting", {}).get("status") == "ok":

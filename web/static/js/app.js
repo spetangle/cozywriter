@@ -189,6 +189,12 @@ function app() {
     // 当前使用的 LLM provider + 模型名（顶部工具栏展示用）
     currentLlmLabel: '',
 
+    // 最后浏览位置（用户刷新页面时还原）
+    lastView: { projectId: null, chapterId: null, panel: 'writing', writingTab: 'content' },
+
+    // 伏笔面板筛选：'all' | 'planted' | 'active' | 'resolved' | 'abandoned'
+    foreshadowingFilter: 'all',
+
     // 预览面板
     previewSubTab: 'content',   // content / outline / review
     writingTab: 'content',       // content / outline / review (写作台内页签)
@@ -234,6 +240,19 @@ function app() {
     showRegenerateConfirmModal: false,
     _pendingPipelineGuide: '',  // 用户在 setup 浮层填的引导，触发确认时暂存
 
+    // 字数调整（独立功能）
+    showWordAdjustModal: false,
+    wordAdjustPlan: null,         // { action: 'compress'|'expand'|'none', delta: N }
+    wordAdjustTaskId: null,       // 当前异步任务 id
+    wordAdjustSubmitting: false,  // 防重复提交
+    // 自定义字数上下限（输入框默认填项目设定值，方便直接修改）
+    wordAdjustUseCustom: false,
+    wordAdjustCustomMin: null,
+    wordAdjustCustomTarget: null,
+    wordAdjustCustomMax: null,
+    // 按目标字数 ± 百分比 快捷设置
+    wordAdjustPctInput: 10,
+
     // ─── 9 步章节生成流水线（chapter_pipeline）───
     // 后端：/api/chapters/generate-pipeline (POST) → task_id
     // 轮询 /api/tasks/{id} 拿实时 9 step 状态
@@ -265,6 +284,8 @@ function app() {
           this._rehydrateBatchTask();
           // 检查是否有进行中的 workflow run，有则自动恢复 wizard
           await this._rehydrateBootstrapIfNeeded();
+          // 恢复用户上次浏览的位置（project / chapter / panel / writingTab）
+          await this._rehydrateLastView();
         } else {
           await this.refreshModelStatus();
         }
@@ -323,6 +344,57 @@ function app() {
         console.warn('[BatchTask] rehydrate failed:', e);
         try { localStorage.removeItem('cozywriter.batchTask'); } catch (_) {}
       }
+    },
+
+    // 页面刷新后恢复上次浏览位置（项目 + 章节 + 面板 + 写作台标签页）
+    async _rehydrateLastView() {
+      try {
+        const raw = localStorage.getItem('cozywriter.lastView');
+        if (!raw) return;
+        const saved = JSON.parse(raw);
+        if (!saved || !saved.projectId) return;
+        // 校验项目是否还存在
+        const project = this.projects.find(p => p.id === saved.projectId);
+        if (!project) {
+          console.log('[LastView] 项目已不存在，清掉 lastView');
+          localStorage.removeItem('cozywriter.lastView');
+          return;
+        }
+        // 打开项目
+        await this.openProject(project);
+        // 恢复面板
+        if (saved.panel && ['writing', 'outline-plan', 'character-matrix', 'worldbuilding', 'theme', 'check', 'inspirations'].includes(saved.panel)) {
+          this.activePanel = saved.panel;
+        }
+        // 恢复章节（如该章节还在项目里）
+        if (saved.chapterId) {
+          const ch = this.chapters.find(c => c.id === saved.chapterId);
+          if (ch) {
+            await this.selectChapter(ch);
+            // 恢复写作台 tab
+            if (saved.writingTab && ['content', 'outline', 'review'].includes(saved.writingTab)) {
+              this.writingTab = saved.writingTab;
+            }
+          }
+        }
+        console.log('[LastView] 已恢复上次浏览位置', saved);
+      } catch (e) {
+        console.warn('[LastView] rehydrate failed:', e);
+        try { localStorage.removeItem('cozywriter.lastView'); } catch (_) {}
+      }
+    },
+
+    // 保存当前浏览位置（项目 / 章节 / 面板 / 写作台 tab）
+    _saveLastView() {
+      try {
+        const payload = {
+          projectId: this.currentProject ? this.currentProject.id : null,
+          chapterId: this.currentChapter ? this.currentChapter.id : null,
+          panel: this.activePanel,
+          writingTab: this.writingTab,
+        };
+        localStorage.setItem('cozywriter.lastView', JSON.stringify(payload));
+      } catch (_) { /* localStorage may be disabled */ }
     },
 
     async _rehydrateBootstrapIfNeeded() {
@@ -1480,6 +1552,7 @@ function app() {
       this.currentProject = { ...project };
       this.activePanel = 'writing';
       this.outlineSubPanel = 'overview';
+      this._saveLastView();
       await Promise.all([
         this.loadChapters(project.id),
         this.loadCharacters(project.id),
@@ -2007,8 +2080,8 @@ function app() {
             writing_style: this.currentProject.writing_style,
             ai味去除程度: this.currentProject.ai味去除程度,
             target_word_count: parseInt(this.currentProject.target_word_count) || 3000,
-            word_count_min: parseInt(this.currentProject.word_count_min) || 2000,
-            word_count_max: parseInt(this.currentProject.word_count_max) || 5000,
+            word_count_min: parseInt(this.currentProject.word_count_min) || 2700,
+            word_count_max: parseInt(this.currentProject.word_count_max) || 3300,
             total_chapters: parseInt(this.currentProject.total_chapters) || 0,
           }),
         });
@@ -2044,6 +2117,7 @@ function app() {
       if (!chapter || !this.currentProject) return;
       this.activePanel = 'writing';
       this.chapterDirty = false;
+      this._saveLastView();
       // 从服务器重新拉取最新章节数据（pipeline 生成后 content 已更新）
       try {
         const res = await fetch(`/api/projects/${this.currentProject.id}/chapters/${chapter.id}`);
@@ -2875,8 +2949,14 @@ function app() {
         currentOrder: r.current_chapter_order || 0,
         chaptersStatus: r.chapters_status || {},
         pipelineStages: r.current_pipeline_stages || {},
-        pipelineProgress: r.current_pipeline_progress_pct || 0,
       };
+    },
+
+    // 伏笔筛选：按状态过滤（全部 / 待开始 / 进行中 / 已回收 / 已废弃）
+    get filteredForeshadowings() {
+      const f = this.foreshadowingFilter;
+      if (f === 'all' || !f) return this.foreshadowings;
+      return this.foreshadowings.filter(item => item.status === f);
     },
 
     get batchPipelineStagesView() {
@@ -2931,6 +3011,165 @@ function app() {
         }
       } catch (e) {
         alert('修订请求失败: ' + e.message);
+      }
+    },
+
+    // ─── 字数调整（独立功能，只动字数）───
+    openWordAdjustModal() {
+      if (!this.currentChapter || !this.currentChapter.content) {
+        alert('当前章节没有正文内容，无法调整字数');
+        return;
+      }
+      // 初始化自定义输入框为项目默认值
+      this.wordAdjustUseCustom = false;
+      this.wordAdjustCustomMin = this.currentProject.word_count_min || null;
+      this.wordAdjustCustomTarget = this.currentProject.target_word_count || null;
+      this.wordAdjustCustomMax = this.currentProject.word_count_max || null;
+      this.recalcWordAdjustPlan();
+      this.wordAdjustTaskId = null;
+      this.wordAdjustSubmitting = false;
+      this.showWordAdjustModal = true;
+    },
+
+    // 用当前 useCustom + min/target/max 重算 plan
+    recalcWordAdjustPlan() {
+      if (!this.currentChapter) return;
+      const currentChars = this.currentChapter.word_count || 0;
+      let minW, maxW;
+      if (this.wordAdjustUseCustom) {
+        // 自定义模式：使用手输值（fallback 到项目默认）
+        minW = Number(this.wordAdjustCustomMin) || this.currentProject.word_count_min || 0;
+        maxW = Number(this.wordAdjustCustomMax) || this.currentProject.word_count_max || 0;
+      } else {
+        minW = this.currentProject.word_count_min || 0;
+        maxW = this.currentProject.word_count_max || 0;
+      }
+      if (minW > maxW) [minW, maxW] = [maxW, minW];
+      let plan;
+      if (currentChars > maxW) {
+        plan = { action: 'compress', delta: currentChars - maxW, min: minW, max: maxW };
+      } else if (currentChars < minW) {
+        plan = { action: 'expand', delta: minW - currentChars, min: minW, max: maxW };
+      } else {
+        plan = { action: 'none', delta: 0, min: minW, max: maxW };
+      }
+      this.wordAdjustPlan = plan;
+    },
+
+    // 按目标字数的 ±百分比 重新计算 min/target/max，自动启用自定义
+    applyWordAdjustPctPreset(pct) {
+      if (!pct || pct <= 0 || pct >= 100) {
+        alert('百分比必须在 1-99 之间');
+        return;
+      }
+      // 基准值：先看输入框里的 target，再看项目的 target
+      const baseTarget = Number(this.wordAdjustCustomTarget)
+        || this.currentProject.target_word_count
+        || 3000;
+      const delta = Math.round(baseTarget * pct / 100);
+      const newMin = Math.max(0, baseTarget - delta);
+      const newMax = baseTarget + delta;
+      // 启用自定义模式 + 写入输入框
+      this.wordAdjustUseCustom = true;
+      this.wordAdjustCustomMin = newMin;
+      this.wordAdjustCustomTarget = baseTarget;
+      this.wordAdjustCustomMax = newMax;
+      this.wordAdjustPctInput = pct;
+      this.recalcWordAdjustPlan();
+    },
+
+    closeWordAdjustModal() {
+      if (this.wordAdjustSubmitting) {
+        alert('调整进行中，请等待完成');
+        return;
+      }
+      this.showWordAdjustModal = false;
+      this.wordAdjustPlan = null;
+    },
+
+    async runWordAdjust() {
+      if (!this.wordAdjustPlan || this.wordAdjustPlan.action === 'none') return;
+      if (this.wordAdjustSubmitting) return;
+      this.wordAdjustSubmitting = true;
+      try {
+        // 收集自定义上下限
+        const body = {
+          project_id: this.currentProject.id,
+          chapter_id: this.currentChapter.id,
+        };
+        if (this.wordAdjustUseCustom) {
+          if (this.wordAdjustCustomMin != null && this.wordAdjustCustomMin !== '')
+            body.min_words = Number(this.wordAdjustCustomMin);
+          if (this.wordAdjustCustomMax != null && this.wordAdjustCustomMax !== '')
+            body.max_words = Number(this.wordAdjustCustomMax);
+          if (this.wordAdjustCustomTarget != null && this.wordAdjustCustomTarget !== '')
+            body.target_words = Number(this.wordAdjustCustomTarget);
+        }
+        const res = await fetch('/api/chapters/adjust-word-count', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.task_id) {
+          alert('字数调整提交失败：' + (data.detail || JSON.stringify(data)));
+          this.wordAdjustSubmitting = false;
+          return;
+        }
+        this.wordAdjustTaskId = data.task_id;
+        // 打开任务管理面板
+        this.showTaskManager = true;
+        await this.refreshAllTasks();
+        // 启动轮询
+        if (this._taskPollHandle) clearInterval(this._taskPollHandle);
+        this._taskPollHandle = setInterval(() => {
+          this._pollWordAdjust();
+          if (this.showTaskManager) this.refreshAllTasks();
+        }, 2000);
+        // 立即拉一次
+        this._pollWordAdjust();
+      } catch (e) {
+        alert('字数调整请求失败: ' + e.message);
+        this.wordAdjustSubmitting = false;
+      }
+    },
+
+    async _pollWordAdjust() {
+      if (!this.wordAdjustTaskId) return;
+      try {
+        const res = await fetch('/api/tasks/' + this.wordAdjustTaskId);
+        if (!res.ok) return;
+        const task = await res.json();
+        if (['completed', 'failed', 'cancelled'].includes(task.status)) {
+          clearInterval(this._taskPollHandle);
+          this._taskPollHandle = null;
+          this.wordAdjustSubmitting = false;
+          if (task.status === 'completed') {
+            const r = task.result || {};
+            const rangeTag = r.is_custom_range ? '（自定义）' : '（项目默认）';
+            if (r.skipped) {
+              alert(`当前字数（${r.current_chars}）已在区间 ${r.min_chars}~${r.max_chars} 内${rangeTag}，无需调整。`);
+            } else {
+              const sign = r.delta >= 0 ? '+' : '';
+              alert(
+                `字数调整完成！\n\n` +
+                `调整前：${r.current_chars} 字\n` +
+                `调整后：${r.new_chars} 字（${sign}${r.delta} 字）\n` +
+                `目标区间：${r.min_chars} ~ ${r.max_chars} 字${rangeTag}\n` +
+                `旧版已存入废纸篓（v${r.version_num}）`
+              );
+            }
+            // 关闭弹窗 + 重新加载章节
+            this.showWordAdjustModal = false;
+            this.wordAdjustTaskId = null;
+            await this.selectChapter(this.currentChapter);
+          } else if (task.status === 'failed') {
+            alert('字数调整失败：' + (task.error || '未知错误'));
+            this.wordAdjustTaskId = null;
+          }
+        }
+      } catch (e) {
+        console.warn('[WordAdjust] poll failed:', e);
       }
     },
 

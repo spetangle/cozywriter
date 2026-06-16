@@ -92,20 +92,81 @@ async def list_chapters(project_id: int, db: Session = Depends(get_db)):
 
 @router.post("/projects/{project_id}/chapters", response_model=ChapterResponse)
 async def create_chapter(project_id: int, data: ChapterCreate, db: Session = Depends(get_db)):
-    """创建章节"""
+    """创建章节
+
+    如果 bootstrap 已生成过该项目大纲的 chapter_outlines，会按 order 自动取对应的细纲，
+    写入 ChapterOutline 表（含标题、核心内容、剧情推进等）。标题也会用 LLM 生成的标题。
+    """
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     word_count = _count_words(data.content)
+
+    # 自动从 bootstrap 拉取匹配的章节细纲 + 标题
+    bootstrap_title = None
+    bootstrap_outline_fields = None
+    try:
+        from storage.models import WorkflowRun, ChapterOutline
+        from llm.workflow import _commit_bootstrap_results  # noqa: F401  仅确保模块加载
+        latest_run = (
+            db.query(WorkflowRun)
+            .filter(WorkflowRun.project_id == project_id)
+            .order_by(WorkflowRun.created_at.desc())
+            .first()
+        )
+        if latest_run:
+            outline_data = (latest_run.stage_results or {}).get("stage_4a_outline", {}).get("data", {})
+            chap_list = outline_data.get("chapter_outlines", []) if isinstance(outline_data, dict) else []
+            # 按 chapter_num == order+1 匹配
+            target_chap = next(
+                (c for c in chap_list if c.get("chapter_num") == data.order + 1),
+                None,
+            )
+            if target_chap:
+                t = (target_chap.get("title") or "").strip()
+                if t and not re.match(r'^第\s*[0-9一二三四五六七八九十百千]+\s*章\s*$', t):
+                    bootstrap_title = t
+                bootstrap_outline_fields = {
+                    "chapter_position": target_chap.get("chapter_position", ""),
+                    "pacing": target_chap.get("pacing", "平稳"),
+                    "key_content": target_chap.get("key_content", ""),
+                    "plot_advance": target_chap.get("plot_advance", ""),
+                    "highlights": target_chap.get("highlights", []),
+                    "target_word_count": target_chap.get("target_word_count", project.target_word_count or 3000),
+                }
+    except Exception as e:
+        logger.debug(f"[create_chapter] bootstrap outline lookup failed: {e}")
+
+    # 如果 bootstrap 没生成标题，就用调用方传入的（前端默认「第 N 章」）
+    final_title = bootstrap_title or data.title
+
     chapter = Chapter(
         project_id=project_id,
-        title=data.title,
+        title=final_title,
         order=data.order,
         content=data.content,
         synopsis=data.synopsis,
         word_count=word_count,
     )
     db.add(chapter)
+    db.flush()  # 拿到 id，下面写细纲要用
+
+    # 写入从 bootstrap 拉到的细纲（如果有）
+    if bootstrap_outline_fields:
+        try:
+            outline_row = ChapterOutline(
+                chapter_id=chapter.id,
+                status="completed",
+                **bootstrap_outline_fields,
+            )
+            db.add(outline_row)
+            logger.info(
+                f"[create_chapter] 自动从 bootstrap 写入章节 {chapter.id} 的细纲"
+                f"（title={final_title}, key_content={len(bootstrap_outline_fields['key_content'])}字）"
+            )
+        except Exception as e:
+            logger.warning(f"[create_chapter] 写入 bootstrap 细纲失败: {e}")
+
     db.commit()
     db.refresh(chapter)
     return chapter
@@ -448,5 +509,255 @@ def _async_revise_task(task_id: str, req: ReviseRequest):
             progress_cb=_on_progress,
         )
         return result
+    finally:
+        db.close()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 字数调整 API（独立功能：缩写 or 扩写到目标字数区间）
+# ═══════════════════════════════════════════════════════════════
+
+class WordAdjustRequest(BaseModel):
+    project_id: int
+    chapter_id: int
+    provider: str | None = None
+    # 可选：手动覆盖项目默认的 min~max 区间
+    # 不传时使用项目设置（target_word_count, word_count_min, word_count_max）
+    target_words: int | None = None
+    min_words: int | None = None
+    max_words: int | None = None
+
+
+@pipeline_router.post("/adjust-word-count", response_model=PipelineResponse)
+async def adjust_word_count_endpoint(req: WordAdjustRequest, db: Session = Depends(get_db)):
+    """字数调整：基于目标字数区间（min~max），自动判定缩写还是扩写。
+
+    - 不在区间内 → 调用 LLM 调整
+    - 已在区间内 → 直接返回 success，不调 LLM
+    - 完成后保存到 chapter.content（创建 ChapterVersion 快照）
+    """
+    from api.tasks import submit_llm_task
+    chapter = db.query(Chapter).filter(Chapter.id == req.chapter_id).first()
+    if not chapter:
+        raise HTTPException(status_code=404, detail="章节不存在")
+    if not chapter.content:
+        raise HTTPException(status_code=400, detail="章节没有正文内容，无法调整")
+
+    task = submit_llm_task(
+        task_type="word_adjust",
+        llm_call_fn=_async_word_adjust_task,
+        project_id=req.project_id,
+        description=f"字数调整 [{req.chapter_id}]",
+        req=req,
+    )
+    return PipelineResponse(
+        status="submitted",
+        task_id=task.id,
+        project_id=req.project_id,
+        chapter_id=req.chapter_id,
+    )
+
+
+def _async_word_adjust_task(task_id: str, req: WordAdjustRequest):
+    """异步执行字数调整：先取现状，调 adjust_word_count，保存并打版本快照。"""
+    from storage.database import SessionLocal
+    from storage.models import Chapter, ChapterVersion, Project
+    from llm.chapter_pipeline import adjust_word_count, _count_chinese_chars
+    from api.tasks import get_task
+    import time as _time
+
+    db = SessionLocal()
+    # 在 try 之前声明 task 变量，避免 except 块里"未关联的值"错误
+    task = None
+    try:
+        task = get_task(task_id)
+        if task is not None:
+            task.result = {
+                "stages": {
+                    "1_check": {"id": "1_check", "label": "检查字数", "status": "pending", "duration_ms": None},
+                    "2_adjust": {"id": "2_adjust", "label": "LLM 调整", "status": "pending", "duration_ms": None},
+                    "3_save": {"id": "3_save", "label": "保存入库", "status": "pending", "duration_ms": None},
+                },
+                "current_stage": None,
+                "progress_pct": 0,
+            }
+            task.progress = 5
+
+        def _on_progress(stage_id: str, status: str, info: dict):
+            t = get_task(task_id)
+            if t is None:
+                return
+            r = dict(t.result or {})
+            stages = dict(r.get("stages") or {})
+            entry = dict(stages.get(stage_id) or {"id": stage_id})
+            entry["status"] = status
+            if "duration_ms" in info:
+                entry["duration_ms"] = info["duration_ms"]
+            if "label" in info:
+                entry["label"] = info["label"]
+            if "error" in info:
+                entry["error"] = info["error"]
+            stages[stage_id] = entry
+            r["stages"] = stages
+            r["current_stage"] = stage_id if status == "running" else r.get("current_stage")
+            r["progress_pct"] = info.get("progress_pct", r.get("progress_pct", 0))
+            t.result = r
+            t.progress = max(t.progress or 0, min(95, r["progress_pct"] + 5))
+
+        import time as _time
+        t0 = _time.time()
+
+        # ── Stage 1: 检查字数 ──
+        _on_progress("1_check", "running", {"label": "检查字数", "progress_pct": 10})
+        project = db.query(Project).filter(Project.id == req.project_id).first()
+        if not project:
+            raise ValueError(f"Project {req.project_id} not found")
+        chapter = db.query(Chapter).filter(Chapter.id == req.chapter_id).first()
+        if not chapter or not chapter.content:
+            raise ValueError("章节不存在或无正文")
+
+        # 优先用请求里手动传的 min/max/target，否则用项目默认设置
+        target = req.target_words if req.target_words is not None else (project.target_word_count or 3000)
+        min_w = req.min_words if req.min_words is not None else (project.word_count_min or 2000)
+        max_w = req.max_words if req.max_words is not None else (project.word_count_max or 5000)
+        # 兜底：min 不能大于 max
+        if min_w > max_w:
+            min_w, max_w = max_w, min_w
+        # 兜底：target 必须在区间内
+        if target < min_w or target > max_w:
+            target = (min_w + max_w) // 2
+
+        current_chars = _count_chinese_chars(chapter.content)
+        in_range = min_w <= current_chars <= max_w
+        is_custom = (req.target_words is not None) or (req.min_words is not None) or (req.max_words is not None)
+
+        _on_progress("1_check", "completed", {
+            "label": "检查字数",
+            "duration_ms": (_time.time() - t0) * 1000,
+            "progress_pct": 20,
+        })
+
+        # 已在区间内，无需调整
+        if in_range:
+            logger.info(
+                f"[WordAdjust standalone] ch={req.chapter_id} 当前 {current_chars}字 "
+                f"已在区间 {min_w}~{max_w} 内（{'自定义' if is_custom else '项目默认'}）"
+            )
+            if task is not None:
+                r = dict(task.result or {})
+                r["status"] = "completed"
+                r["skipped"] = True
+                r["current_chars"] = current_chars
+                r["target_chars"] = target
+                r["min_chars"] = min_w
+                r["max_chars"] = max_w
+                r["is_custom_range"] = is_custom
+                r["final_word_count"] = current_chars
+                r["progress_pct"] = 100
+                task.result = r
+                task.progress = 100
+                task.completed_at = _time.time()
+            return {
+                "status": "completed",
+                "skipped": True,
+                "current_chars": current_chars,
+                "target_chars": target,
+                "min_chars": min_w,
+                "max_chars": max_w,
+                "is_custom_range": is_custom,
+            }
+
+        # ── Stage 2: LLM 调整 ──
+        t1 = _time.time()
+        _on_progress("2_adjust", "running", {"label": "LLM 调整中…", "progress_pct": 30})
+        # 从 chapter_outline 取细纲（如果有）作为压缩/扩写的参考
+        from storage.models import ChapterOutline
+        outline_row = db.query(ChapterOutline).filter(ChapterOutline.chapter_id == req.chapter_id).first()
+        outline_for_llm = {}
+        if outline_row:
+            outline_for_llm = {
+                "chapter_position": outline_row.chapter_position or "",
+                "pacing": outline_row.pacing or "平稳",
+                "key_content": outline_row.key_content or "",
+                "plot_advance": outline_row.plot_advance or "",
+            }
+        adjusted = adjust_word_count(
+            chapter.content, target, min_w, max_w, outline_for_llm, req.provider,
+        )
+        new_chars = _count_chinese_chars(adjusted)
+        _on_progress("2_adjust", "completed", {
+            "label": "LLM 调整完成",
+            "duration_ms": (_time.time() - t1) * 1000,
+            "progress_pct": 80,
+        })
+
+        # ── Stage 3: 保存入库 + 版本快照 ──
+        t2 = _time.time()
+        _on_progress("3_save", "running", {"label": "保存入库", "progress_pct": 90})
+        # 备份旧版本（在替换 content 之前）
+        last_ver = (
+            db.query(ChapterVersion)
+            .filter(ChapterVersion.chapter_id == req.chapter_id)
+            .order_by(ChapterVersion.version_num.desc())
+            .first()
+        )
+        next_ver_num = (last_ver.version_num + 1) if last_ver else 1
+        old_version = ChapterVersion(
+            chapter_id=req.chapter_id,
+            content=chapter.content,  # 旧内容（即将被覆盖）
+            version_num=next_ver_num,
+        )
+        db.add(old_version)
+        # 替换为新内容
+        chapter.content = adjusted
+        chapter.word_count = new_chars
+        db.commit()
+        _on_progress("3_save", "completed", {
+            "label": "保存入库",
+            "duration_ms": (_time.time() - t2) * 1000,
+            "progress_pct": 100,
+        })
+
+        if task is not None:
+            r = dict(task.result or {})
+            r["status"] = "completed"
+            r["skipped"] = False
+            r["current_chars"] = current_chars
+            r["new_chars"] = new_chars
+            r["target_chars"] = target
+            r["min_chars"] = min_w
+            r["max_chars"] = max_w
+            r["is_custom_range"] = is_custom
+            r["delta"] = new_chars - current_chars
+            r["version_num"] = next_ver_num
+            r["final_word_count"] = new_chars
+            r["progress_pct"] = 100
+            task.result = r
+            task.progress = 100
+            task.completed_at = _time.time()
+
+        return {
+            "status": "completed",
+            "skipped": False,
+            "current_chars": current_chars,
+            "new_chars": new_chars,
+            "target_chars": target,
+            "min_chars": min_w,
+            "max_chars": max_w,
+            "is_custom_range": is_custom,
+            "delta": new_chars - current_chars,
+            "version_num": next_ver_num,
+        }
+    except Exception as e:
+        logger.error(f"[WordAdjust standalone] failed: {e}", exc_info=True)
+        if task is not None:
+            r = dict(task.result or {})
+            r["status"] = "failed"
+            r["error"] = str(e)
+            r["progress_pct"] = 100
+            task.result = r
+            task.progress = 100
+            task.error = str(e)
+        raise
     finally:
         db.close()

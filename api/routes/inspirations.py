@@ -276,8 +276,8 @@ async def create_project_from_inspiration(
         title=title,
         description=description,
         target_word_count=data.chapter_word_count * 1000,
-        word_count_min=int(data.chapter_word_count * 1000 * 0.7),
-        word_count_max=int(data.chapter_word_count * 1000 * 1.3),
+        word_count_min=int(data.chapter_word_count * 1000 * 0.9),
+        word_count_max=int(data.chapter_word_count * 1000 * 1.1),
         writing_style="平实",
     )
     db.add(project)

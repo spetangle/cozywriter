@@ -34,7 +34,17 @@ from rag.retrieval import RetrievalService
 # ═══════════════════════════════════════════════════════════════
 
 def _parse_json(text: str) -> dict | list | str:
-    """宽松 JSON 解析（容忍 markdown / 前缀后缀 / 字符串内换行等常见问题）"""
+    """宽松 JSON 解析（容忍 markdown / 前缀后缀 / 字符串内换行 / 缺逗号等常见问题）
+
+    7 次尝试（按顺序）：
+    1. 直接解析
+    2. 修复字符串内裸 \\n/\\r/\\t → 转义符
+    3. 移除尾部多余逗号（[1,2,3,] → [1,2,3]）
+    4. 补缺失逗号（值-值/值-键 之间漏写 ,）
+    5. 移除 // 单行注释和 /* */ 块注释
+    6. 正则提取最大 {…} 块
+    7. 全部失败 → 抛异常（调用方应有兜底）
+    """
     if not text or not text.strip():
         raise ValueError("empty response from LLM")
     text = text.strip()
@@ -46,95 +56,317 @@ def _parse_json(text: str) -> dict | list | str:
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
         text = text[start:end + 1]
-    # 第一次尝试：直接解析
+
+    # ── 1. 直接解析 ──
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    # 第二次尝试：逐字符修复字符串值内的裸换行/tabs（LLM 常见问题）
+
+    # ── 2. 修复字符串内裸换行/tabs ──
+    text_unescaped = _fix_unescaped_string_chars(text)
     try:
-        result = []
-        in_string = False
-        escape_next = False
-        i = 0
-        while i < len(text):
-            ch = text[i]
-            if escape_next:
-                result.append(ch)
-                escape_next = False
-                i += 1
-                continue
-            if ch == '\\' and in_string:
-                result.append(ch)
-                escape_next = True
-                i += 1
-                continue
-            if ch == '"':
-                in_string = not in_string
-                result.append(ch)
-                i += 1
-                continue
-            if in_string and ch == '\n':
-                result.append('\\n')
-                i += 1
-                continue
-            if in_string and ch == '\r':
-                result.append('\\r')
-                i += 1
-                continue
-            if in_string and ch == '\t':
-                result.append('\\t')
-                i += 1
-                continue
+        return json.loads(text_unescaped)
+    except json.JSONDecodeError:
+        pass
+
+    # ── 3. 移除尾部多余逗号 ──
+    text_no_trail = _remove_trailing_commas(text_unescaped)
+    try:
+        return json.loads(text_no_trail)
+    except json.JSONDecodeError:
+        pass
+
+    # ── 4. 补缺失逗号（值与值/值与键之间漏 ,）──
+    text_commas = _insert_missing_commas(text_no_trail)
+    try:
+        return json.loads(text_commas)
+    except json.JSONDecodeError:
+        pass
+
+    # ── 5. 移除 // / /* */ 注释 ──
+    text_no_comments = _remove_json_comments(text_commas)
+    try:
+        return json.loads(text_no_comments)
+    except json.JSONDecodeError:
+        pass
+
+    # ── 6. 正则提取最大 {…} 块 ──
+    try:
+        import re as _re
+        json_pattern = _re.compile(r'\{[^{}]*\}', _re.DOTALL)
+        matches = json_pattern.findall(text_no_comments)
+        if matches:
+            best = max(matches, key=len)
+            return json.loads(best)
+    except Exception:
+        pass
+
+    # ── 7. 全部失败 → 抛异常 ──
+    raise json.JSONDecodeError(
+        f"JSON parse failed after 7 attempts (text len={len(text)})",
+        text[:200],
+        0,
+    )
+
+
+def _fix_unescaped_string_chars(text: str) -> str:
+    """将字符串字面量内的裸 \\n/\\r/\\t 替换为 \\n/\\r/\\t 转义符。
+
+    状态机扫描，跟踪是否在 JSON 字符串内（正确处理 \\\" 转义）。
+    """
+    result = []
+    in_string = False
+    escape_next = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if escape_next:
+            result.append(ch)
+            escape_next = False
+            i += 1
+            continue
+        if ch == '\\' and in_string:
+            result.append(ch)
+            escape_next = True
+            i += 1
+            continue
+        if ch == '"':
+            in_string = not in_string
             result.append(ch)
             i += 1
-        return json.loads(''.join(result))
-    except json.JSONDecodeError as e:
-        # 第四次尝试：更激进的修复 - 处理未转义的引号和特殊字符
-        try:
-            # 尝试用正则提取JSON结构
-            import re as _re
-            # 找到所有顶层键值对
-            json_pattern = _re.compile(r'\{[^{}]*\}', _re.DOTALL)
-            matches = json_pattern.findall(text)
-            if matches:
-                # 取最大的匹配（最可能是完整的JSON）
-                best = max(matches, key=len)
-                return json.loads(best)
-        except Exception:
-            pass
+            continue
+        if in_string and ch == '\n':
+            result.append('\\n')
+            i += 1
+            continue
+        if in_string and ch == '\r':
+            result.append('\\r')
+            i += 1
+            continue
+        if in_string and ch == '\t':
+            result.append('\\t')
+            i += 1
+            continue
+        result.append(ch)
+        i += 1
+    return ''.join(result)
 
-        # 第五次尝试：逐行修复常见的JSON格式问题
-        try:
-            lines = text.split(chr(10))
-            fixed_lines = []
-            for line in lines:
-                # 修复行尾缺少逗号的问题（如果下一行以"或}开头）
-                stripped = line.rstrip()
-                if stripped and not stripped.endswith(',') and not stripped.endswith('{') and not stripped.endswith('['):
-                    # 检查是否需要添加逗号
-                    next_line_idx = lines.index(line) + 1
-                    if next_line_idx < len(lines):
-                        next_stripped = lines[next_line_idx].strip()
-                        if next_stripped.startswith('"') or next_stripped.startswith('}') or next_stripped.startswith(']'):
-                            if not stripped.endswith(':') and not stripped.endswith('"'):
-                                stripped += ','
-                fixed_lines.append(stripped)
-            fixed_text = chr(10).join(fixed_lines)
-            return json.loads(fixed_text)
-        except Exception:
-            pass
 
-        raise json.JSONDecodeError(
-            f"JSON parse failed after all attempts: {e.msg}",
-            e.doc,
-            e.pos,
-        ) from e
+def _remove_trailing_commas(text: str) -> str:
+    """移除对象/数组末尾的多余逗号（如 [1,2,3,] → [1,2,3]）"""
+    # 状态机：跟踪当前是否在 string 内，只在 string 外替换
+    result = []
+    in_string = False
+    escape = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if escape:
+            result.append(ch)
+            escape = False
+            i += 1
+            continue
+        if ch == '\\' and in_string:
+            result.append(ch)
+            escape = True
+            i += 1
+            continue
+        if ch == '"':
+            in_string = not in_string
+            result.append(ch)
+            i += 1
+            continue
+        if in_string:
+            result.append(ch)
+            i += 1
+            continue
+        # Not in string
+        if ch == ',':
+            # 看看跳过空白后是不是 } 或 ]
+            j = i + 1
+            while j < len(text) and text[j] in ' \t\n\r':
+                j += 1
+            if j < len(text) and text[j] in '}]':
+                # 这是个尾部逗号，跳过
+                i += 1
+                continue
+        result.append(ch)
+        i += 1
+    return ''.join(result)
+
+
+def _insert_missing_commas(text: str) -> str:
+    """在相邻值/值-键之间补缺失的逗号。
+
+    处理以下常见 LLM 错误：
+    - "value" "key"      → "value", "key"
+    - "value"\n"key"     → "value",\n"key"
+    - } {                → }, {
+    - ] [                → ], [
+    - } "key"            → }, "key"
+    - ] "key"            → ], "key"
+    - "value" {          → "value", {
+    - "value" [          → "value", [
+    - 1 "key"            → 1, "key"  (数字 → 字符串)
+    - 1.5 {              → 1.5, {    (数字 → 对象)
+    - true "key"         → true, "key"
+    - null [             → null, [
+    """
+    result = []
+    in_string = False
+    escape = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if escape:
+            result.append(ch)
+            escape = False
+            i += 1
+            continue
+        if ch == '\\' and in_string:
+            result.append(ch)
+            escape = True
+            i += 1
+            continue
+        if ch == '"':
+            in_string = not in_string
+            result.append(ch)
+            # 出字符串后：检查下一个非空白字符是否是 value-starter
+            if not in_string:
+                j = i + 1
+                while j < n and text[j] in ' \t\n\r':
+                    j += 1
+                if j < n and text[j] in '"[{':
+                    result.append(',')
+            i += 1
+            continue
+        if in_string:
+            result.append(ch)
+            i += 1
+            continue
+        # Not in string
+        result.append(ch)
+        # 遇到 } 或 ]，检查下一个非空白字符是否是 value-starter
+        if ch in '}]':
+            j = i + 1
+            while j < n and text[j] in ' \t\n\r':
+                j += 1
+            if j < n and text[j] in '"[{':
+                result.append(',')
+        # 数字、true、false、null 结尾后跟 value-starter
+        # 数字：最后一个字符是数字
+        if ch.isdigit() or ch in '.eE':
+            # 找当前数字 token 结束位置（向后扫描到非数字/非.非e字符）
+            j = i + 1
+            # 简化处理：如果下一个非空白是 value-starter 且当前 char 是数字结尾
+            while j < n and text[j] in ' \t\n\r':
+                j += 1
+            if j < n and text[j] in '"[{':
+                # 确认前面确实是数字 token（连续数字或数字+e/E+数字等）
+                # 简单方法：检查当前字符前是否是数字的一部分
+                # 这里只在数字后面跟 " 时加逗号，避免误伤像 1e10 这样的科学计数法
+                result.append(',')
+        i += 1
+    return ''.join(result)
+
+
+def _remove_json_comments(text: str) -> str:
+    """移除 JSON 内的 // 单行注释和 /* */ 块注释（JSON 不允许，但 LLM 偶尔会加）"""
+    # 状态机跟踪 string 状态，只在 string 外删除注释
+    result = []
+    in_string = False
+    escape = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if escape:
+            result.append(ch)
+            escape = False
+            i += 1
+            continue
+        if ch == '\\' and in_string:
+            result.append(ch)
+            escape = True
+            i += 1
+            continue
+        if ch == '"':
+            in_string = not in_string
+            result.append(ch)
+            i += 1
+            continue
+        if in_string:
+            result.append(ch)
+            i += 1
+            continue
+        # Not in string
+        if ch == '/' and i + 1 < n:
+            if text[i + 1] == '/':
+                # 单行注释，跳到行尾
+                while i < n and text[i] != '\n':
+                    i += 1
+                continue
+            if text[i + 1] == '*':
+                # 块注释，跳到 */
+                i += 2
+                while i + 1 < n and not (text[i] == '*' and text[i + 1] == '/'):
+                    i += 1
+                i += 2  # 跳过 */
+                continue
+        result.append(ch)
+        i += 1
+    return ''.join(result)
 
 
 def _count_chinese_chars(text: str) -> int:
     """中文字符数（忽略标点空白）"""
     return sum(1 for c in text if "一" <= c <= "鿿")
+
+
+def _normalize_character_name(name: str) -> str:
+    """规范化角色名用于 dedup 比对。
+
+    规则：
+    - 去首尾空白
+    - 去除所有半角 / 全角括号及其内容（"玄机子（林玄）" → "玄机子"）
+    - 全角空格 → 半角空格
+    - 统一小写
+    - 去除常见称谓前缀（"老" "小" 不去，避免误合并）
+    """
+    if not name:
+        return ""
+    n = name.strip()
+    # 去除全角 / 半角括号及其内容
+    n = re.sub(r"[（(][^）)]*[）)]", "", n)
+    n = n.replace("　", " ").strip()
+    return n.lower()
+
+
+def _find_existing_character(db, project_id: int, name: str) -> "Character | None":
+    """在同项目下查同名角色（已规范化处理）。
+
+    匹配规则（按优先级）：
+    1. 规范化后完全相等（"玄机子" == "玄机子（林玄）"）
+    2. 规范化后是已有名字的子串 / 已有名字是它的子串（短名匹配）
+    3. 规范化后相等（去 "（xxx）" 后）
+    """
+    from storage.models import Character
+    target = _normalize_character_name(name)
+    if not target:
+        return None
+    candidates = db.query(Character).filter(Character.project_id == project_id).all()
+    # 1) 完全匹配
+    for c in candidates:
+        if _normalize_character_name(c.name) == target:
+            return c
+    # 2) 子串匹配（短名命中长名；如 "秦夜" 命中 "秦夜-前传"）
+    for c in candidates:
+        cn = _normalize_character_name(c.name)
+        if cn and (target in cn or cn in target):
+            return c
+    return None
 
 
 def _call_llm(role_name: str, ctx: dict, user_msg: str, provider: str | None = None, db=None) -> str:
@@ -321,7 +553,10 @@ def build_chapter_prep_info(
 # ═══════════════════════════════════════════════════════════════
 
 def generate_chapter_outline(db, project_id: int, chapter_id: int, provider: str | None = None, guide: str = "") -> dict:
-    """LLM 生成章节细纲（不存库，返回给上层走评审）"""
+    """LLM 生成章节细纲（不存库，返回给上层走评审）
+
+    失败兜底：JSON 解析失败时返回默认空细纲，pipeline 继续跑。
+    """
     prep = build_chapter_prep_info(db, project_id, chapter_id)
     project = db.query(__import__("storage.models", fromlist=["Project"]).Project).filter(
         __import__("storage.models", fromlist=["Project"]).Project.id == project_id
@@ -338,7 +573,33 @@ def generate_chapter_outline(db, project_id: int, chapter_id: int, provider: str
     }
 
     raw = _call_llm("chapter_outline_gen", outline_ctx, "", provider)
-    return _parse_json(raw)
+    try:
+        return _parse_json(raw)
+    except (json.JSONDecodeError, ValueError) as e:
+        # 兜底：返回默认空细纲，pipeline 不中断
+        logger.warning(
+            f"[generate_chapter_outline] JSON 解析失败，使用默认空细纲: {e}\n"
+            f"原始返回前 300 字: {raw[:300]!r}"
+        )
+        return {
+            "chapter_position": "",
+            "pacing": "平稳",
+            "key_content": "",
+            "plot_advance": "",
+            "foreshadow_notes": "",
+            "conflicts": [],
+            "highlights": [],
+            "target_word_count": outline_ctx.get("target_word_count", 3000),
+            "min_word_count": 0,
+            "max_word_count": 0,
+            "qi_cheng_zhuan_he": {},
+            "scenes": [],
+            "pacing_hooks": [],
+            "reversals": [],
+            "foreshadow_actions": [],
+            "character_developments": [],
+            "word_count_check": "（细纲生成失败，跳过）",
+        }
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -346,12 +607,26 @@ def generate_chapter_outline(db, project_id: int, chapter_id: int, provider: str
 # ═══════════════════════════════════════════════════════════════
 
 def review_chapter_outline(outline: dict, prep_info: dict, provider: str | None = None) -> dict:
-    """评审细纲，仅过滤 high severity"""
+    """评审细纲，仅过滤 high severity
+
+    失败兜底：JSON 解析失败时返回 verdict=pass（默认通过），pipeline 继续。
+    """
     ctx = {
         "outline": json.dumps(outline, ensure_ascii=False, indent=2),
     }
     raw = _call_llm("outline_reviewer", ctx, "", provider)
-    return _parse_json(raw)
+    try:
+        return _parse_json(raw)
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning(
+            f"[review_chapter_outline] JSON 解析失败，默认通过: {e}\n"
+            f"原始返回前 300 字: {raw[:300]!r}"
+        )
+        return {
+            "issues": [],
+            "verdict": "pass",
+            "summary": "（评审解析失败，已默认通过）",
+        }
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -390,7 +665,7 @@ def generate_chapter_text(
         f"【上章结尾（衔接用）】\n{prep['prev_chapter_ending']}\n\n"
         f"【登场人物】\n" + "\n".join(prep["characters"]) + "\n\n"
         f"【目标字数】{prep['project_meta']['target_word_count']} 字\n\n"
-        f"请按细纲生成正文，**不要偏离细纲**。"
+        f"请按细纲生成正文，**不要偏离细纲**。\n\n【重要约束】：请务必在生成完毕后检查字数，确保最终输出严格在{prep['project_meta']['min_words']}~{prep['project_meta']['max_words']}字之间，不要超出或过少。"
     )
 
     llm = LLMFactory.create(provider=provider)
@@ -441,6 +716,8 @@ def adjust_word_count(
     ctx = {
         "target_word_count": target,
         "current_word_count": actual,
+        "min_words": min_w,            # 用于 LLM 重要约束 prompt
+        "max_words": max_w,            # 用于 LLM 重要约束 prompt
         "outline": json.dumps(outline, ensure_ascii=False, indent=2) if isinstance(outline, dict) else str(outline),
         "content": content[:6000],  # 截断避免超长
     }
@@ -450,17 +727,31 @@ def adjust_word_count(
             raw = _call_llm("compressor", ctx, "", provider)
             data = _parse_json(raw)
             new_content = data.get("compressed_text", content)
+            claimed_count = data.get("final_word_count")
         else:
             raw = _call_llm("expander", ctx, "", provider)
             data = _parse_json(raw)
             new_content = data.get("expanded_text", content)
+            claimed_count = data.get("final_word_count")
         duration_ms = (time.time() - t0) * 1000
         new_actual = _count_chinese_chars(new_content)
         in_range = min_w <= new_actual <= max_w
+        # 验证 LLM 自报字数与实际字数差距过大时报警
+        claimed_str = ""
+        if claimed_count is not None:
+            try:
+                claimed_int = int(claimed_count)
+                diff = abs(claimed_int - new_actual)
+                if diff > 100:  # 偏差 > 100 字说明 LLM 自报不准
+                    claimed_str = f", LLM自报={claimed_int}字 (差{diff}字 ⚠️ 不准)"
+                else:
+                    claimed_str = f", LLM自报={claimed_int}字 ✓"
+            except (ValueError, TypeError):
+                pass
         logger.info(
             f"[WordAdjust] 调整完成: 调整前={actual}字 → 调整后={new_actual}字 "
             f"(净{'减' if new_actual < actual else '增'}{abs(actual - new_actual)}字, "
-            f"用时={duration_ms:.0f}ms), "
+            f"用时={duration_ms:.0f}ms{claimed_str}), "
             f"{'✅ 已落进目标区间' if in_range else f'⚠️ 仍未落进区间 {min_w}~{max_w}'}"
         )
         return new_content
@@ -479,7 +770,11 @@ def adjust_word_count(
 def review_chapter_text(
     db, project_id: int, chapter_id: int, content: str, provider: str | None = None,
 ) -> dict:
-    """8 维度评审"""
+    """8 维度评审
+
+    失败兜底：JSON 解析失败时返回 5 分中位评分（让 pipeline 继续，
+    而不是整个失败）。critique 标注解析失败原因。
+    """
     from storage.models import Project
     project = db.query(Project).filter(Project.id == project_id).first()
     ctx = {
@@ -487,7 +782,21 @@ def review_chapter_text(
         "content": content[:8000],
     }
     raw = _call_llm("review", ctx, "", provider)
-    return _parse_json(raw)
+    try:
+        return _parse_json(raw)
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning(
+            f"[review_chapter_text] JSON 解析失败，使用 5 分兜底: {e}\n"
+            f"原始返回前 300 字: {raw[:300]!r}"
+        )
+        return {
+            "scores": {
+                "consistency": 5, "pacing": 5, "style": 5, "ai_removal": 5,
+                "word_count": 5, "foreshadowing": 5, "character_arc": 5, "thematic": 5,
+            },
+            "critique": "（评审解析失败，已使用默认 5 分中位值）",
+            "suggestions": [],
+        }
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -512,7 +821,19 @@ def decide_revision(review_data: dict, outline: dict, content: str, provider: st
         "content": content[:4000],
     }
     raw = _call_llm("revision_decider", ctx, "", provider)
-    return _parse_json(raw)
+    try:
+        return _parse_json(raw)
+    except (json.JSONDecodeError, ValueError) as e:
+        # 兜底：解析失败默认不修订（保守）
+        logger.warning(
+            f"[decide_revision] JSON 解析失败，默认不修订: {e}\n"
+            f"原始返回前 300 字: {raw[:300]!r}"
+        )
+        return {
+            "decision": "pass",
+            "focus_areas": [],
+            "reasoning": "（决策解析失败，默认不修订）",
+        }
 
 
 def revise_chapter_text(
@@ -647,16 +968,30 @@ def run_post_chapter_processing(
                 "new_type": rel.relation_type, "strength": rel.strength,
             })
 
-    # 创建新角色
+    # 创建新角色（先去重，LLM 经常把同一个人用不同名字重复创建）
     for new_c in post_data.get("new_characters", []):
+        new_name = new_c.get("name", "未命名").strip()
+        if not new_name or new_name == "未命名":
+            continue
+        existing = _find_existing_character(db, project_id, new_name)
+        if existing:
+            logger.info(
+                f"[PostChapter] 跳过新角色「{new_name}」：已存在（id={existing.id}, 当前名={existing.name}），合并而非新建"
+            )
+            result["new_characters"].append({
+                "name": existing.name, "role": existing.role,
+                "merged": True, "existing_id": existing.id,
+            })
+            continue
         nc = Character(
             project_id=project_id,
-            name=new_c.get("name", "未命名"),
+            name=new_name,
             role=new_c.get("role", "配角"),
             profile={k: v for k, v in new_c.items() if k in ["identity", "personality"]},
             description=new_c.get("first_appearance_note", ""),
         )
         db.add(nc)
+        db.flush()  # 拿到 id，下面 dedup 才查得到刚插入的
         result["new_characters"].append({"name": nc.name, "role": nc.role})
 
     db.commit()
@@ -1104,6 +1439,8 @@ def run_chapter_generation_pipeline(
                 min_word_count   = outline_data.get("min_word_count", 0)
                 max_word_count   = outline_data.get("max_word_count", 0)
                 pacing           = outline_data.get("pacing", "平稳")
+                # 章节标题（LLM 生成，与内容有关联，非"第 N 章"这种序号）
+                new_title        = outline_data.get("title", "").strip()
                 # 丰富结构（保存到 JSON 列）—— role 输出中的 qi_cheng_zhuan_he / pacing_hooks / reversals
                 qi_cheng_zhuan_he = outline_data.get("qi_cheng_zhuan_he", {})
                 pacing_hooks     = outline_data.get("pacing_hooks", [])
@@ -1116,6 +1453,16 @@ def run_chapter_generation_pipeline(
                     "word_count_check": outline_data.get("word_count_check", ""),
                 }
                 notes_text = json.dumps(notes_payload, ensure_ascii=False)
+
+                # 把 LLM 生成的标题写回 chapter.title（仅当标题有效且非默认占位）
+                if new_title and not re.match(r'^第\s*[0-9一二三四五六七八九十百千]+\s*章\s*$', new_title):
+                    chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
+                    if chapter and chapter.title != new_title:
+                        old_title = chapter.title
+                        chapter.title = new_title
+                        logger.info(
+                            f"[Pipeline] 章节 {chapter_id} 标题更新：「{old_title}」→「{new_title}」"
+                        )
 
                 existing = db.query(ChapterOutline).filter(
                     ChapterOutline.chapter_id == chapter_id

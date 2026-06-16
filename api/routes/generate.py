@@ -95,7 +95,7 @@ def _do_generate(
         "foreshadowings": context.get("foreshadowings_context", ""),
         "chapters": context.get("chapters_context", ""),
         "target_word_count": project.target_word_count or 3000,
-        "word_count_range": f"{project.word_count_min or 2000}～{project.word_count_max or 5000}",
+        "word_count_range": f"{project.word_count_min or 2700}～{project.word_count_max or 3300}",
     }
 
     system_prompt = role.build_system(ctx)

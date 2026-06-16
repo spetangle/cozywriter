@@ -2636,7 +2636,7 @@ color: #92400e;
 .writing-tabs {
   display: flex;
   gap: 0;
-  border: 1px solid var(--border);
+  border: 0px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
 }
@@ -2647,11 +2647,11 @@ color: #92400e;
   background: var(--surface);
   color: var(--text-muted);
   cursor: pointer;
-  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   transition: all 0.15s;
 }
 .writing-tabs button:last-child {
-  border-right: none;
+  
 }
 .writing-tabs button:hover {
   background: var(--bg);
@@ -2797,6 +2797,7 @@ color: #92400e;
   box-shadow:0 8px 30px rgba(0,0,0,0.15);
   z-index:9999;
   border:1px solid var(--border);
+  font-size: 12px;
 }
 
 /* ═══ 起承转合四阶段结构（写作面板 - 细纲标签）═══ */

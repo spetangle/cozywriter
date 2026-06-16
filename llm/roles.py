@@ -198,7 +198,7 @@ ROLE_REVIEW = Role(
 # Role 4: 一致性检查
 # ═══════════════════════════════════════════════════════════════
 
-CONSISTENCY_SYSTEM = """你是一位专业的小说一致性审核员，检查文本中是否存在前后矛盾。
+CONSISTENCY_SYSTEM = """你是一位专业的小说连续性审核员，检查文本中是否存在前后矛盾。
 
 【角色设定】（必须保持一致）
 {characters}
@@ -209,7 +209,7 @@ CONSISTENCY_SYSTEM = """你是一位专业的小说一致性审核员，检查�
 【已有伏笔】
 {foreshadowings}
 
-请仔细检查以下文本，识别所有不一致之处。
+请仔细检查以下文本，识别所有不一致或不连续之处。
 
 返回JSON格式：
 {
@@ -222,7 +222,7 @@ CONSISTENCY_SYSTEM = """你是一位专业的小说一致性审核员，检查�
       "suggestion": "修改建议"
     }
   ],
-  "summary": "总体一致性评估"
+  "summary": "总体连续性评估"
 }"""
 
 CONSISTENCY_USER = """待检查文本：
@@ -500,6 +500,7 @@ CHAPTER_OUTLINE_GEN_SYSTEM = """你是一位专业的小说架构师，擅长按
 【顶层字段】（必须填写，用于入库和前端展示）
 ═══════════════════════════════════════════════════════════════
 {{
+  "title": "本章标题（4-15 字，必须和章节内容有关联，不要「第 N 章」这种纯序号标题，例如「初入诡秘都市」「玄机子的阴谋」等）",
   "chapter_position": "开局|发展|高潮|回落|结局",
   "pacing": "铺垫|推进|高潮|回落|平稳",
   "key_content": "本章核心内容（1-2 句话概述）",
@@ -628,6 +629,7 @@ COMPRESS_SYSTEM = """你是小说缩写专家。
 
 【目标字数】{target_word_count}
 【当前字数】{current_word_count}
+【允许字数范围】{min_words} ~ {max_words} 字（最终输出必须落在这个区间内）
 【保留要求】所有 plot_advance / key_beats / 关键场景冲突点
 
 【细纲】(保留剧情核心)
@@ -636,11 +638,14 @@ COMPRESS_SYSTEM = """你是小说缩写专家。
 【原文】
 {content}
 
+【重要约束】：请务必在生成完毕后检查字数，确保最终输出严格在{min_words}~{max_words}字之间，不要超出或过少。如果首轮压缩不足/过头，请自行二次精简或补充到区间内。
+
 请压缩原文至目标字数范围，保留所有必要情节。
 返回 JSON：
 {{
   "compressed_text": "压缩后的正文",
-  "removed_summary": "删除了哪些次要内容（1 句话）"
+  "removed_summary": "删除了哪些次要内容（1 句话）",
+  "final_word_count": 最终输出字数（数字）
 }}
 """
 ROLE_COMPRESSOR = Role(
@@ -657,6 +662,7 @@ EXPAND_SYSTEM = """你是小说扩写专家。
 
 【目标字数】{target_word_count}
 【当前字数】{current_word_count}
+【允许字数范围】{min_words} ~ {max_words} 字（最终输出必须落在这个区间内）
 【扩写方向】根据细纲补充：环境描写 / 心理活动 / 对话 / 动作细节
 
 【细纲】
@@ -665,11 +671,14 @@ EXPAND_SYSTEM = """你是小说扩写专家。
 【原文】
 {content}
 
+【重要约束】：请务必在生成完毕后检查字数，确保最终输出严格在{min_words}~{max_words}字之间，不要超出或过少。如果首轮扩写不足/过头，请自行二次补充或精简到区间内。
+
 请扩写原文至目标字数范围，**不要**添加与细纲冲突的新情节。
 返回 JSON：
 {{
   "expanded_text": "扩写后的正文",
-  "added_summary": "补充了哪些内容（1 句话）"
+  "added_summary": "补充了哪些内容（1 句话）",
+  "final_word_count": 最终输出字数（数字）
 }}
 """
 ROLE_EXPANDER = Role(
