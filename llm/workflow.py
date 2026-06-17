@@ -765,48 +765,78 @@ def _run_single_stage(stage_id: str, locked: dict, user_filled: dict,
     return _parse_json(response)
 
 
+# 单次 LLM 请求生成 chapter_outlines 的最大章数（防止 prompt/output 超长）
+# 100 章 × ~200 chars ≈ 20K chars 输出,16384 tokens 足够
+MAX_CHAPTERS_PER_BATCH = 100
+
+
 def _continue_chapter_outlines_if_needed(
     first_result: dict,
     locked: dict,
     user_filled: dict,
     prev_outputs: dict,
     db,
-    max_loops: int = 5,
+    max_loops: int = 10,
+    target_total: int | None = None,
+    mode: str = "auto",
 ) -> dict:
-    """stage_4a_outline 续生成:LLM 一次调用常被 max_tokens 截断(30 章/批),
-    自动检测 chapter_outlines 缺口,循环续写直到覆盖 total_chapters。
+    """stage_4a_outline / stage_4a_chapter_outlines 续生成:循环续写直到覆盖 target_total。
 
-    续写时把已有 chapter_outlines + volumes/plot_lines/structure 作为上下文喂回去,
-    让 LLM 接着写第 N+1 章到 total_chapters。
+    支持两种模式:
+      - auto:     bootstrap 自动续写(首生成,默认从第 1 章起)
+      - extend:   用户触发的"扩写"模式,只补 [已有章数+1, target_total] 区间
+
+    关键约束(extend 模式):
+      - 不修改已有章节(只 append 新章)
+      - 单次请求 max 100 章(batch_size 动态调整)
+      - 动态 max_tokens: batch_size × 250 chars ≈ 600-800 tokens / 100 章 ≈ 16K
 
     Args:
-        first_result: 第一次 LLM 调用的完整结果(含 volumes/plot_lines/structure/chapter_outlines)
+        first_result: 第一次 LLM 调用的完整结果
         locked, user_filled, prev_outputs: 与 _run_single_stage 同样的入参
         db: SQLAlchemy Session
-        max_loops: 最多续写几次(防失控),默认 5
+        max_loops: 最多续写几次(防失控),默认 10
+        target_total: 目标总章数(默认从 locked["total_chapters"] 取)
+        mode: "auto" 或 "extend"
     Returns:
-        合并后的 result(dict),chapter_outlines 数量应覆盖 total_chapters
+        合并后的 result(dict),chapter_outlines 数量应覆盖 target_total
     """
-    total = int(locked.get("total_chapters") or 0)
+    total = int(target_total or locked.get("total_chapters") or 0)
     if not total or total <= 0:
-        return first_result  # 老项目没锁定 total_chapters,跳过
+        return first_result
     chapter_outlines = list(first_result.get("chapter_outlines") or [])
-    existing_nums = {int(c.get("chapter_num", 0)) for c in chapter_outlines if c.get("chapter_num")}
-    missing_nums = sorted(set(range(1, total + 1)) - existing_nums)
-    if not missing_nums:
-        return first_result  # 已完整
 
-    # 缺口超过 5 章才续写（容忍少数漏写）
-    if len(missing_nums) < 5:
+    # extend 模式:已有章节不动,只算"新增"
+    if mode == "extend":
+        existing_nums = {int(c.get("chapter_num", 0)) for c in chapter_outlines if c.get("chapter_num")}
+        if not existing_nums:
+            # 没有任何已有章,从 1 开始
+            missing_nums = list(range(1, total + 1))
+        else:
+            max_existing = max(existing_nums)
+            # 已有 max_existing 章,要扩到 total 章,缺 [max_existing+1, total]
+            missing_nums = list(range(max_existing + 1, total + 1))
+    else:
+        # auto 模式:覆盖 1~total
+        existing_nums = {int(c.get("chapter_num", 0)) for c in chapter_outlines if c.get("chapter_num")}
+        missing_nums = sorted(set(range(1, total + 1)) - existing_nums)
+
+    if not missing_nums:
         logger.info(
-            f"[stage_4a_outline] chapter_outlines 缺口 {len(missing_nums)} 章 (<5),"
-            f"不续写; 缺失: {missing_nums[:10]}"
+            f"[stage_4a_outline] chapter_outlines 已完整(目标 {total} 章,模式 {mode})"
+        )
+        return first_result
+
+    # 缺口 < 5 章不续写(容忍 LLM 偶发漏写 1-2 章)
+    if len(missing_nums) < 5 and mode == "auto":
+        logger.info(
+            f"[stage_4a_outline] chapter_outlines 缺口 {len(missing_nums)} 章 (<5),不续写"
         )
         return first_result
 
     logger.info(
-        f"[stage_4a_outline] chapter_outlines 不完整:已有 {len(chapter_outlines)}/{total} 章,"
-        f"开始续写缺失的 {len(missing_nums)} 章(共 {len(missing_nums)} 章,最多 {max_loops} 轮)"
+        f"[stage_4a_outline] chapter_outlines 续写(模式={mode}):"
+        f"已有 {len(chapter_outlines)}/{total} 章,缺 {len(missing_nums)} 章(最多 {max_loops} 轮)"
     )
 
     # 续写时把上下文压成简短摘要(避免 prompt 超长)
@@ -827,20 +857,23 @@ def _continue_chapter_outlines_if_needed(
     for loop_idx in range(max_loops):
         if not missing_nums:
             break
-        # 取本轮要补的章号范围
-        batch_size = 30  # 每轮 30 章
+        # 动态 batch_size: 缺口 ≤ 100 章则一次补完,否则按 100/批
+        batch_size = min(len(missing_nums), MAX_CHAPTERS_PER_BATCH)
         batch_nums = missing_nums[:batch_size]
         batch_start = batch_nums[0]
         batch_end = batch_nums[-1]
+        # 动态 max_tokens: 每章 ~250 chars ≈ ~625 tokens,留 buffer
+        # 100 章 ≈ 16K tokens
+        dynamic_max_tokens = max(4096, min(32768, batch_size * 250 + 4096))
         logger.info(
             f"[stage_4a_outline] 续写第 {loop_idx+1}/{max_loops} 轮:"
-            f"补第 {batch_start}-{batch_end} 章(共 {len(batch_nums)} 章)"
+            f"补第 {batch_start}-{batch_end} 章(共 {len(batch_nums)} 章, max_tokens={dynamic_max_tokens})"
         )
 
         # 续写 prompt
         continue_system = (
             "你正在为一部长篇小说续写缺失的章节大纲。\n"
-            f"小说总章节数:{total}。需要补全第 {batch_start} 章到第 {batch_end} 章。\n"
+            f"小说总章节数:{total}。本轮需要补全第 {batch_start} 章到第 {batch_end} 章(共 {batch_nums[-1] - batch_nums[0] + 1} 章)。\n"
             "\n"
             "【已有上下文摘要】\n"
             f"{context_str}\n"
@@ -853,6 +886,7 @@ def _continue_chapter_outlines_if_needed(
             "5. 同一人物/场景/物品的关键事件只能出现 1 次\n"
             "6. 标题不要「第 N 章」纯序号,要 4-15 字相关标题\n"
             "7. 保持与已有章节的 volume_num 分配一致\n"
+            "8. 续写时充分考虑衔接性(已发生事件的延续),不要突兀\n"
             "\n"
             "返回 JSON 格式:\n"
             '{"chapter_outlines": [...]}'
@@ -868,7 +902,7 @@ def _continue_chapter_outlines_if_needed(
             response = llm.generate(
                 prompt=user_prompt,
                 system_prompt=continue_system,
-                max_tokens=8192,  # 续写单轮 30 章够用
+                max_tokens=dynamic_max_tokens,  # 动态调整
                 temperature=0.6,
                 task_type=f"stage_4a_outline_continue_{loop_idx}",
             )
@@ -879,9 +913,22 @@ def _continue_chapter_outlines_if_needed(
                     f"[stage_4a_outline] 续写第 {loop_idx+1} 轮 LLM 没返回 chapter_outlines,停止续写"
                 )
                 break
+            # extend 模式:严格只 append 新章(章节号 > 已有最大),防止 LLM 改写老章
+            if mode == "extend" and chapter_outlines:
+                existing_max = max(
+                    int(c.get("chapter_num", 0)) for c in chapter_outlines
+                )
+                new_outlines = [
+                    c for c in new_outlines
+                    if int(c.get("chapter_num", 0)) > existing_max
+                ]
             chapter_outlines.extend(new_outlines)
             existing_nums = {int(c.get("chapter_num", 0)) for c in chapter_outlines if c.get("chapter_num")}
             missing_nums = sorted(set(range(1, total + 1)) - existing_nums)
+            if mode == "extend" and chapter_outlines:
+                # extend 模式:missing_nums 只在已有 max 之上
+                existing_max = max(int(c.get("chapter_num", 0)) for c in chapter_outlines)
+                missing_nums = [n for n in missing_nums if n > existing_max]
             # 同步更新 context_summary 的最后 10 章(给下一轮用)
             context_summary["existing_chapter_titles"] = [
                 f"第{c.get('chapter_num')}章《{c.get('title', '?')}》: {c.get('key_content', '')}"
@@ -909,7 +956,235 @@ def _continue_chapter_outlines_if_needed(
     return first_result
 
 
-def _parse_json(text: str) -> dict:
+def extend_outline_chapters(
+    project_id: int,
+    target_total: int,
+    db,
+    extend_architecture: bool = True,
+) -> dict:
+    """大纲扩展(续写型):在已有 chapter_outlines 基础上扩展到 target_total 章。
+
+    与"首生成扩展"(auto 模式续写)的区别:
+      - auto: bootstrap 期间,从 1~total 完整生成;total 超过单次上限时分批
+      - extend: 用户已有完整 1~N 章,要把 N 扩到 target_total
+
+    步骤:
+      1. 读现有 ProjectOutline + chapter_outlines
+      2. 算缺 [max_existing+1, target_total] 区间
+      3. (可选) 扩 volumes/plot_lines/structure:把新章范围(从 max_existing+1 到 target_total)
+         拆给 LLM 让它续写项目架构的扩展部分
+      4. 续写 chapter_outlines 的缺口(沿用 _continue_chapter_outlines_if_needed)
+      5. 持久化(不修改已有 1~max_existing 任何字段)
+
+    Args:
+        project_id: 项目 ID
+        target_total: 目标总章节数(必须 > 当前已有)
+        db: SQLAlchemy Session
+        extend_architecture: 是否扩 volumes/plot_lines/structure(默认 True,扩卷)
+
+    Returns:
+        {
+            "status": "ok" | "failed",
+            "old_total": N,
+            "new_total": target_total,
+            "added_chapters": K,
+            "added_volumes": [...],  # 新增的卷
+            "error": "...",
+        }
+    """
+    from storage.models import ProjectOutline
+    from storage.models.workflow import WorkflowRun
+    from llm.factory import LLMFactory
+    import json as _json
+
+    if target_total <= 0:
+        return {"status": "failed", "error": f"target_total 必须 > 0 (got {target_total})"}
+
+    proj = db.query(ProjectOutline).filter(ProjectOutline.project_id == project_id).first()
+    if not proj:
+        return {"status": "failed", "error": f"项目 {project_id} 没有 ProjectOutline"}
+
+    existing_chapter_outlines = list(proj.chapter_outlines or [])
+    if not existing_chapter_outlines:
+        return {
+            "status": "failed",
+            "error": f"项目 {project_id} 没有现成的 chapter_outlines,"
+                     f"请先完成初始大纲生成"
+        }
+
+    existing_nums = [
+        int(c.get("chapter_num", 0))
+        for c in existing_chapter_outlines
+        if c.get("chapter_num")
+    ]
+    if not existing_nums:
+        return {"status": "failed", "error": "现有 chapter_outlines 缺少 chapter_num"}
+    existing_max = max(existing_nums)
+    old_total = existing_max
+
+    if target_total <= existing_max:
+        return {
+            "status": "failed",
+            "error": f"target_total ({target_total}) 必须 > 已有最大章号 ({existing_max})",
+        }
+
+    missing_nums = list(range(existing_max + 1, target_total + 1))
+    added_count = len(missing_nums)
+    logger.info(
+        f"[extend_outline] project={project_id}: 已有 {old_total} 章 → 目标 {target_total} 章,"
+        f"新增 {added_count} 章"
+    )
+
+    # 准备扩展上下文(供 LLM 续写参考)
+    context_summary = {
+        "volumes": list(proj.volumes or []),
+        "plot_lines": [pl.get("title", "") for pl in (proj.plot_lines or [])],
+        "structure": dict(proj.structure or {}),
+        "pacing_notes": proj.pacing_notes or "",
+        "outline_text": (proj.outline_text or "")[:500],
+        "existing_chapter_titles": [
+            f"第{c.get('chapter_num')}章《{c.get('title', '?')}》: {c.get('key_content', '')}"
+            for c in existing_chapter_outlines[-10:]
+        ],
+        "extend_range": f"第{existing_max+1}章 - 第{target_total}章(共 {added_count} 章)",
+    }
+    context_str = _json.dumps(context_summary, ensure_ascii=False, indent=1)
+
+    # Step 1: (可选) 扩架构层 — 生成新的 volumes / plot_lines / structure 扩展段
+    new_volumes = []
+    new_plot_lines = []
+    new_structure_acts = []
+    if extend_architecture:
+        try:
+            extend_arch_prompt = (
+                "你正在为一部已完成的小说扩写架构层(把故事从 N 章扩展到 target_total 章)。\n"
+                f"当前已有 {old_total} 章,目标 {target_total} 章,扩展区间:第 {existing_max+1} - {target_total} 章。\n"
+                "\n"
+                "【已有架构(不要修改)】\n"
+                f"{context_str}\n"
+                "\n"
+                "【扩写要求】\n"
+                "1. 只输出扩展区间(第 existing_max+1 - target_total 章)的架构内容\n"
+                "2. volumes: 追加 1-2 个新卷(覆盖扩展区间),每卷给 title/from_chapter/to_chapter/summary/core_event\n"
+                "3. plot_lines: 追加剧情线(可复用已有或新增),给 title/from_chapter/to_chapter/description\n"
+                "4. structure.acts: 追加幕(可扩展第二/三/四幕以覆盖新章)\n"
+                "5. 充分延续已有架构(风格、主题保持一致),不能矛盾\n"
+                "6. reversal_schedule 和 climax_map 可选(暂不输出)\n"
+                "\n"
+                "返回 JSON 格式:\n"
+                "{\n"
+                '  "volumes": [...], // 仅新卷\n'
+                '  "plot_lines": [...], // 仅新剧情线\n'
+                '  "structure": {"acts": [...]} // 追加的幕\n'
+                "}"
+            )
+            user_prompt = f"扩写架构,扩展区间:第 {existing_max+1} - {target_total} 章。"
+            llm = LLMFactory.create(db=db)
+            response = llm.generate(
+                prompt=user_prompt,
+                system_prompt=extend_arch_prompt,
+                max_tokens=4096,
+                temperature=0.6,
+                task_type="extend_outline_architecture",
+            )
+            parsed = _parse_json(response)
+            if isinstance(parsed, dict):
+                new_volumes = list(parsed.get("volumes", []) or [])
+                new_plot_lines = list(parsed.get("plot_lines", []) or [])
+                struct = parsed.get("structure", {}) or {}
+                new_structure_acts = list(struct.get("acts", []) or [])
+                logger.info(
+                    f"[extend_outline] 架构扩写:新增 volumes={len(new_volumes)},"
+                    f"plot_lines={len(new_plot_lines)}, acts={len(new_structure_acts)}"
+                )
+        except Exception as e:
+            logger.error(f"[extend_outline] 架构扩写失败: {e}")
+
+    # Step 2: 续写 chapter_outlines(沿用 _continue_chapter_outlines_if_needed)
+    # 包装成 first_result 格式,让 _continue_* 能识别
+    first_result = {
+        "volumes": list(proj.volumes or []),
+        "plot_lines": list(proj.plot_lines or []),
+        "structure": dict(proj.structure or {}),
+        "pacing_notes": proj.pacing_notes or "",
+        "outline_text": proj.outline_text or "",
+        "chapter_outlines": list(existing_chapter_outlines),
+        # 注入新扩的架构作为续写参考
+        "_extend_volumes": new_volumes,
+        "_extend_plot_lines": new_plot_lines,
+        "_extend_structure_acts": new_structure_acts,
+    }
+
+    # 用 extend 模式(只补 max_existing+1 ~ target_total)
+    locked = {"total_chapters": target_total}
+    result = _continue_chapter_outlines_if_needed(
+        first_result=first_result,
+        locked=locked,
+        user_filled={},
+        prev_outputs={},
+        db=db,
+        max_loops=10,
+        target_total=target_total,
+        mode="extend",
+    )
+
+    new_chapter_outlines = result.get("chapter_outlines", [])
+    added_chapters = [
+        c for c in new_chapter_outlines
+        if int(c.get("chapter_num", 0)) > existing_max
+    ]
+
+    if len(added_chapters) < added_count:
+        logger.warning(
+            f"[extend_outline] 续写不足:目标新增 {added_count} 章,实际 {len(added_chapters)} 章"
+        )
+
+    # Step 3: 持久化(不修改已有 1~existing_max 任何字段)
+    try:
+        # 合并架构层
+        merged_volumes = list(proj.volumes or []) + new_volumes
+        merged_plot_lines = list(proj.plot_lines or []) + new_plot_lines
+        merged_acts = list((proj.structure or {}).get("acts", [])) + new_structure_acts
+        merged_structure = dict(proj.structure or {})
+        merged_structure["acts"] = merged_acts
+
+        proj.volumes = merged_volumes
+        proj.plot_lines = merged_plot_lines
+        proj.structure = merged_structure
+        proj.chapter_outlines = new_chapter_outlines  # 完整列表(已含老章)
+
+        # 更新 Project.total_chapters(用于章节数显示)
+        proj_row = db.query(ProjectOutline).filter(ProjectOutline.project_id == project_id).first()
+        if proj_row:
+            # Project.total_chapters 更新
+            from storage.models.project import Project
+            project_row = db.query(Project).filter(Project.id == project_id).first()
+            if project_row:
+                project_row.total_chapters = target_total
+        db.commit()
+
+        logger.info(
+            f"[extend_outline] ✓ 完成: 已有 {old_total} → {target_total} 章,"
+            f"新增 chapter_outlines={len(added_chapters)},"
+            f"新 volumes={len(new_volumes)}, 新 plot_lines={len(new_plot_lines)}"
+        )
+        return {
+            "status": "ok",
+            "old_total": old_total,
+            "new_total": target_total,
+            "added_chapters": len(added_chapters),
+            "added_volumes": new_volumes,
+            "added_plot_lines": new_plot_lines,
+            "added_acts": new_structure_acts,
+            "error": None,
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[extend_outline] 持久化失败: {e}")
+        return {"status": "failed", "error": str(e)}
+
+
+
     """从 LLM 响应中解析 JSON（超级容错，专门对付 LLM 输出的非标 JSON）
 
     容错点（按顺序尝试，任意一步成功就返回）：

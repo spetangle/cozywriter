@@ -226,7 +226,7 @@
                 <button @click="activePanel = 'character-matrix'; subPanel = 'characters'; _saveLastView()" :class="{ active: activePanel === 'character-matrix' }">👥 角色</button>
                 <button @click="activePanel = 'worldbuilding'; _saveLastView()" :class="{ active: activePanel === 'worldbuilding' }">🌍 世界观</button>
                 <button @click="activePanel = 'theme'; subPanel = 'themes'; _saveLastView()" :class="{ active: activePanel === 'theme' }">🎯 主题/伏笔</button>
-                <button @click="activePanel = 'check'; subPanel = 'consistency'; _saveLastView()" :class="{ active: activePanel === 'check' }">🔍 检查</button>
+                <!-- 一致性检查已自动化、评审是单章节功能,菜单移除;功能保留在背景自动跑 -->
                 <button @click="activePanel = 'inspirations'; _saveLastView()" :class="{ active: activePanel === 'inspirations' }">💡 灵感</button>
                 <button @click="openExportModal()">📤 导出</button>
               </div>
@@ -244,8 +244,7 @@
                     <span x-text="`${currentProject.word_count || 0} / ${currentProject.target_word_count || 0} 字`"></span>
                     <span x-text="`${chapters.length} 章`"></span>
                   </div>
-                  <div class="wp-range" x-text="`目标: ${currentProject.word_count_min || 0}～${currentProject.word_count_max || 0}字/章`"></div>
-                </div>
+                  </div>
               </div>
             </template>
           </aside>
@@ -339,7 +338,7 @@
                     </span>
                     <button :class="{ active: writingTab === 'content' }" @click="writingTab = 'content'; _saveLastView()">正文</button>
                     <button :class="{ active: writingTab === 'outline' }" @click="writingTab = 'outline'; _saveLastView()">细纲</button>
-                    <button :class="{ active: writingTab === 'review' }" @click="writingTab = 'review'; _saveLastView()">评审报告</button>
+                    <!-- 评审报告 tab 已移除(评审是单章节功能,归到写作台入口时的自动流程) -->
                   </div>
                 </div>
 
@@ -1050,136 +1049,13 @@
               </div>
             </template>
 
-            <!-- ═══ 检查面板（一致性 + 评审） ═══ -->
-            <template x-if="activePanel === 'check' && currentProject">
-              <div class="panel-page">
-                <div class="panel-page-header">
-                  <h2>🔍 检查</h2>
-                  <div class="panel-tabs">
-                    <button :class="{ active: subPanel === 'consistency' }" @click="subPanel = 'consistency'">一致性</button>
-                    <button :class="{ active: subPanel === 'review' }" @click="subPanel = 'review'">智能评审</button>
-                  </div>
-                </div>
-
-                <!-- 一致性检查 -->
-                <template x-if="subPanel === 'consistency'">
-                  <div class="panel-section">
-                    <button class="btn-primary" @click="runConsistencyCheck()" style="margin-bottom:16px">🔄 运行一致性检查</button>
-                    <template x-if="!consistencyResult">
-                      <div class="empty-state">
-                        <p>点击上方按钮对该小说进行一致性审查</p>
-                        <p class="hint">检查内容：人物性格、物品数量、能力设定、资源消耗、字数波动、伏笔回收</p>
-                      </div>
-                    </template>
-                    <template x-if="consistencyResult">
-                      <div class="consistency-result">
-                        <div class="consistency-summary" :class="{ 'has-issues': consistencyResult.has_issues }">
-                          <span x-text="consistencyResult.has_issues ? '⚠️ 发现 ' + consistencyResult.issues.length + ' 个问题' : '✅ 未发现问题'"></span>
-                        </div>
-                        <div class="issue-list">
-                          <template x-for="(issue, idx) in consistencyResult.issues" :key="idx">
-                            <div class="issue-card" :class="`severity-${issue.severity}`">
-                              <div class="issue-type">
-                                <span class="issue-badge" x-text="issue.type"></span>
-                                <span class="severity-badge" x-text="issue.severity === 'high' ? '严重' : issue.severity === 'medium' ? '中等' : '轻微'"></span>
-                              </div>
-                              <div class="issue-message" x-text="issue.message"></div>
-                              <template x-if="issue.chapter">
-                                <div class="issue-chapter" x-text="issue.chapter"></div>
-                              </template>
-                            </div>
-                          </template>
-                        </div>
-                        <template x-if="consistencyReport">
-                          <div class="consistency-report">
-                            <h3>📊 项目综合报告</h3>
-                            <div class="report-grid">
-                              <div class="report-item"><span>章节数</span><strong x-text="consistencyReport.chapters.total"></strong></div>
-                              <div class="report-item"><span>平均字数</span><strong x-text="consistencyReport.chapters.avg_word_count + ' 字'"></strong></div>
-                              <div class="report-item"><span>伏笔总数</span><strong x-text="consistencyReport.foreshadowing.total"></strong></div>
-                              <div class="report-item"><span>进行中</span><strong x-text="consistencyReport.foreshadowing.active"></strong></div>
-                              <div class="report-item"><span>已回收</span><strong x-text="consistencyReport.foreshadowing.resolved"></strong></div>
-                              <div class="report-item"><span>角色弧光</span><strong x-text="consistencyReport.character_arc.total"></strong></div>
-                              <div class="report-item"><span>稳定</span><strong x-text="consistencyReport.character_arc.stable"></strong></div>
-                              <div class="report-item"><span>不稳定</span><strong x-text="consistencyReport.character_arc.unstable"></strong></div>
-                            </div>
-                          </div>
-                        </template>
-                      </div>
-                    </template>
-                  </div>
-                </template>
-
-                <!-- 智能评审 -->
-                <template x-if="subPanel === 'review'">
-                  <div class="panel-section">
-                    <template x-if="!activeReviewSession">
-                      <div class="review-new">
-                        <p>选择评审对象：</p>
-                        <div class="review-targets">
-                          <template x-for="ch in chapters" :key="ch.id">
-                            <div class="review-target-card" @click="startReview(ch)">
-                              <span x-text="`${ch.order + 1}. ${ch.title}`"></span>
-                              <span class="hint" x-text="`${ch.word_count} 字`"></span>
-                            </div>
-                          </template>
-                        </div>
-                      </div>
-                    </template>
-
-                    <template x-if="activeReviewSession && !reviewResult">
-                      <div class="review-loading">
-                        <p>🔄 AI 正在评审中，请稍候...</p>
-                        <div class="review-progress">
-                          <div class="review-dimensions">
-                            <span>一致性</span><span>节奏</span><span>文笔</span><span>去AI味</span>
-                            <span>字数</span><span>伏笔</span><span>角色弧光</span><span>主旨</span>
-                          </div>
-                        </div>
-                      </div>
-                    </template>
-
-                    <template x-if="reviewResult">
-                      <div class="review-result">
-                        <h3>📊 评审结果 — <span x-text="reviewResult.chapter_id ? getChapterTitle(reviewResult.chapter_id) : '独立文本'"></span></h3>
-                        <div class="review-scores">
-                          <div class="score-item"><span>一致性</span><div class="score-bar"><div class="score-fill" :style="`width:${reviewResult.score_consistency * 10}%`"></div></div><strong x-text="reviewResult.score_consistency.toFixed(1)"></strong></div>
-                          <div class="score-item"><span>节奏</span><div class="score-bar"><div class="score-fill" :style="`width:${reviewResult.score_pacing * 10}%`"></div></div><strong x-text="reviewResult.score_pacing.toFixed(1)"></strong></div>
-                          <div class="score-item"><span>文笔风格</span><div class="score-bar"><div class="score-fill" :style="`width:${reviewResult.score_style * 10}%`"></div></div><strong x-text="reviewResult.score_style.toFixed(1)"></strong></div>
-                          <div class="score-item"><span>去AI味</span><div class="score-bar"><div class="score-fill" :style="`width:${reviewResult.score_ai_removal * 10}%`"></div></div><strong x-text="reviewResult.score_ai_removal.toFixed(1)"></strong></div>
-                          <div class="score-item"><span>字数合规</span><div class="score-bar"><div class="score-fill" :style="`width:${reviewResult.score_word_count * 10}%`"></div></div><strong x-text="reviewResult.score_word_count.toFixed(1)"></strong></div>
-                          <div class="score-item"><span>伏笔管理</span><div class="score-bar"><div class="score-fill" :style="`width:${reviewResult.score_foreshadowing * 10}%`"></div></div><strong x-text="reviewResult.score_foreshadowing.toFixed(1)"></strong></div>
-                          <div class="score-item"><span>角色弧光</span><div class="score-bar"><div class="score-fill" :style="`width:${reviewResult.score_character_arc * 10}%`"></div></div><strong x-text="reviewResult.score_character_arc.toFixed(1)"></strong></div>
-                          <div class="score-item"><span>主旨契合</span><div class="score-bar"><div class="score-fill" :style="`width:${reviewResult.score_thematic * 10}%`"></div></div><strong x-text="reviewResult.score_thematic.toFixed(1)"></strong></div>
-                        </div>
-                        <div class="overall-score">
-                          <span>综合评分</span>
-                          <strong x-text="reviewResult.overall_score.toFixed(1) + ' / 100'"></strong>
-                        </div>
-                        <div class="critique">
-                          <h4>评审意见</h4>
-                          <p x-text="reviewResult.critique"></p>
-                        </div>
-                        <template x-if="reviewResult.suggestions && reviewResult.suggestions.length > 0">
-                          <div class="suggestions">
-                            <h4>修改建议</h4>
-                            <ul>
-                              <template x-for="(s, i) in reviewResult.suggestions" :key="i">
-                                <li x-text="s"></li>
-                              </template>
-                            </ul>
-                          </div>
-                        </template>
-                        <div class="review-actions">
-                          <button class="btn-secondary" @click="reviseFromReview()">🔧 根据评审修订</button>
-                          <button class="btn-secondary" @click="activeReviewSession = null; reviewResult = null">返回</button>
-                        </div>
-                      </div>
-                    </template>
-                  </div>
-                </template>
-              </div>
-            </template>
+                        <!--
+              ═══ 检查面板(一致性 + 评审) 已移除 ═══
+              原因:
+              - 一致性检查 已在 9 步流水线后台自动跑(每 5 章)
+              - 智能评审 是单章节功能,已归入 9 步流水线
+              用户不需要手动触发,功能在背景跑
+            -->
 
             <!-- ═══ 大纲/细纲面板 ═══ -->
             <template x-if="activePanel === 'outline-plan' && currentProject">

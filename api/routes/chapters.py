@@ -230,18 +230,155 @@ async def update_chapter(project_id: int, chapter_id: int, data: ChapterUpdate, 
 
 @router.delete("/projects/{project_id}/chapters/{chapter_id}")
 async def delete_chapter(project_id: int, chapter_id: int, db: Session = Depends(get_db)):
-    """删除章节"""
+    """删除单个章节
+
+    同步清理:
+      - ChapterVersion (章节版本快照)
+      - ChapterOutline (细纲)
+      - ReviewSession (评审记录)
+      - ConsistencyRecord (一致性记录)
+      - RAG chapter_events 索引
+    """
+    from storage.models import ChapterVersion, ChapterOutline, ReviewSession, ConsistencyRecord
     chapter = _verify_chapter(chapter_id, project_id, db)
-    chapter_id_to_clean = chapter_id
+
+    # 1. 删 ChapterVersion
+    versions_count = db.query(ChapterVersion).filter(ChapterVersion.chapter_id == chapter_id).delete()
+    # 2. 删 ChapterOutline
+    outline_count = db.query(ChapterOutline).filter(ChapterOutline.chapter_id == chapter_id).delete()
+    # 3. 删 ReviewSession
+    review_count = db.query(ReviewSession).filter(ReviewSession.chapter_id == chapter_id).delete()
+    # 4. 删 ConsistencyRecord
+    consistency_count = db.query(ConsistencyRecord).filter(
+        ConsistencyRecord.chapter_id == chapter_id
+    ).delete()
+    # 5. 删 Chapter 本身(级联删 versions 等,但我们已经显式删了避免依赖)
     db.delete(chapter)
     db.commit()
-    # 同步从 RAG 清理
+
+    # 6. 同步从 RAG 清理
+    rag_ok = True
     try:
         from rag.knowledge_base import KnowledgeBase
-        KnowledgeBase().delete_chapter_event(chapter_id_to_clean)
+        KnowledgeBase().delete_chapter_event(chapter_id)
     except Exception as rag_err:
         logger.warning(f"[delete_chapter] RAG 清理失败: {rag_err}")
-    return {"status": "ok"}
+        rag_ok = False
+
+    logger.info(
+        f"[delete_chapter] chapter {chapter_id} deleted:"
+        f"versions={versions_count}, outline={outline_count},"
+        f"reviews={review_count}, consistency={consistency_count}, rag_ok={rag_ok}"
+    )
+    return {
+        "status": "ok",
+        "deleted": {
+            "chapter_id": chapter_id,
+            "versions": versions_count,
+            "outline": outline_count,
+            "reviews": review_count,
+            "consistency_records": consistency_count,
+            "rag_index": rag_ok,
+        }
+    }
+
+
+class BatchDeleteRequest(BaseModel):
+    chapter_ids: list[int]
+
+
+@router.post("/projects/{project_id}/chapters/batch-delete")
+async def batch_delete_chapters(
+    project_id: int, req: BatchDeleteRequest, db: Session = Depends(get_db)
+):
+    """批量删除章节(完整清理章节相关所有数据)
+
+    行为:
+      - 验证所有 chapter_ids 属于该项目
+      - 删除 ChapterVersion / ChapterOutline / ReviewSession / ConsistencyRecord
+      - 删除 Chapter 本身
+      - 同步清理 RAG chapter_events
+      - 全部在 1 个事务里(失败则全回滚)
+    """
+    from storage.models import ChapterVersion, ChapterOutline, ReviewSession, ConsistencyRecord
+    if not req.chapter_ids:
+        return {"status": "failed", "error": "chapter_ids 不能为空"}
+
+    # 验证所有 chapter 都属于该项目
+    chapters = db.query(Chapter).filter(
+        Chapter.id.in_(req.chapter_ids),
+        Chapter.project_id == project_id,
+    ).all()
+    found_ids = {c.id for c in chapters}
+    missing = set(req.chapter_ids) - found_ids
+    if missing:
+        return {
+            "status": "failed",
+            "error": f"以下 chapter_id 不属于该项目 {project_id} 或不存在: {sorted(missing)}"
+        }
+
+    chapter_ids = list(found_ids)
+    try:
+        # 1. 删 ChapterVersion
+        versions_count = db.query(ChapterVersion).filter(
+            ChapterVersion.chapter_id.in_(chapter_ids)
+        ).delete(synchronize_session=False)
+        # 2. 删 ChapterOutline
+        outline_count = db.query(ChapterOutline).filter(
+            ChapterOutline.chapter_id.in_(chapter_ids)
+        ).delete(synchronize_session=False)
+        # 3. 删 ReviewSession
+        review_count = db.query(ReviewSession).filter(
+            ReviewSession.chapter_id.in_(chapter_ids)
+        ).delete(synchronize_session=False)
+        # 4. 删 ConsistencyRecord
+        consistency_count = db.query(ConsistencyRecord).filter(
+            ConsistencyRecord.chapter_id.in_(chapter_ids)
+        ).delete(synchronize_session=False)
+        # 5. 删 Chapter(级联,所有 model 的 cascade 配置覆盖)
+        chapter_count = db.query(Chapter).filter(Chapter.id.in_(chapter_ids)).delete(
+            synchronize_session=False
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[batch_delete_chapters] DB delete failed: {e}")
+        return {"status": "failed", "error": str(e)}
+
+    # 6. 同步从 RAG 清理
+    rag_ok_count = 0
+    rag_fail_count = 0
+    try:
+        from rag.knowledge_base import KnowledgeBase
+        kb = KnowledgeBase()
+        for cid in chapter_ids:
+            try:
+                kb.delete_chapter_event(cid)
+                rag_ok_count += 1
+            except Exception:
+                rag_fail_count += 1
+    except Exception as e:
+        logger.warning(f"[batch_delete_chapters] RAG cleanup batch failed: {e}")
+        rag_fail_count = len(chapter_ids)
+
+    logger.info(
+        f"[batch_delete_chapters] deleted {chapter_count} chapters from project {project_id}:"
+        f"versions={versions_count}, outline={outline_count},"
+        f"reviews={review_count}, consistency={consistency_count},"
+        f"rag_ok={rag_ok_count}, rag_fail={rag_fail_count}"
+    )
+    return {
+        "status": "ok",
+        "deleted": {
+            "chapter_count": chapter_count,
+            "versions": versions_count,
+            "outline": outline_count,
+            "reviews": review_count,
+            "consistency_records": consistency_count,
+            "rag_ok": rag_ok_count,
+            "rag_fail": rag_fail_count,
+        }
+    }
 
 
 @router.post("/projects/{project_id}/chapters/reindex-rag")

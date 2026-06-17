@@ -570,6 +570,36 @@ async def commit_run(run_id: int, db: Session = Depends(get_db)):
     )
 
 
+@router.post("/project/{project_id}/extend-outline")
+async def extend_outline_chapters(
+    project_id: int,
+    target_chapters: int,
+    extend_architecture: bool = True,
+    db: Session = Depends(get_db),
+):
+    """大纲扩展:在已有 chapter_outlines 基础上扩到 target_chapters 章。
+
+    Args:
+        target_chapters: 目标总章节数(必须 > 已有最大章号)
+        extend_architecture: 是否扩 volumes/plot_lines/structure(默认 True)
+
+    行为:
+      1. 读现有 ProjectOutline(不动)
+      2. 算缺 [max_existing+1, target_chapters] 区间
+      3. (可选) 扩架构层:新卷/新剧情线/新幕
+      4. 续写 chapter_outlines 的缺口
+      5. 持久化(不修改已有任何字段)
+    """
+    from llm.workflow import extend_outline_chapters as _extend
+    result = _extend(
+        project_id=project_id,
+        target_total=target_chapters,
+        db=db,
+        extend_architecture=extend_architecture,
+    )
+    return result
+
+
 @router.post("/run/{run_id}/rerun-and-commit")
 async def rerun_and_commit(run_id: int, req: RerunRequest, db: Session = Depends(get_db)):
     """重跑 stage 后自动 commit（异步：立即返回 task_id）"""

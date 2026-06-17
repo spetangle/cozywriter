@@ -1677,10 +1677,24 @@ function app() {
           console.warn('[BootstrapData] load failed (silently ignored):', e);
         }),
       ]);
+      // 重新计算项目总字数 = 已写章节字数总和
+      // (后端 Project.word_count 不实时累加,前端在打开项目时算一次,
+      // 之后每次 saveChapter 时增量更新)
+      this._recalcProjectWordCount();
       // 检查是否需要显示 AI 补全 banner
       this._maybeShowBootstrapBanner(project.id);
       // 启动 banner 轮询（让 banner 在 rerun 后能自动刷新状态）
       this._startBannerPolling(project.id);
+    },
+
+    /**
+     * 重新计算项目总字数 = 已写章节字数总和,并更新 currentProject.word_count。
+     * 用于侧边栏"字数进度"显示(已写 / 目标总字数)。
+     */
+    _recalcProjectWordCount() {
+      if (!this.chapters || !this.currentProject) return;
+      const total = this.chapters.reduce((s, c) => s + (c.word_count || 0), 0);
+      this.currentProject.word_count = total;
     },
 
     /**
@@ -2242,6 +2256,8 @@ function app() {
       try {
         const res = await fetch(`/api/projects/${projectId}/chapters`);
         this.chapters = await res.json();
+        // 加载后重新计算项目总字数(用于侧边栏字数进度)
+        this._recalcProjectWordCount();
       } catch (e) { console.error(e); }
     },
 
