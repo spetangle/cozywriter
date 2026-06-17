@@ -2634,8 +2634,22 @@
               </div>
             </template>
             <template x-if="bootstrapWizard.status === 'failed' || bootstrapWizard.status === 'partial'">
-              <div class="error-msg">
-                <span>⚠️ 部分 stage 失败 / 未完成。请到「大纲」面板的 AI 生成设定区域重新生成失败的部分。</span>
+              <div class="footer-actions" style="flex-wrap:wrap;gap:8px;align-items:center">
+                <span class="error-msg" style="flex:1;min-width:240px">
+                  ⚠️ 部分 stage 失败 / 未完成。可点「全部重跑」一键续跑,或到「大纲」面板单独重跑失败的部分。
+                </span>
+                <button class="btn-secondary"
+                        @click="rerunBootstrapAllStages(false)"
+                        :disabled="bootstrapWizard.rerunAllBusy || bootstrapMissingCount() === 0">
+                  <span x-show="!bootstrapWizard.rerunAllBusy">🔄 重跑缺失项(<span x-text="bootstrapMissingCount()"></span>)</span>
+                  <span x-show="bootstrapWizard.rerunAllBusy">⏳ 重跑中...</span>
+                </button>
+                <button class="btn-primary"
+                        @click="rerunBootstrapAllStages(true)"
+                        :disabled="bootstrapWizard.rerunAllBusy">
+                  <span x-show="!bootstrapWizard.rerunAllBusy">🔁 全部重跑</span>
+                  <span x-show="bootstrapWizard.rerunAllBusy">⏳ 重跑中...</span>
+                </button>
               </div>
             </template>
             <template x-if="bootstrapWizard.status === 'running'">
