@@ -82,6 +82,9 @@ function app() {
       rerunAllBusy: false,                  // "重新生成全部" 是否正在执行
       committing: false,                    // 写入数据库时防止重复提交
     },
+    // 「设定文档预览」界面（大纲/角色/世界观/伏笔/主题）的"重新生成"按钮状态
+    // 按 stage_id 记录是否正在跑，避免同一 stage 并发触发
+    rerunStageBusy: {},
     // 创建项目表单（12 字段：4 必填 + 8 选填）
     newProjectForm: {
       // 4 必填
@@ -1230,17 +1233,20 @@ function app() {
           wiz.status = 'failed';
           wiz.errorMsg = '有 stage 执行失败';
           this._stopBootstrapPolling();
-        } else if (allDone && data.status === 'completed') {
-          wiz.status = 'completed';
+        } else if (allDone && (data.status === 'completed' || failedCount === 0)) {
+          // 后端已自动 commit（auto_commit=true），但前端保险起见也自动调一次 commit
+          // （用户无感，不会卡住）
+          wiz.status = 'committing';
           wiz.completedAt = Date.now();
           this._stopBootstrapPolling();
-        } else if (allDone && failedCount === 0) {
-          // 透中 _maybeShowBootstrapBanner 同款兑底：run.status='partial'/'failed'
-          // 但所有 stage 实际都 ok/user_filled/skipped → 降级为 completed，
-          // 交谁总不能堵住 commit 按钮
-          wiz.status = 'completed';
-          wiz.completedAt = Date.now();
-          this._stopBootstrapPolling();
+          // 自动提交：不需要用户点按钮
+          this.commitBootstrap(true).then(() => {
+            wiz.status = 'committed';
+          }).catch((e) => {
+            console.error('[Bootstrap auto-commit] failed:', e);
+            // 自动 commit 失败时降级为 completed，让用户手动点（兼容旧数据）
+            wiz.status = 'completed';
+          });
         }
       } catch (e) {
         console.error('[Bootstrap poll] failed:', e);
@@ -1343,8 +1349,104 @@ function app() {
     },
 
     /**
+     * 从「设定文档预览」面板（大纲/角色/世界观/伏笔/主题）触发的 stage 重跑。
+     * 与 wizard 内的 rerunBootstrapStage 不同：这里从 currentProject 查最新 run，
+     * 不依赖 wizard 是否打开。
+     *
+     * 重跑后自动 commit（因为用户已经在看文档了，希望立即看到新结果）。
+     */
+    async rerunBootstrapStageFromPanel(stageId) {
+      if (!this.currentProject) {
+        alert('请先打开一个项目');
+        return;
+      }
+      // 取该 stage 的中文明称做提示
+      const stageLabel = {
+        'stage_1_base': '基础外推',
+        'stage_2a_theme': '主旨/基调',
+        'stage_2b_style': '文风/节奏',
+        'stage_2c_world': '世界观',
+        'stage_3a_protagonist': '主角',
+        'stage_3b_antagonist': '反派',
+        'stage_3c_supporting': '配角',
+        'stage_3d_arcs': '角色弧光',
+        'stage_4a_outline': '项目大纲',
+        'stage_4b_foreshadow': '伏笔',
+      }[stageId] || stageId;
+      if (!confirm(`确定重新生成「${stageLabel}」吗？将覆盖之前的结果。`)) return;
+
+      this.rerunStageBusy[stageId] = true;
+      try {
+        // 取最新 run_id
+        const lr = await fetch(`/api/workflow/project/${this.currentProject.id}/latest`);
+        if (!lr.ok) {
+          alert('未找到 bootstrap 运行记录，请先完成设定生成。');
+          return;
+        }
+        const runData = await lr.json();
+        const runId = runData.run_id;
+        if (runData.status === 'committed' || runData.status === 'failed') {
+          // committed 后支持 rerun，failed 也支持
+        }
+
+        const res = await fetch(`/api/workflow/run/${runId}/rerun`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ stage_id: stageId }),
+        });
+        const data = await res.json();
+        if (data.status !== 'submitted') {
+          alert('重跑失败: ' + (data.error || JSON.stringify(data)));
+          return;
+        }
+        const task = await this._pollTask(data.task_id, { onProgress: () => this.refreshAllTasks() });
+        if (task.status === 'completed') {
+          // 自动 commit 让用户立即看到新结果
+          await fetch(`/api/workflow/run/${runId}/commit`, { method: 'POST' });
+          // 刷新当前项目的 bootstrapData（更新"设定文档预览"显示）
+          await this._refreshBootstrapData();
+          // 重新打开项目，让角色/世界观/伏笔等列表也刷新
+          if (this.currentProject) {
+            await this.openProject(this.currentProject);
+          }
+          // 弹个轻量提示
+          this.toast?.(`✅ ${stageLabel} 已重新生成`);
+        } else {
+          alert('重跑失败: ' + (task.error || 'unknown'));
+        }
+      } catch (e) {
+        alert('重跑失败: ' + e.message);
+      } finally {
+        this.rerunStageBusy[stageId] = false;
+      }
+    },
+
+    /**
+     * 「重新生成」按钮的提示文本。已 commit 的项目也允许 rerun（虽然要慎重）。
+     * 仅当 stage 是 failed/cancelled 时才强烈推荐，否则只是「可重新生成」。
+     */
+    rerunStageBtnTitle(stageId) {
+      return '点击用 LLM 重新生成该部分设定（会覆盖现有内容）';
+    },
+
+    /**
+     * 重新拉取 bootstrapData 用于刷新"设定文档预览"界面。
+     */
+    async _refreshBootstrapData() {
+      if (!this.currentProject) return;
+      try {
+        const res = await fetch(`/api/workflow/project/${this.currentProject.id}/bootstrap-data`);
+        if (res.ok) {
+          this.bootstrapData = await res.json();
+        }
+      } catch (e) {
+        console.warn('[refreshBootstrapData] failed:', e);
+      }
+    },
+
+    /**
      * 计算 wizard 当前"缺失项"数量：failed / cancelled / 未开始的 stage 总数。
-     * 用于页脚【重跑缺失项】按钮的 disabled 状态与角标。
+     * 保留以兼容遗留调用。
      */
     bootstrapMissingCount() {
       const wiz = this.bootstrapWizard;
@@ -1421,9 +1523,11 @@ function app() {
       }
     },
 
-    async commitBootstrap() {
+    async commitBootstrap(auto = false) {
       const wiz = this.bootstrapWizard;
-      if (!wiz.runId || wiz.committing) return;
+      if (!wiz.runId) return;
+      // 手动点击时守护；auto 触发时允许连续（如轮询里调用）
+      if (!auto && wiz.committing) return;
       wiz.committing = true;
       try {
         const res = await fetch(`/api/workflow/run/${wiz.runId}/commit`, {
@@ -1439,22 +1543,26 @@ function app() {
           if (this.currentProject) {
             await this.openProject(this.currentProject);
           }
-          // 提交成功后提示用户
-          const summary = data.summary || {};
-          const msg = '✅ AI 补全已成功写入数据库！\n\n' +
-            `主题: ${summary.themes || 0} 条\n` +
-            `世界观: ${summary.world_entries || 0} 条\n` +
-            `角色: ${summary.characters || 0} 个\n` +
-            `角色关系: ${summary.relations || 0} 条\n` +
-            `角色弧光: ${summary.arcs || 0} 条\n` +
-            `伏笔: ${summary.foreshadowings || 0} 条\n\n` +
-            '点确定后可进入写作台开始创作！';
-          alert(msg);
+          // 自动提交不弹 alert（用户体验流畅），手动点击才提示
+          if (!auto) {
+            const summary = data.summary || {};
+            const msg = '✅ AI 补全已成功写入数据库！\n\n' +
+              `主题: ${summary.themes || 0} 条\n` +
+              `世界观: ${summary.world_entries || 0} 条\n` +
+              `角色: ${summary.characters || 0} 个\n` +
+              `角色关系: ${summary.relations || 0} 条\n` +
+              `角色弧光: ${summary.arcs || 0} 条\n` +
+              `伏笔: ${summary.foreshadowings || 0} 条\n\n` +
+              '点确定后可进入写作台开始创作！';
+            alert(msg);
+          }
         } else {
+          // 失败时：auto 模式让 wizard 退回 completed 等用户手动重试；手动模式弹 alert
+          if (auto) {
+            throw new Error(data.error || 'commit failed');
+          }
           alert('提交失败: ' + (data.error || 'unknown'));
         }
-      } catch (e) {
-        alert('提交失败: ' + e.message);
       } finally {
         wiz.committing = false;
       }

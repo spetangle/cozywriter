@@ -341,20 +341,33 @@ STAGE_PROMPTS = {
             "   - title：本章标题（4-15 字，与内容有关联，不要「第 N 章」这种纯序号，例如「初入诡秘都市」「玄机子的阴谋」）\n"
             "   - chapter_position：本章定位（开局/发展/高潮/回落/结局）\n"
             "   - pacing：节奏（铺垫/推进/高潮/回落/平稳）\n"
-            "   - key_content：核心内容（**严格 1 句话**，不超过 35 字。\n"
-            "       必须只描述本章发生的 1 件事。\n"
-            "       禁止出现「并」「以及」「同时」「还」连接的两件事。\n"
+            "   - key_content：核心内容（**严格 1 句话，1-2 句**。\n"
+            "       格式：第N章大纲：主角XXX做了什么事情，见到了什么人或物。\n"
+            "       强制 ≤ 40 字。必须只描述本章发生的 1 个核心事件。\n"
+            "       禁止出现「并」「以及」「同时」「还」「+」连接的两件事。\n"
             "       错误示范：「余凌找到林战试探其旧伤，并收到神秘短信」（这是 2 件事）\n"
-            "       正确示范：「余凌在健身房试探林战的旧伤反应」）\n"
+            "       正确示范：「余凌在健身房试探林战的旧伤反应」\n"
+            "       正确示范2：「余凌收到神秘短信警告地脉异常」\n"
+            "       → 同一关键事件（'试探林战旧伤'/'收到短信'）必须拆分到不同章）\n"
             "   - plot_advance：剧情如何推进主线（1 句话，不超过 30 字）\n"
             "   - highlights：本章看点/爽点数组（1-3 条）\n"
             "   - target_word_count：目标字数（默认 3000）\n"
             "\n"
-            "【去重自检】\n"
-            "   生成完毕后请逐章检查：\n"
+            "【防剧情重复硬规则 - 减少后续章节生成时撞车】\n"
+            "   生成每一章 key_content 时，请先在脑里建一张「事件表」：\n"
+            "     - 同一人物的关键事件（觉醒/加入团队/收到警告/死亡/离开/重逢/战斗/决裂 等）\n"
+            "       只能出现 1 次，分别落到不同章\n"
+            "     - 同一场景（健身房/茶馆/拍卖会/办公室 等）只用来承载 1 个核心事件，\n"
+            "       不要在不同章让同一场景重复出现\n"
+            "     - 同一物品/线索/谜题（如「神秘玉佩」「旧伤」「加密文件」）的揭示/获取/使用，\n"
+            "       必须分布在不同章\n"
+            "\n"
+            "【去重自检 - 生成完毕后请逐章检查】\n"
             "   1. 相邻两章的 key_content 不能描述同一件事\n"
-            "   2. 同一人物的关键事件（如「林战觉醒」「收到短信」）只能出现在 1 章中\n"
+            "   2. 同一人物的关键事件只能出现在 1 章中\n"
             "   3. 任意两章的 key_content 文字重合度不能超过 40%\n"
+            "   4. 同一场景/物品/线索 不能在多章重复出现\n"
+            "   如有违反，必须改写其中一章。\n"
         ),
         "json_schema": {
             "volumes": [
@@ -1052,6 +1065,14 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
         # ── Stage 4A: ProjectOutline ──
         if results.get("stage_4a_outline", {}).get("status") == "ok":
             data = results["stage_4a_outline"]["data"]
+            # 大纲质量自检：相邻章 key_content 文字重合度检测
+            try:
+                _validate_chapter_outlines_uniqueness(
+                    data.get("chapter_outlines", []),
+                    project_total_chapters=project.total_chapters,
+                )
+            except Exception as e:
+                logger.warning(f"[Bootstrap] 大纲质量自检发现问题: {e}")
             outline = ProjectOutline(
                 project_id=project_id,
                 plot_lines=data.get("plot_lines", []),
@@ -1225,6 +1246,82 @@ def _resolve_foreshadow_ids(notes: str, foreshadow_map: dict) -> list[int]:
         if title and title in notes:
             ids.append(fid)
     return ids
+
+
+def _validate_chapter_outlines_uniqueness(
+    chapter_outlines: list, project_total_chapters: int = 0,
+) -> list[str]:
+    """大纲质量自检：检测相邻/任意两章的 key_content 文字重合度，发现问题就 warn。
+
+    不抛异常（避免 commit 失败），只记录到日志供用户参考。
+    用户看到警告后可以手动到「大纲」面板点击「重新生成大纲」重跑。
+
+    Returns:
+        warnings: 警告信息列表（每条形如 '第N章与第M章 key_content 文字重合 78%'）
+    """
+    warnings = []
+
+    # 1) 长度检查
+    if project_total_chapters and len(chapter_outlines) != project_total_chapters:
+        warnings.append(
+            f"chapter_outlines 数组长度 ({len(chapter_outlines)}) "
+            f"!= total_chapters ({project_total_chapters})，可能漏章"
+        )
+
+    # 2) 按 chapter_num 排序
+    sorted_outlines = sorted(chapter_outlines, key=lambda x: x.get("chapter_num", 0))
+
+    # 3) 检测 key_content 文字重合度
+    def _text_overlap_ratio(a: str, b: str) -> float:
+        """简单字符级 Jaccard 相似度（A ∩ B / A ∪ B，按字符 2-gram 计算）。"""
+        if not a or not b:
+            return 0.0
+        a2 = {a[i:i+2] for i in range(len(a) - 1)}
+        b2 = {b[i:i+2] for i in range(len(b) - 1)}
+        if not a2 or not b2:
+            return 0.0
+        inter = len(a2 & b2)
+        union = len(a2 | b2)
+        return inter / union if union else 0.0
+
+    key_contents = [(c.get("chapter_num"), c.get("key_content", "").strip()) for c in sorted_outlines]
+
+    # 相邻章检测
+    for i in range(len(key_contents) - 1):
+        n1, k1 = key_contents[i]
+        n2, k2 = key_contents[i + 1]
+        if not k1 or not k2:
+            continue
+        ratio = _text_overlap_ratio(k1, k2)
+        if ratio > 0.5:
+            warnings.append(
+                f"第{n1}章与第{n2}章 key_content 文字重合度 {ratio:.0%} "
+                f"（>50% 建议重跑 stage_4a_outline）"
+            )
+
+    # 任意两章检测（仅在章数 <=30 时跑全两两比较，避免性能问题）
+    if len(key_contents) <= 30:
+        for i in range(len(key_contents)):
+            for j in range(i + 2, len(key_contents)):  # 跳过相邻（已检过）
+                n1, k1 = key_contents[i]
+                n2, k2 = key_contents[j]
+                if not k1 or not k2:
+                    continue
+                ratio = _text_overlap_ratio(k1, k2)
+                if ratio > 0.6:
+                    warnings.append(
+                        f"第{n1}章《{sorted_outlines[i].get('title', '?')}》"
+                        f"与第{n2}章《{sorted_outlines[j].get('title', '?')}》"
+                        f" key_content 文字重合度 {ratio:.0%}"
+                    )
+
+    if warnings:
+        for w in warnings[:5]:  # 最多打 5 条，避免日志爆炸
+            logger.warning(f"[大纲质量自检] {w}")
+        if len(warnings) > 5:
+            logger.warning(f"[大纲质量自检] ...还有 {len(warnings) - 5} 条警告未列出")
+
+    return warnings
 
 
 def _index_to_rag(project_id: int, db):

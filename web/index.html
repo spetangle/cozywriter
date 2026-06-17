@@ -602,7 +602,15 @@
                 <!-- 核心主旨 -->
                 <template x-if="subPanel === 'themes'">
                   <div class="panel-section">
-                    <button class="btn-primary" @click="showThemeForm = true">➕ 添加主旨</button>
+                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                      <button class="btn-primary" @click="showThemeForm = true">➕ 添加主旨</button>
+                      <button class="btn-secondary" @click="rerunBootstrapStageFromPanel('stage_2a_theme')"
+                              :disabled="!currentProject || rerunStageBusy['stage_2a_theme']"
+                              :title="rerunStageBtnTitle('stage_2a_theme')">
+                        <span x-show="!rerunStageBusy['stage_2a_theme']">🔄 重新生成主旨</span>
+                        <span x-show="rerunStageBusy['stage_2a_theme']">⏳ 生成中...</span>
+                      </button>
+                    </div>
 
                     <!--
                       🤖 AI 生成的主旨/基调（来自 bootstrapData.theme）
@@ -666,6 +674,12 @@
                   <div class="panel-section">
                     <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
                       <button class="btn-primary" @click="showForeshadowingForm = true">➕ 添加伏笔</button>
+                      <button class="btn-secondary" @click="rerunBootstrapStageFromPanel('stage_4b_foreshadow')"
+                              :disabled="!currentProject || rerunStageBusy['stage_4b_foreshadow']"
+                              :title="rerunStageBtnTitle('stage_4b_foreshadow')">
+                        <span x-show="!rerunStageBusy['stage_4b_foreshadow']">🔄 重新生成伏笔</span>
+                        <span x-show="rerunStageBusy['stage_4b_foreshadow']">⏳ 生成中...</span>
+                      </button>
                       <!-- 状态筛选 -->
                       <div style="display:flex;gap:4px;align-items:center;margin-left:auto">
                         <span style="font-size:12px;color:var(--text-muted)">筛选：</span>
@@ -772,7 +786,27 @@
                 <!-- 角色列表 -->
                 <template x-if="subPanel === 'characters'">
                   <div class="panel-section">
-                    <button class="btn-primary" @click="showCharacterForm = true">➕ 添加角色</button>
+                    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                      <button class="btn-primary" @click="showCharacterForm = true">➕ 添加角色</button>
+                      <button class="btn-secondary" @click="rerunBootstrapStageFromPanel('stage_3a_protagonist')"
+                              :disabled="!currentProject || rerunStageBusy['stage_3a_protagonist']"
+                              :title="rerunStageBtnTitle('stage_3a_protagonist')">
+                        <span x-show="!rerunStageBusy['stage_3a_protagonist']">🔄 重新生成主角</span>
+                        <span x-show="rerunStageBusy['stage_3a_protagonist']">⏳ 生成中...</span>
+                      </button>
+                      <button class="btn-secondary" @click="rerunBootstrapStageFromPanel('stage_3b_antagonist')"
+                              :disabled="!currentProject || rerunStageBusy['stage_3b_antagonist']"
+                              :title="rerunStageBtnTitle('stage_3b_antagonist')">
+                        <span x-show="!rerunStageBusy['stage_3b_antagonist']">🔄 重新生成反派</span>
+                        <span x-show="rerunStageBusy['stage_3b_antagonist']">⏳ 生成中...</span>
+                      </button>
+                      <button class="btn-secondary" @click="rerunBootstrapStageFromPanel('stage_3c_supporting')"
+                              :disabled="!currentProject || rerunStageBusy['stage_3c_supporting']"
+                              :title="rerunStageBtnTitle('stage_3c_supporting')">
+                        <span x-show="!rerunStageBusy['stage_3c_supporting']">🔄 重新生成配角</span>
+                        <span x-show="rerunStageBusy['stage_3c_supporting']">⏳ 生成中...</span>
+                      </button>
+                    </div>
 
                     <!-- AI 生成的角色（只读，来自 bootstrapData） -->
                     <template x-if="bootstrapAiCharacters().length > 0">
@@ -1008,6 +1042,12 @@
               <div class="panel-page">
                 <div class="panel-page-header">
                   <h2>🌍 世界观</h2>
+                  <button class="btn-secondary" @click="rerunBootstrapStageFromPanel('stage_2c_world')"
+                          :disabled="!currentProject || rerunStageBusy['stage_2c_world']"
+                          :title="rerunStageBtnTitle('stage_2c_world')">
+                    <span x-show="!rerunStageBusy['stage_2c_world']">🔄 重新生成世界观</span>
+                    <span x-show="rerunStageBusy['stage_2c_world']">⏳ 生成中...</span>
+                  </button>
                 </div>
                 <div class="panel-section">
                   <template x-if="bootstrapData && bootstrapData.world && bootstrapData.world.entries_by_category && Object.keys(bootstrapData.world.entries_by_category).length > 0">
@@ -1175,6 +1215,18 @@
               <div class="panel-page">
                 <div class="panel-page-header">
                   <h2>📋 大纲与细纲</h2>
+                  <!--
+                    重新生成按钮放在「设定文档预览」界面（用户能看到内容再决定是否重生成）。
+                    不在任务清单显示，避免用户看不到内容时被强行推送重生成操作。
+                  -->
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;margin-left:auto">
+                    <button class="btn-secondary" @click="rerunBootstrapStageFromPanel('stage_4a_outline')"
+                            :disabled="!currentProject || rerunStageBusy['stage_4a_outline']"
+                            :title="rerunStageBtnTitle('stage_4a_outline')">
+                      <span x-show="!rerunStageBusy['stage_4a_outline']">🔄 重新生成大纲</span>
+                      <span x-show="rerunStageBusy['stage_4a_outline']">⏳ 生成中...</span>
+                    </button>
+                  </div>
                   <!--
                     简化：移除"剧情线 / 结构 / 章节细纲"三个标签页，
                     这三项内容已经包含在"项目总览"的 AI 生成大纲里（剧情线 / 结构 / 节奏规划），
@@ -2093,7 +2145,12 @@
                     failed: '失败',
                     cancelled: '已取消'
                   }[t.status] || t.status"></span>
-                  <!-- bootstrap 任务 + 失败/取消 → 单个重新生成 -->
+                  <!--
+                    bootstrap 任务的「重新生成」按钮：仅失败/取消时显示。
+                    已完成的 bootstrap 任务不在此显示「重新生成」按钮，
+                    因为用户在任务清单看不到生成内容，无法判断是否需要重生成。
+                    想要重新生成已成功的 stage，请到「大纲」面板的 AI 生成设定区域。
+                  -->
                   <button class="btn-small btn-rerun"
                           x-show="t.task_type === 'bootstrap' && ['failed', 'cancelled'].includes(t.status) && t.run_id"
                           @click="rerunOneBootstrapTask(t)">
@@ -2667,9 +2724,7 @@
                       <span class="meta-tag meta-error" x-show="stage.error" x-text="`❌ ${stage.error}`"></span>
                     </div>
                   </div>
-                  <button class="btn-small btn-rerun"
-                          x-show="['ok', 'failed', 'cancelled', 'user_filled', 'pending'].includes(stage.status)"
-                          @click.stop="rerunBootstrapStage(stage.id)">🔄 重新生成</button>
+                  <!-- 重新生成按钮已移至「大纲」面板的 AI 生成设定区域，不再在向导里显示 -->
                 </div>
               </div>
             </template>
@@ -2677,40 +2732,24 @@
 
           <footer class="wizard-footer">
             <!--
-              通用按钮：重跑缺失项（只重跑 failed/cancelled/未开始）
-              通用按钮：重跑所有项（强制重跑全部 stage，覆盖已成功的结果）
-              这两个按钮在所有非 running 状态下都可用，方便用户随时调整
+              简化设计：
+              - 自动提交入库：完成后无需用户点提交按钮（_pollBootstrapStatus 会自动触发）
+              - 重新生成按钮已移至「设定文档预览」界面（大纲与世界面板），不在向导里
+              - 仅保留「进入写作台」作为终态出口
             -->
-            <template x-if="bootstrapWizard.status !== 'running'">
-              <div class="footer-actions" style="flex-wrap:wrap;gap:8px">
-                <button class="btn-secondary"
-                        @click="rerunBootstrapAllStages(false)"
-                        :disabled="bootstrapWizard.rerunAllBusy || bootstrapMissingCount() === 0">
-                  🔄 重跑缺失项（<span x-text="bootstrapMissingCount()"></span>）
-                </button>
-                <button class="btn-primary"
-                        @click="rerunBootstrapAllStages(true)"
-                        :disabled="bootstrapWizard.rerunAllBusy">
-                  🔄 重跑所有项
-                </button>
-              </div>
-            </template>
-            <template x-if="bootstrapWizard.status === 'completed'">
-              <div class="footer-actions">
-                <button class="btn-primary" @click="commitBootstrap()" :disabled="bootstrapWizard.committing">
-                  <span x-show="!bootstrapWizard.committing">✓ 全部完成，写入数据库</span>
-                  <span x-show="bootstrapWizard.committing">⏳ 正在写入数据库，请勿关闭页面...</span>
-                </button>
-              </div>
-            </template>
             <template x-if="bootstrapWizard.status === 'committed'">
               <div class="footer-actions">
                 <button class="btn-primary" @click="closeBootstrapWizard()">进入写作台 →</button>
               </div>
             </template>
+            <template x-if="bootstrapWizard.status === 'committing'">
+              <div class="footer-actions">
+                <span style="color: var(--text-muted);">⏳ 正在自动写入数据库，请稍候...</span>
+              </div>
+            </template>
             <template x-if="bootstrapWizard.status === 'failed' || bootstrapWizard.status === 'partial'">
               <div class="error-msg">
-                <span>⚠️ 部分 stage 失败 / 未完成，可单独重跑，或点击上方按钮一键重跑。</span>
+                <span>⚠️ 部分 stage 失败 / 未完成。请到「大纲」面板的 AI 生成设定区域重新生成失败的部分。</span>
               </div>
             </template>
             <template x-if="bootstrapWizard.status === 'running'">
