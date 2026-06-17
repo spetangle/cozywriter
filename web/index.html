@@ -783,7 +783,7 @@
                   </div>
                 </div>
 
-                <!-- 角色列表 -->
+                <!-- 角色列表（合并 AI 生成 + 手动添加，主角置顶） -->
                 <template x-if="subPanel === 'characters'">
                   <div class="panel-section">
                     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -808,62 +808,33 @@
                       </button>
                     </div>
 
-                    <!-- AI 生成的角色（只读，来自 bootstrapData） -->
-                    <template x-if="bootstrapAiCharacters().length > 0">
-                      <div class="ai-preview-block">
-                        <div class="ai-preview-header">
-                          <span>🤖 AI 生成角色</span>
-                          <span class="ai-preview-hint" x-text="`共 ${bootstrapAiCharacters().length} 个（主角 / 反派 / 配角）`"></span>
+                    <!--
+                      合并渲染：AI 生成 + 手动添加 全部走同一份模板
+                      主角永远排第一（mergedCharacters() 已排序）
+                      AI 生成的角色在信息卡右上角显示「AI」标签
+                    -->
+                    <div class="character-grid" style="margin-top:12px">
+                      <template x-for="(c, idx) in mergedCharacters()" :key="(c._source || 'm') + '-' + (c._id || c.name) + '-' + idx">
+                        <div class="character-card-full" :class="{ 'ai-character-card': c._source === 'ai' }">
+                          <div class="char-header">
+                            <span class="char-name" x-text="c.name || '未命名'"></span>
+                            <span class="char-role-badge" x-text="c.role || '配角'"></span>
+                            <!-- AI 角标：仅在 AI 生成角色时显示 -->
+                            <span x-show="c._source === 'ai'"
+                                  style="font-size:10px;font-weight:600;color:#6d28d9;background:#ede9fe;padding:2px 6px;border-radius:4px;margin-left:auto">AI</span>
+                          </div>
+                          <div class="char-desc" x-text="c.description || '暂无描述'"></div>
+                          <div class="char-profile" x-show="c.profile && Object.keys(c.profile).length > 0">
+                            <template x-for="(val, key) in c.profile" :key="key">
+                              <div class="profile-item"><span x-text="key"></span>: <span x-text="val"></span></div>
+                            </template>
+                          </div>
                         </div>
-                        <div class="character-grid">
-                          <template x-for="(c, idx) in bootstrapAiCharacters()" :key="'ai-' + idx">
-                            <div class="character-card-full ai-character-card">
-                              <div class="char-header">
-                                <span class="char-name" x-text="c.name || '未命名'"></span>
-                                <span class="char-role-badge" x-text="c.role || '配角'"></span>
-                              </div>
-                              <div class="char-desc" x-text="c.description || '暂无描述'"></div>
-                              <template x-if="c.profile && Object.keys(c.profile).length > 0">
-                                <div class="char-profile">
-                                  <template x-for="(val, key) in c.profile" :key="key">
-                                    <div class="profile-item"><span class="profile-key" x-text="key"></span>: <span class="profile-val" x-text="val"></span></div>
-                                  </template>
-                                </div>
-                              </template>
-                            </div>
-                          </template>
-                        </div>
-                      </div>
-                    </template>
+                      </template>
+                    </div>
 
-                    <!-- 手动添加的角色 -->
-                    <template x-if="characters.length > 0">
-                      <div class="manual-characters-block">
-                        <div class="manual-characters-header">
-                          <span>📝 手动添加角色</span>
-                          <span class="manual-characters-hint" x-text="`共 ${characters.length} 个`"></span>
-                        </div>
-                        <div class="character-grid">
-                          <template x-for="char in characters" :key="char.id">
-                            <div class="character-card-full">
-                              <div class="char-header">
-                                <span class="char-name" x-text="char.name"></span>
-                                <span class="char-role-badge" x-text="char.role"></span>
-                              </div>
-                              <div class="char-desc" x-text="char.description || '暂无描述'"></div>
-                              <div class="char-profile" x-show="char.profile && Object.keys(char.profile).length > 0">
-                                <template x-for="(val, key) in char.profile" :key="key">
-                                  <div class="profile-item"><span x-text="key"></span>: <span x-text="val"></span></div>
-                                </template>
-                              </div>
-                            </div>
-                          </template>
-                        </div>
-                      </div>
-                    </template>
-
-                    <!-- AI + 手动都为空 -->
-                    <template x-if="bootstrapAiCharacters().length === 0 && characters.length === 0">
+                    <!-- 合并后都为空 -->
+                    <template x-if="mergedCharacters().length === 0">
                       <p style="text-align:center;padding:40px;color:var(--text-muted)">暂无角色。点击上方按钮添加，或启动引导补全让 AI 生成。</p>
                     </template>
 
@@ -1316,6 +1287,39 @@
                           <div class="outline-pacing" style="margin-top:12px">
                             <h4 style="margin:8px 0 4px;font-size:13px;color:#6d28d9">⏱️ 节奏规划</h4>
                             <p x-text="bootstrapData.outline.pacing_notes" style="line-height:1.6;font-size:13px;white-space:pre-wrap"></p>
+                          </div>
+                        </template>
+
+                        <!--
+                          🤖 每章一句话大纲（从 bootstrapData.outline.chapter_outlines）
+                          数据来源：stage_4a_outline 的 chapter_outlines 数组
+                          每项形如 { chapter_num, volume_num, title, chapter_position, pacing, key_content, plot_advance, highlights }
+                          按 volume_num 分组显示，让用户能看到「每章 1 句话」的细节
+                        -->
+                        <template x-if="bootstrapData.outline.chapter_outlines && bootstrapData.outline.chapter_outlines.length > 0">
+                          <div class="outline-chapter-list" style="margin-top:12px">
+                            <h4 style="margin:8px 0 6px;font-size:13px;color:#6d28d9">
+                              📑 每章一句话大纲
+                              <span style="font-weight:normal;color:#8b5cf6" x-text="`（共 ${bootstrapData.outline.chapter_outlines.length} 章）`"></span>
+                            </h4>
+                            <div class="chapter-outline-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px">
+                              <template x-for="co in bootstrapData.outline.chapter_outlines" :key="'co-' + (co.chapter_num || 0)">
+                                <div class="chapter-outline-mini" style="border:1px solid #e0e0e0;border-radius:6px;padding:8px 10px;background:#fff;position:relative">
+                                  <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+                                    <span style="font-weight:600;color:#6d28d9;font-size:13px" x-text="`第${co.chapter_num || '?'}章`"></span>
+                                    <span x-show="co.volume_num" style="font-size:10px;padding:1px 6px;background:#f3e8ff;color:#6d28d9;border-radius:3px" x-text="`第${co.volume_num}卷`"></span>
+                                    <span x-show="co.chapter_position" style="font-size:10px;padding:1px 6px;background:#dbeafe;color:#1d4ed8;border-radius:3px;margin-left:auto" x-text="co.chapter_position"></span>
+                                  </div>
+                                  <div style="font-size:12px;font-weight:500;color:#1e293b;margin-bottom:4px" x-text="co.title || '未命名'"></div>
+                                  <div style="font-size:12px;line-height:1.5;color:#475569" x-text="co.key_content || '（暂无核心内容）'"></div>
+                                  <template x-if="co.plot_advance">
+                                    <div style="font-size:11px;color:#6b7280;margin-top:4px;padding-top:4px;border-top:1px dashed #e5e7eb">
+                                      ➡️ <span x-text="co.plot_advance"></span>
+                                    </div>
+                                  </template>
+                                </div>
+                              </template>
+                            </div>
                           </div>
                         </template>
                       </div>

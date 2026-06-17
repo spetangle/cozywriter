@@ -1729,6 +1729,44 @@ function app() {
     },
 
     /**
+     * 合并 AI 生成 + 手动添加的角色为统一列表。
+     * 排序规则：主角 → 反派 → 配角 → 龙套（按 role 字段）
+     * 同 role 内按 name 排序。
+     * 每项携带 _source 标记 ('ai' / 'manual')，供模板显示 AI 角标。
+     */
+    mergedCharacters() {
+      const aiChars = this.bootstrapAiCharacters().map((c) => ({
+        ...c,
+        _source: 'ai',
+        _id: c.name,  // 临时 id 用 name 区分
+      }));
+      const manualChars = (this.characters || []).map((c) => ({
+        ...c,
+        _source: 'manual',
+        _id: c.id,
+        name: c.name,
+        role: c.role || '配角',
+        profile: c.profile || {},
+        description: c.description || '',
+      }));
+      // 去重：手动角色如果和 AI 角色同名,优先保留手动（用户编辑过）
+      const aiNames = new Set(aiChars.map((c) => c.name));
+      const merged = [
+        ...manualChars,
+        ...aiChars.filter((c) => !aiNames.has(c.name) || !manualChars.find((m) => m.name === c.name)),
+      ];
+      // 主角置顶
+      const roleOrder = { '主角': 0, '反派': 1, '配角': 2, '龙套': 3 };
+      merged.sort((a, b) => {
+        const ra = roleOrder[a.role] ?? 9;
+        const rb = roleOrder[b.role] ?? 9;
+        if (ra !== rb) return ra - rb;
+        return (a.name || '').localeCompare(b.name || '', 'zh-CN');
+      });
+      return merged;
+    },
+
+    /**
      * 从 bootstrapData.characters.relations 中提取 AI 生成的关系矩阵。
      * 返回数组，每项形如 { from, to, type, description, strength, status }。
      */

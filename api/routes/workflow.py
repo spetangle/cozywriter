@@ -279,6 +279,9 @@ async def get_bootstrap_data(project_id: int, db: Session = Depends(get_db)):
     outline_data = _data("stage_4a_outline") or {}
     # 兼容：之前没有 chapter_outlines 字段（早期版本）
     chapter_outlines = outline_data.get("chapter_outlines", []) if isinstance(outline_data, dict) else []
+    # 确保 outline 字段也带 chapter_outlines（前端用 bootstrapData.outline.chapter_outlines 访问）
+    if isinstance(outline_data, dict):
+        outline_data.setdefault("chapter_outlines", chapter_outlines)
 
     # ── 伏笔（stage_4b）：按 type/周期分组 ──
     # 实际数据结构：{"title", "content", "type": "短/中/长" 或 "short/medium/long", "suggested_plant_chapter", "suggested_resolve_chapter"}
