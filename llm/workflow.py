@@ -1185,6 +1185,7 @@ def extend_outline_chapters(
 
 
 
+def _parse_json(text: str) -> dict:
     """从 LLM 响应中解析 JSON（超级容错，专门对付 LLM 输出的非标 JSON）
 
     容错点（按顺序尝试，任意一步成功就返回）：
