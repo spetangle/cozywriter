@@ -275,10 +275,20 @@ async def get_bootstrap_data(project_id: int, db: Session = Depends(get_db)):
     arcs_data = _data("stage_3d_arcs") or {}
     arcs = arcs_data.get("arcs", [])
 
-    # ── 项目大纲（stage_4a）──
+    # ── 项目大纲（stage_4a 架构 + stage_4a_chapter_outlines 拆分后）──
     outline_data = _data("stage_4a_outline") or {}
     # 兼容：之前没有 chapter_outlines 字段（早期版本）
     chapter_outlines = outline_data.get("chapter_outlines", []) if isinstance(outline_data, dict) else []
+    # 新版：拆出后 chapter_outlines 走 stage_4a_chapter_outlines,且落地到 ProjectOutline.chapter_outlines 列
+    extra_data = _data("stage_4a_chapter_outlines") or {}
+    if extra_data.get("chapter_outlines"):
+        chapter_outlines = list(extra_data["chapter_outlines"])
+    # 如果 run.stage_results 缺(已 committed 跑过),从 ProjectOutline 表读
+    if not chapter_outlines:
+        from storage.models import ProjectOutline as _PO
+        po_row = db.query(_PO).filter(_PO.project_id == project_id).first()
+        if po_row and po_row.chapter_outlines:
+            chapter_outlines = list(po_row.chapter_outlines)
     # 确保 outline 字段也带 chapter_outlines（前端用 bootstrapData.outline.chapter_outlines 访问）
     if isinstance(outline_data, dict):
         outline_data.setdefault("chapter_outlines", chapter_outlines)

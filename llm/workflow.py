@@ -100,13 +100,23 @@ STAGE_DEFS = {
     },
     "stage_4a_outline": {
         "name": "项目大纲",
-        "description": "plot_lines + structure + pacing_notes + chapter_outlines（每章 1 句）",
+        "description": "volumes + plot_lines + structure + outline_text + pacing_notes + reversal_schedule + climax_map",
         "needs_llm": True,
         "depends_on": ["stage_3d_arcs"],
         "outputs": ["outline"],
-        # 100 章小说需要 30K+ token 输出
-        # 历史: 3072 → 截断到 9 章; 16384 → 30 章
-        "max_tokens": 32768,
+        # 拆成 2 次调用后,这次只生成架构层(约 5K 输出),8192 够用
+        "max_tokens": 8192,
+        "temperature": 0.6,
+    },
+    "stage_4a_chapter_outlines": {
+        # 拆分出来的"每章一句话"子阶段(原 stage_4a_outline 拆出来)
+        # 单独 max_tokens 16384,保证 100 章小说能完整输出(每章 1 句 = ~200 chars)
+        "name": "章节一句话大纲",
+        "description": "chapter_outlines[1..N] 每章 1 句话（不依赖架构阶段也能手动重跑）",
+        "needs_llm": True,
+        "depends_on": ["stage_4a_outline"],
+        "outputs": ["chapter_outlines"],
+        "max_tokens": 16384,
         "temperature": 0.6,
     },
     "stage_4b_foreshadow": {
@@ -289,7 +299,7 @@ STAGE_PROMPTS = {
     },
     "stage_4a_outline": {
         "task": (
-            "根据所有已确定的角色与世界设定，设计完整的项目大纲。\n"
+            "根据所有已确定的角色与世界设定，设计完整的项目大纲（架构层）。\n"
             "【重要】总章节数已在硬约束或上一阶段产物中确定（total_chapters），大纲必须严格覆盖该章数范围，不得自行增减。\n"
             "\n"
             "═══════════════════════════════════════════════════════════════\n"
@@ -305,9 +315,6 @@ STAGE_PROMPTS = {
             "   - core_event：本卷最核心的 1 个剧情事件（1 句话，如「主角觉醒异能」「与反派首次正面交锋」）\n"
             "   所有卷合计覆盖 1 ~ total_chapters，不得有缺漏。\n"
             "\n"
-            "【分卷的意义】分卷是为了在 100 章等长篇下，把整体故事分成阶段；每卷内部再细分到章。\n"
-            "分卷不是用来承载具体情节的——具体情节必须放到下面的 chapter_outlines 数组中。\n"
-            "\n"
             "═══════════════════════════════════════════════════════════════\n"
             "【剧情线 + 节奏】\n"
             "═══════════════════════════════════════════════════════════════\n"
@@ -320,56 +327,22 @@ STAGE_PROMPTS = {
             "【宏观节奏规划】\n"
             "═══════════════════════════════════════════════════════════════\n"
             "5. reversal_schedule：反转/高潮时刻表，严格遵循以下节奏：\n"
-            "   - 小反转/小爽点（约每 3 章）：压力积累 + 爆发式爽点循环\n"
+            "   - small_reversals：小反转/小爽点（约每 3 章）：压力积累 + 爆发式爽点循环\n"
             "     例：反派挑衅 → 资源争夺 → 绝地反击 → 获得奖励\n"
-            "   - 大反转/大爽点（约每 10 章）：重大剧情转折或身份揭晓\n"
+            "   - big_reversals：大反转/大爽点（约每 10 章）：重大剧情转折或身份揭晓\n"
             "     例：身世揭秘、阵营反转、核心秘密揭露\n"
-            "   请列出每个小爽点和大爽点的章节号和简要描述\n"
+            "   每条都要给 chapter 字段(章号) + description 字段(简述)\n"
+            "   整个 total_chapters 的小爽点要均匀分布\n"
             "6. climax_map：每个幕的高潮点安排，确保读者追更动力\n"
+            "   每条都要给 act(幕名) + climax_chapter(高潮章号) + description(描述)\n"
             "\n"
-            "═══════════════════════════════════════════════════════════════\n"
-            "【每章节细纲 - 严格 1 章 1 句，必须覆盖 1~total_chapters 全部章节】\n"
-            "═══════════════════════════════════════════════════════════════\n"
-            "7. chapter_outlines：数组，每个元素对应一章，**禁止 1-N 章共用同一段描述**！\n"
+            "【必填字段清单 - 全部 6 个字段都必须出现,缺一个视为失败】\n"
+            "  1. volumes  2. plot_lines  3. structure.acts  4. pacing_notes\n"
+            "  5. reversal_schedule  6. climax_map\n"
             "\n"
-            "【硬性约束 - 必须严格遵守】\n"
-            "   ⚠️ 绝对禁止把多章合并成一段情节描述。\n"
-            "   ⚠️ 每一章必须有自己独立的核心事件；相邻章可以有关联但不能是同一件事。\n"
-            "   ⚠️ 数组长度必须 === total_chapters（少 1 章或多 1 章都会失败）。\n"
-            "\n"
-            "   每一章包含：\n"
-            "   - chapter_num：1..total_chapters（**严格按顺序连续**，不能漏）\n"
-            "   - volume_num：本章所属的卷号（1, 2, 3...）\n"
-            "   - title：本章标题（4-15 字，与内容有关联，不要「第 N 章」这种纯序号，例如「初入诡秘都市」「玄机子的阴谋」）\n"
-            "   - chapter_position：本章定位（开局/发展/高潮/回落/结局）\n"
-            "   - pacing：节奏（铺垫/推进/高潮/回落/平稳）\n"
-            "   - key_content：核心内容（**严格 1 句话，1-2 句**。\n"
-            "       格式：第N章大纲：主角XXX做了什么事情，见到了什么人或物。\n"
-            "       强制 ≤ 40 字。必须只描述本章发生的 1 个核心事件。\n"
-            "       禁止出现「并」「以及」「同时」「还」「+」连接的两件事。\n"
-            "       错误示范：「余凌找到林战试探其旧伤，并收到神秘短信」（这是 2 件事）\n"
-            "       正确示范：「余凌在健身房试探林战的旧伤反应」\n"
-            "       正确示范2：「余凌收到神秘短信警告地脉异常」\n"
-            "       → 同一关键事件（'试探林战旧伤'/'收到短信'）必须拆分到不同章）\n"
-            "   - plot_advance：剧情如何推进主线（1 句话，不超过 30 字）\n"
-            "   - highlights：本章看点/爽点数组（1-3 条）\n"
-            "   - target_word_count：目标字数（默认 3000）\n"
-            "\n"
-            "【防剧情重复硬规则 - 减少后续章节生成时撞车】\n"
-            "   生成每一章 key_content 时，请先在脑里建一张「事件表」：\n"
-            "     - 同一人物的关键事件（觉醒/加入团队/收到警告/死亡/离开/重逢/战斗/决裂 等）\n"
-            "       只能出现 1 次，分别落到不同章\n"
-            "     - 同一场景（健身房/茶馆/拍卖会/办公室 等）只用来承载 1 个核心事件，\n"
-            "       不要在不同章让同一场景重复出现\n"
-            "     - 同一物品/线索/谜题（如「神秘玉佩」「旧伤」「加密文件」）的揭示/获取/使用，\n"
-            "       必须分布在不同章\n"
-            "\n"
-            "【去重自检 - 生成完毕后请逐章检查】\n"
-            "   1. 相邻两章的 key_content 不能描述同一件事\n"
-            "   2. 同一人物的关键事件只能出现在 1 章中\n"
-            "   3. 任意两章的 key_content 文字重合度不能超过 40%\n"
-            "   4. 同一场景/物品/线索 不能在多章重复出现\n"
-            "   如有违反，必须改写其中一章。\n"
+            "【本阶段不输出】chapter_outlines（每章 1 句话）—\n"
+            "        那是下一阶段 stage_4a_chapter_outlines 的事。\n"
+            "        本阶段只输出整体架构(分卷/剧情线/四幕/节奏规划/反转/高潮)。\n"
         ),
         "json_schema": {
             "volumes": [
@@ -415,6 +388,63 @@ STAGE_PROMPTS = {
                 {"act": "第一幕", "climax_chapter": 7, "description": "幕高潮描述"},
                 {"act": "第二幕", "climax_chapter": 17, "description": "幕高潮描述"},
             ],
+        },
+    },
+    "stage_4a_chapter_outlines": {
+        # 拆分出来的"每章一句话"子阶段
+        # 输入：上一阶段 stage_4a_outline 的架构（分卷/剧情线/四幕/reversal_schedule）
+        # 输出：chapter_outlines[1..total_chapters]，每章 1 句话
+        # 单独拆出来避免单次 LLM 输出过长被截断
+        "task": (
+            "根据项目大纲的架构层（上一阶段已生成），为每一章写 1 句话核心事件大纲。\n"
+            "【输入】上一阶段架构（分卷/剧情线/四幕/反转/高潮），会通过 prev_outputs 传入。\n"
+            "【输出】chapter_outlines 数组（每章 1 条）\n"
+            "\n"
+            "═══════════════════════════════════════════════════════════════\n"
+            "【每章节细纲 - 严格 1 章 1 句，必须覆盖 1~total_chapters 全部章节】\n"
+            "═══════════════════════════════════════════════════════════════\n"
+            "chapter_outlines：数组，每个元素对应一章，**禁止 1-N 章共用同一段描述**！\n"
+            "\n"
+            "【硬性约束 - 必须严格遵守】\n"
+            "   ⚠️ 绝对禁止把多章合并成一段情节描述。\n"
+            "   ⚠️ 每一章必须有自己独立的核心事件；相邻章可以有关联但不能是同一件事。\n"
+            "   ⚠️ 数组长度必须 === total_chapters（少 1 章或多 1 章都会失败）。\n"
+            "\n"
+            "   每一章包含：\n"
+            "   - chapter_num：1..total_chapters（**严格按顺序连续**，不能漏）\n"
+            "   - volume_num：本章所属的卷号（1, 2, 3...，参考 stage_4a_outline 输出的 volumes）\n"
+            "   - title：本章标题（4-15 字，与内容有关联，不要「第 N 章」这种纯序号，例如「初入诡秘都市」「玄机子的阴谋」）\n"
+            "   - chapter_position：本章定位（开局/发展/高潮/回落/结局）\n"
+            "   - pacing：节奏（铺垫/推进/高潮/回落/平稳）\n"
+            "   - key_content：核心内容（**严格 1 句话，1-2 句**。\n"
+            "       格式：第N章大纲：主角XXX做了什么事情，见到了什么人或物。\n"
+            "       强制 ≤ 40 字。必须只描述本章发生的 1 个核心事件。\n"
+            "       禁止出现「并」「以及」「同时」「还」「+」连接的两件事。\n"
+            "       错误示范：「余凌找到林战试探其旧伤，并收到神秘短信」（这是 2 件事）\n"
+            "       正确示范：「余凌在健身房试探林战的旧伤反应」\n"
+            "       正确示范2：「余凌收到神秘短信警告地脉异常」\n"
+            "       → 同一关键事件（'试探林战旧伤'/'收到短信'）必须拆分到不同章）\n"
+            "   - plot_advance：剧情如何推进主线（1 句话，不超过 30 字）\n"
+            "   - highlights：本章看点/爽点数组（1-3 条）\n"
+            "   - target_word_count：目标字数（默认 3000）\n"
+            "\n"
+            "【防剧情重复硬规则 - 减少后续章节生成时撞车】\n"
+            "   生成每一章 key_content 时，请先在脑里建一张「事件表」：\n"
+            "     - 同一人物的关键事件（觉醒/加入团队/收到警告/死亡/离开/重逢/战斗/决裂 等）\n"
+            "       只能出现 1 次，分别落到不同章\n"
+            "     - 同一场景（健身房/茶馆/拍卖会/办公室 等）只用来承载 1 个核心事件，\n"
+            "       不要在不同章让同一场景重复出现\n"
+            "     - 同一物品/线索/谜题（如「神秘玉佩」「旧伤」「加密文件」）的揭示/获取/使用，\n"
+            "       必须分布在不同章\n"
+            "\n"
+            "【去重自检 - 生成完毕后请逐章检查】\n"
+            "   1. 相邻两章的 key_content 不能描述同一件事\n"
+            "   2. 同一人物的关键事件只能出现在 1 章中\n"
+            "   3. 任意两章的 key_content 文字重合度不能超过 40%\n"
+            "   4. 同一场景/物品/线索 不能在多章重复出现\n"
+            "   如有违反，必须改写其中一章。\n"
+        ),
+        "json_schema": {
             "chapter_outlines": [
                 {
                     "chapter_num": 1,
@@ -422,11 +452,11 @@ STAGE_PROMPTS = {
                     "title": "本章标题（4-15 字，非纯序号）",
                     "chapter_position": "开局",
                     "pacing": "铺垫",
-                    "key_content": "本章核心事件的 1 句话描述（≤35 字，只 1 件事）",
+                    "key_content": "本章核心事件的 1 句话描述（≤40 字，只 1 件事）",
                     "plot_advance": "主线如何推进（1 句话 ≤30 字）",
                     "highlights": ["看点1", "看点2"],
                     "target_word_count": 3000,
-                },
+                }
             ],
         },
     },
@@ -1208,17 +1238,17 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
                     )
                     db.add(char_arc)
 
-        # ── Stage 4A: ProjectOutline ──
-        if results.get("stage_4a_outline", {}).get("status") == "ok":
-            data = results["stage_4a_outline"]["data"]
-            # 大纲质量自检：相邻章 key_content 文字重合度检测
-            try:
-                _validate_chapter_outlines_uniqueness(
-                    data.get("chapter_outlines", []),
-                    project_total_chapters=project.total_chapters,
-                )
-            except Exception as e:
-                logger.warning(f"[Bootstrap] 大纲质量自检发现问题: {e}")
+        # ── Stage 4A: ProjectOutline（架构层：分卷/剧情线/四幕/反转/高潮）──
+        # 旧版可能在 stage_4a_outline.data 里直接含 chapter_outlines
+        # 新版拆出后 chapter_outlines 走 stage_4a_chapter_outlines.data
+        # commit 时合并两处数据
+        stage_4a = results.get("stage_4a_outline", {})
+        stage_4a_extra = results.get("stage_4a_chapter_outlines", {})
+        chapter_outlines_total: list = []
+        if stage_4a.get("status") == "ok":
+            data = stage_4a["data"]
+            # 兼容老数据：旧版 4a_outline.data 里就含 chapter_outlines
+            chapter_outlines_total = list(data.get("chapter_outlines", []) or [])
             outline = ProjectOutline(
                 project_id=project_id,
                 plot_lines=data.get("plot_lines", []),
@@ -1228,8 +1258,44 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
                 reversal_schedule=data.get("reversal_schedule", {}),
                 climax_map=data.get("climax_map", []),
                 volumes=data.get("volumes", []),
+                # 先把老数据里的 chapter_outlines 写进去,新版会被覆盖
+                chapter_outlines=chapter_outlines_total,
             )
             db.add(outline)
+            db.flush()
+            outline_id = outline.id
+        else:
+            outline_id = None
+
+        # ── Stage 4A-extra: chapter_outlines（每章 1 句话,单独 LLM 调用）──
+        # 拆出后存到 ProjectOutline.chapter_outlines 字段
+        if stage_4a_extra.get("status") == "ok":
+            extra_data = stage_4a_extra["data"]
+            extra_chapter_outlines = list(extra_data.get("chapter_outlines", []) or [])
+            if extra_chapter_outlines:
+                chapter_outlines_total = extra_chapter_outlines
+            # 大纲质量自检
+            try:
+                _validate_chapter_outlines_uniqueness(
+                    chapter_outlines_total,
+                    project_total_chapters=project.total_chapters,
+                )
+            except Exception as e:
+                logger.warning(f"[Bootstrap] 大纲质量自检发现问题: {e}")
+            # 更新 ProjectOutline.chapter_outlines
+            if outline_id:
+                outline_row = db.query(ProjectOutline).filter(ProjectOutline.id == outline_id).first()
+                if outline_row:
+                    outline_row.chapter_outlines = chapter_outlines_total
+                    db.commit()
+            else:
+                # 兼容：只跑了 4a_chapter_outlines 没跑 4a_outline
+                # 把 chapter_outlines 写到一个临时 ProjectOutline(架构字段留空)
+                outline = ProjectOutline(
+                    project_id=project_id,
+                    chapter_outlines=chapter_outlines_total,
+                )
+                db.add(outline)
 
         # ── Stage 4B: Foreshadowing[] ──
         foreshadow_map = {}  # title → id
@@ -1625,12 +1691,15 @@ def rerun_stage(run_id: int, stage_id: str, db) -> dict:
             prev_outputs=prev_outputs,
             db=db,
         )
-        # ── stage_4a_outline 续生成：LLM 一次输出常被 max_tokens 截断
-        #     自动检测 chapter_outlines 是否完整,缺则循环续写
-        if stage_id == "stage_4a_outline" and isinstance(result, dict):
-            result = _continue_chapter_outlines_if_needed(
-                result, locked, user_filled, prev_outputs, db,
+        # ── stage_4a_chapter_outlines 续生成：单独阶段也可能被截断
+        #     (虽然 max_tokens=16384 通常够 100 章,但 LLM 偶尔输出 <N 章)
+        if stage_id == "stage_4a_chapter_outlines" and isinstance(result, dict):
+            # 把 result 包成类似老 stage_4a_outline 的结构,让 _continue_chapter_outlines_if_needed 能读
+            wrapped = {"chapter_outlines": result.get("chapter_outlines", [])}
+            wrapped = _continue_chapter_outlines_if_needed(
+                wrapped, locked, user_filled, prev_outputs, db,
             )
+            result["chapter_outlines"] = wrapped.get("chapter_outlines", [])
         stage_results[stage_id] = {"status": "ok", "data": result, "completed_at": time.time()}
         run.stage_results = stage_results
         db.commit()

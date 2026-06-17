@@ -554,6 +554,37 @@ def build_chapter_prep_info(
         ProjectOutline.project_id == project_id
     ).first()
     proj_outline_text = proj_outline.outline_text if proj_outline else ""
+    # 取出结构化分卷/剧情线/四幕结构,作为章节生成的"宏观上下文"
+    # （注意：key_content 才是单章的主要依据;这些是辅助参考,提供故事走向）
+    proj_volumes = list(proj_outline.volumes) if proj_outline and proj_outline.volumes else []
+    proj_plot_lines = list(proj_outline.plot_lines) if proj_outline and proj_outline.plot_lines else []
+    proj_structure = dict(proj_outline.structure) if proj_outline and proj_outline.structure else {}
+    proj_pacing_notes = (proj_outline.pacing_notes or "") if proj_outline else ""
+    # 本章所属卷号（按 from_chapter/to_chapter 匹配）
+    chapter_volume = None
+    if proj_volumes and chapter is not None:
+        for v in proj_volumes:
+            try:
+                if int(v.get("from_chapter", 0)) <= (chapter.order + 1) <= int(v.get("to_chapter", 0)):
+                    chapter_volume = v
+                    break
+            except (ValueError, TypeError):
+                continue
+    # 本章所属剧情线（粗略匹配：从 key_content / plot_advance 文本里搜 plot_lines 关键词）
+    chapter_plot_lines = []
+    if proj_plot_lines and chapter_outline:
+        co_text = ((chapter_outline.key_content or "") + " " + (chapter_outline.plot_advance or "")).strip()
+        if co_text:
+            for pl in proj_plot_lines:
+                pl_title = (pl.get("title") or "").strip()
+                if not pl_title:
+                    continue
+                # 简单匹配：plot_line.title 任意 2 字 出现在本章细纲中
+                if any(pl_title[i:i+2] in co_text for i in range(len(pl_title) - 1) if pl_title[i:i+2]):
+                    chapter_plot_lines.append(pl)
+        # 兜底：至少附上第 1 条剧情线（总览用）
+        if not chapter_plot_lines and proj_plot_lines:
+            chapter_plot_lines = proj_plot_lines[:1]
 
     # 核心主旨
     themes = db.query(Theme).filter(Theme.project_id == project_id).all()
@@ -638,6 +669,13 @@ def build_chapter_prep_info(
             "description": project.description,
         },
         "project_outline_text": proj_outline_text,
+        # === 新增：结构化宏观上下文(分卷/剧情线/结构)给 LLM 做"辅助参考" ===
+        "project_volumes": proj_volumes,
+        "project_plot_lines": proj_plot_lines,
+        "project_structure": proj_structure,
+        "project_pacing_notes": proj_pacing_notes,
+        "chapter_volume": chapter_volume,           # 本章所属卷(主:位置)
+        "chapter_plot_lines": chapter_plot_lines, # 本章相关剧情线(辅:背景)
         "chapter_outline": {
             "order": chapter.order,
             "title": chapter.title,
@@ -1370,7 +1408,14 @@ def run_quick_consistency_check(
 # ═══════════════════════════════════════════════════════════════
 
 def _format_prep_for_llm(prep: dict) -> str:
-    """把 prep_info dict 格式化成 LLM 可读的文本块"""
+    """把 prep_info dict 格式化成 LLM 可读的文本块
+
+    结构层次：
+      - 主要依据：key_content（本章必写的 1 句话核心事件）
+      - 辅助参考：分卷位置、剧情线、四幕结构（故事走向）
+      - 硬约束：已发生事件 + RAG 相似事件（防重复）
+      - 衔接：上章结尾 / 下章开头 / 前 3 章摘要
+    """
     # 防御：chapter_outline 可能是 None（项目未建 ChapterOutline）→ 用 {} 兜底
     co = prep.get("chapter_outline") if isinstance(prep.get("chapter_outline"), dict) else {}
 
@@ -1378,18 +1423,65 @@ def _format_prep_for_llm(prep: dict) -> str:
         f"【项目元信息】\n标题: {prep['project_meta']['title']}\n文风: {prep['project_meta']['writing_style']}\n去AI味: {prep['project_meta']['ai_removal']}",
         f"【项目大纲】\n{prep['project_outline_text'] or '（无）'}",
         f"【核心主旨】\n{prep['themes']}",
-        f"【本章细纲（来自 ChapterOutline）】\n"
-        f"  位置: {co.get('position', '')} · 节奏: {co.get('pacing', '')}\n"
-        f"  关键内容: {co.get('key_content', '')}\n"
-        f"  剧情推进: {co.get('plot_advance', '')}\n"
-        f"  伏笔动作: {co.get('foreshadow_notes', '')}",
-        # === 新增：硬约束 - 已发生事件清单（必须紧贴细纲，让 LLM 看到） ===
-        f"【⚠️ 已发生事件清单（硬约束：不得重复以下任一事件）】\n{prep.get('previous_event_signatures_text', '（暂无，这是首章）')}",
-        # === 新增：RAG 检索的相似过去事件（语义层去重） ===
-        f"【⚠️ RAG 检索到的相似过去事件（高相似度事件需规避）】\n{prep.get('event_dedup_text', '（RAG 未命中）')}",
-        f"【前 3 章摘要（供文风/衔接参考）】\n{prep['prev_chapters_summary']}",
-        f"【上章结尾】\n{prep['prev_chapter_ending'][-500:]}",
     ]
+
+    # === 主要依据：分卷结构(本章在哪一卷) + 剧情线(本章参与哪些线) ===
+    chapter_volume = prep.get("chapter_volume")
+    if chapter_volume:
+        parts.append(
+            f"【🎯 本章所属卷（主参考）】\n"
+            f"第{chapter_volume.get('from_chapter', '?')} - {chapter_volume.get('to_chapter', '?')} 章"
+            f"《{chapter_volume.get('title', '未命名')}》\n"
+            f"本卷核心事件: {chapter_volume.get('core_event', '')}\n"
+            f"本卷主线: {chapter_volume.get('summary', '')}"
+        )
+    chapter_plot_lines = prep.get("chapter_plot_lines") or []
+    if chapter_plot_lines:
+        pl_text = "\n".join([
+            f"- 《{pl.get('title', '?')}》(第{pl.get('from_chapter', '?')}-{pl.get('to_chapter', '?')}章): {pl.get('description', '')}"
+            for pl in chapter_plot_lines
+        ])
+        parts.append(
+            f"【🎯 本章相关剧情线（主参考）】\n{pl_text}"
+        )
+
+    # === 主要依据：单章细纲（key_content 是硬约束，LLM 必须围绕这个写） ===
+    parts.append(
+        f"【📌 本章必写内容（PRIMARY - 围绕此核心事件展开）】\n"
+        f"  位置: {co.get('position', '')} · 节奏: {co.get('pacing', '')}\n"
+        f"  核心事件: {co.get('key_content', '')}\n"
+        f"  剧情推进: {co.get('plot_advance', '')}\n"
+        f"  伏笔动作: {co.get('foreshadow_notes', '')}\n"
+        f"  ⚠️ 本章所有内容必须围绕上面的「核心事件」展开,不能偏离"
+    )
+
+    # === 辅助参考:四幕结构 + 节奏规划(整本书的故事曲线) ===
+    project_structure = prep.get("project_structure") or {}
+    project_pacing_notes = prep.get("project_pacing_notes") or ""
+    aux_lines = []
+    if project_structure.get("acts"):
+        aux_lines.append("四幕结构:")
+        for act in project_structure["acts"]:
+            aux_lines.append(
+                f"  - {act.get('name', '?')}: 第{act.get('from_chapter', '?')}-{act.get('to_chapter', '?')}章"
+            )
+    if project_pacing_notes:
+        aux_lines.append(f"节奏规划: {project_pacing_notes}")
+    if aux_lines:
+        parts.append("【📊 宏观结构（AUXILIARY - 辅助参考）】\n" + "\n".join(aux_lines))
+
+    # === 硬约束 - 已发生事件清单（必须紧贴细纲，让 LLM 看到） ===
+    parts.append(
+        f"【⚠️ 已发生事件清单（硬约束：不得重复以下任一事件）】\n{prep.get('previous_event_signatures_text', '（暂无，这是首章）')}"
+    )
+    # === 硬约束 - RAG 检索的相似过去事件（语义层去重） ===
+    parts.append(
+        f"【⚠️ RAG 检索到的相似过去事件（高相似度事件需规避）】\n{prep.get('event_dedup_text', '（RAG 未命中）')}"
+    )
+
+    parts.append(f"【前 3 章摘要（供文风/衔接参考）】\n{prep['prev_chapters_summary']}")
+    parts.append(f"【上章结尾】\n{prep['prev_chapter_ending'][-500:]}")
+
     # 中间章节（前后都有正文）追加"下章开头"用于衔接
     if prep.get("next_chapter_opening"):
         parts.append(

@@ -18,6 +18,7 @@ class ProjectOutline(Base):
     reversal_schedule = Column(JSON, default=dict)  # 宏观节奏：小爽点(每3章) + 大爽点(每10章)
     climax_map = Column(JSON, default=list)  # 每幕高潮点安排
     volumes = Column(JSON, default=list)  # 分卷结构：每卷一个完整剧情阶段（title/summary/from_chapter/to_chapter/core_event）
+    chapter_outlines = Column(JSON, default=list)  # 每章一句话核心事件（stage_4a_chapter_outlines 写入）
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
