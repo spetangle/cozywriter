@@ -100,11 +100,13 @@ STAGE_DEFS = {
     },
     "stage_4a_outline": {
         "name": "项目大纲",
-        "description": "plot_lines + structure + pacing_notes",
+        "description": "plot_lines + structure + pacing_notes + chapter_outlines（每章 1 句）",
         "needs_llm": True,
         "depends_on": ["stage_3d_arcs"],
         "outputs": ["outline"],
-        "max_tokens": 3072,
+        # 100 章小说需要 30K+ token 输出
+        # 历史: 3072 → 截断到 9 章; 16384 → 30 章
+        "max_tokens": 32768,
         "temperature": 0.6,
     },
     "stage_4b_foreshadow": {
@@ -731,6 +733,150 @@ def _run_single_stage(stage_id: str, locked: dict, user_filled: dict,
     )
 
     return _parse_json(response)
+
+
+def _continue_chapter_outlines_if_needed(
+    first_result: dict,
+    locked: dict,
+    user_filled: dict,
+    prev_outputs: dict,
+    db,
+    max_loops: int = 5,
+) -> dict:
+    """stage_4a_outline 续生成:LLM 一次调用常被 max_tokens 截断(30 章/批),
+    自动检测 chapter_outlines 缺口,循环续写直到覆盖 total_chapters。
+
+    续写时把已有 chapter_outlines + volumes/plot_lines/structure 作为上下文喂回去,
+    让 LLM 接着写第 N+1 章到 total_chapters。
+
+    Args:
+        first_result: 第一次 LLM 调用的完整结果(含 volumes/plot_lines/structure/chapter_outlines)
+        locked, user_filled, prev_outputs: 与 _run_single_stage 同样的入参
+        db: SQLAlchemy Session
+        max_loops: 最多续写几次(防失控),默认 5
+    Returns:
+        合并后的 result(dict),chapter_outlines 数量应覆盖 total_chapters
+    """
+    total = int(locked.get("total_chapters") or 0)
+    if not total or total <= 0:
+        return first_result  # 老项目没锁定 total_chapters,跳过
+    chapter_outlines = list(first_result.get("chapter_outlines") or [])
+    existing_nums = {int(c.get("chapter_num", 0)) for c in chapter_outlines if c.get("chapter_num")}
+    missing_nums = sorted(set(range(1, total + 1)) - existing_nums)
+    if not missing_nums:
+        return first_result  # 已完整
+
+    # 缺口超过 5 章才续写（容忍少数漏写）
+    if len(missing_nums) < 5:
+        logger.info(
+            f"[stage_4a_outline] chapter_outlines 缺口 {len(missing_nums)} 章 (<5),"
+            f"不续写; 缺失: {missing_nums[:10]}"
+        )
+        return first_result
+
+    logger.info(
+        f"[stage_4a_outline] chapter_outlines 不完整:已有 {len(chapter_outlines)}/{total} 章,"
+        f"开始续写缺失的 {len(missing_nums)} 章(共 {len(missing_nums)} 章,最多 {max_loops} 轮)"
+    )
+
+    # 续写时把上下文压成简短摘要(避免 prompt 超长)
+    context_summary = {
+        "volumes": first_result.get("volumes", []),
+        "plot_lines": [pl.get("title", "") for pl in first_result.get("plot_lines", [])],
+        "structure": first_result.get("structure", {}),
+        "pacing_notes": first_result.get("pacing_notes", ""),
+        "outline_text": (first_result.get("outline_text", "") or "")[:500],
+        "existing_chapter_titles": [
+            f"第{c.get('chapter_num')}章《{c.get('title', '?')}》: {c.get('key_content', '')}"
+            for c in chapter_outlines[-10:]  # 最后 10 章作为衔接
+        ],
+    }
+    import json as _json
+    context_str = _json.dumps(context_summary, ensure_ascii=False, indent=1)
+
+    for loop_idx in range(max_loops):
+        if not missing_nums:
+            break
+        # 取本轮要补的章号范围
+        batch_size = 30  # 每轮 30 章
+        batch_nums = missing_nums[:batch_size]
+        batch_start = batch_nums[0]
+        batch_end = batch_nums[-1]
+        logger.info(
+            f"[stage_4a_outline] 续写第 {loop_idx+1}/{max_loops} 轮:"
+            f"补第 {batch_start}-{batch_end} 章(共 {len(batch_nums)} 章)"
+        )
+
+        # 续写 prompt
+        continue_system = (
+            "你正在为一部长篇小说续写缺失的章节大纲。\n"
+            f"小说总章节数:{total}。需要补全第 {batch_start} 章到第 {batch_end} 章。\n"
+            "\n"
+            "【已有上下文摘要】\n"
+            f"{context_str}\n"
+            "\n"
+            "【续写要求】\n"
+            f"1. 仅输出 chapter_outlines 数组(其他字段都不需要)\n"
+            f"2. 数组长度 = {len(batch_nums)}(第 {batch_start} 章到第 {batch_end} 章,不能漏)\n"
+            "3. 每章只写 1 句话 key_content(≤40 字,描述本章 1 个核心事件)\n"
+            "4. 严格禁止与已有章节的 key_content 重复(去重自检:相邻/任意两章重合度 < 40%)\n"
+            "5. 同一人物/场景/物品的关键事件只能出现 1 次\n"
+            "6. 标题不要「第 N 章」纯序号,要 4-15 字相关标题\n"
+            "7. 保持与已有章节的 volume_num 分配一致\n"
+            "\n"
+            "返回 JSON 格式:\n"
+            '{"chapter_outlines": [...]}'
+        )
+
+        try:
+            from llm.factory import LLMFactory
+            user_prompt = (
+                f"请续写第 {batch_start} 章到第 {batch_end} 章的大纲(共 {len(batch_nums)} 章)。\n"
+                "只输出 chapter_outlines 字段的 JSON,不要其他内容。"
+            )
+            llm = LLMFactory.create(db=db)
+            response = llm.generate(
+                prompt=user_prompt,
+                system_prompt=continue_system,
+                max_tokens=8192,  # 续写单轮 30 章够用
+                temperature=0.6,
+                task_type=f"stage_4a_outline_continue_{loop_idx}",
+            )
+            parsed = _parse_json(response)
+            new_outlines = parsed.get("chapter_outlines", []) if isinstance(parsed, dict) else []
+            if not new_outlines:
+                logger.warning(
+                    f"[stage_4a_outline] 续写第 {loop_idx+1} 轮 LLM 没返回 chapter_outlines,停止续写"
+                )
+                break
+            chapter_outlines.extend(new_outlines)
+            existing_nums = {int(c.get("chapter_num", 0)) for c in chapter_outlines if c.get("chapter_num")}
+            missing_nums = sorted(set(range(1, total + 1)) - existing_nums)
+            # 同步更新 context_summary 的最后 10 章(给下一轮用)
+            context_summary["existing_chapter_titles"] = [
+                f"第{c.get('chapter_num')}章《{c.get('title', '?')}》: {c.get('key_content', '')}"
+                for c in chapter_outlines[-10:]
+            ]
+            context_str = _json.dumps(context_summary, ensure_ascii=False, indent=1)
+            logger.info(
+                f"[stage_4a_outline] 续写第 {loop_idx+1} 轮完成:新增 {len(new_outlines)} 章,"
+                f"累计 {len(chapter_outlines)}/{total},剩 {len(missing_nums)} 章"
+            )
+        except Exception as e:
+            logger.error(f"[stage_4a_outline] 续写第 {loop_idx+1} 轮失败: {e}")
+            break
+
+    first_result["chapter_outlines"] = chapter_outlines
+    if len(chapter_outlines) < total:
+        logger.warning(
+            f"[stage_4a_outline] 续写后仍缺 {total - len(chapter_outlines)} 章"
+            f"(目标 {total}, 实际 {len(chapter_outlines)}); 用户可手动到面板重新生成"
+        )
+    else:
+        logger.info(
+            f"[stage_4a_outline] 续写完成:chapter_outlines {len(chapter_outlines)}/{total} 章"
+        )
+    return first_result
 
 
 def _parse_json(text: str) -> dict:
@@ -1457,6 +1603,8 @@ def rerun_stage(run_id: int, stage_id: str, db) -> dict:
         "chapter_word_count": user_input.get("chapter_word_count", 0),
         "genre": user_input.get("genre", ""),
         "description": user_input.get("description", ""),
+        # 续写机制需要：rerun 时也得把 total_chapters 透传下去
+        "total_chapters": int(user_input.get("total_chapters") or 0),
     }
     user_filled = {
         k: v for k, v in user_input.items()
@@ -1477,6 +1625,12 @@ def rerun_stage(run_id: int, stage_id: str, db) -> dict:
             prev_outputs=prev_outputs,
             db=db,
         )
+        # ── stage_4a_outline 续生成：LLM 一次输出常被 max_tokens 截断
+        #     自动检测 chapter_outlines 是否完整,缺则循环续写
+        if stage_id == "stage_4a_outline" and isinstance(result, dict):
+            result = _continue_chapter_outlines_if_needed(
+                result, locked, user_filled, prev_outputs, db,
+            )
         stage_results[stage_id] = {"status": "ok", "data": result, "completed_at": time.time()}
         run.stage_results = stage_results
         db.commit()
