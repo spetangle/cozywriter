@@ -474,15 +474,54 @@ def build_chapter_prep_info(
     else:
         chars = db.query(Character).filter(Character.id.in_(character_ids)).all()
 
+    # ════════════════════════════════════════════════════════════════
+    # 兜底：检查是否有「主角」，没有则从 workflow_run._meta.user_input.protagonist
+    #       解析后作为虚拟角色加入 chars（不写库，只在本 prep_info 用）
+    # ════════════════════════════════════════════════════════════════
+    has_protagonist = any((c.role or "") == "主角" for c in chars)
+    if not has_protagonist:
+        try:
+            from storage.models.workflow import WorkflowRun
+            run = (
+                db.query(WorkflowRun)
+                .filter(WorkflowRun.project_id == project_id)
+                .order_by(WorkflowRun.created_at.desc())
+                .first()
+            )
+            if run:
+                _meta = (run.stage_results or {}).get("_meta", {})
+                _ui = _meta.get("user_input", {}) or {}
+                _protagonist_text = (_ui.get("protagonist") or "").strip()
+                if _protagonist_text:
+                    # 简易解析：从文本里抽 "姓名：X" + 整段作为 description
+                    import re as _re
+                    _name_m = _re.search(r"姓\s*名\s*[:：]\s*([^\n\r*#-]+)", _protagonist_text)
+                    _name = _name_m.group(1).strip() if _name_m else "（用户自定义主角）"
+                    # 用一个 _VirtualCharacter 命名空间类，让下面的循环把它当 Character 处理
+                    class _VC:
+                        pass
+                    _vc = _VC()
+                    _vc.id = -1
+                    _vc.name = _name
+                    _vc.role = "主角（来自用户输入）"
+                    _vc.description = _protagonist_text[:1000]
+                    _vc.profile = {}
+                    chars = [_vc] + list(chars)
+                    logger.info(
+                        f"[build_chapter_prep_info] chars 表缺主角，已从 user_input 兜底注入「{_name}」"
+                    )
+        except Exception as e:
+            logger.warning(f"[build_chapter_prep_info] 主角兜底注入失败: {e}")
+
     arc_map = {}
     for arc in db.query(CharacterArc).filter(CharacterArc.project_id == project_id).all():
         arc_map[arc.character_id] = arc
 
     character_blocks = []
     for c in chars:
-        arc = arc_map.get(c.id)
+        arc = arc_map.get(c.id) if getattr(c, "id", -1) > 0 else None
         block = f"【{c.name}】({c.role})\n{c.description or ''}"
-        if c.profile:
+        if getattr(c, "profile", None):
             profile_str = " / ".join(f"{k}: {v}" for k, v in c.profile.items() if v)
             if profile_str:
                 block += f"\n  设定: {profile_str}"

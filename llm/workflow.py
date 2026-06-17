@@ -943,39 +943,75 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
         # 拆成 3A/3B/3C 三个 stage，导致同一个人被创建多次）
         from llm.chapter_pipeline import _find_existing_character
         char_map = {}  # name → id
-        for stage_id, role_default in [
-            ("stage_3a_protagonist", "主角"),
-            ("stage_3b_antagonist", "反派"),
-            ("stage_3c_supporting", "配角"),
+        for stage_id, role_default, role_label_zh in [
+            ("stage_3a_protagonist", "主角", "主角"),
+            ("stage_3b_antagonist", "反派", "反派"),
+            ("stage_3c_supporting", "配角", "配角"),
         ]:
             stage_info = results.get(stage_id, {})
-            if stage_info.get("status") == "ok" and stage_info.get("data"):
+            status = stage_info.get("status")
+            if status == "ok" and stage_info.get("data"):
+                # LLM 跑过的情况
                 data = stage_info["data"]
                 chars = _extract_characters(data, stage_id, role_default)
-                for c in chars:
-                    cname = c.get("name", "").strip()
-                    if not cname or cname == "未命名":
-                        continue
-                    # 去重：同项目下已有同名的就跳过新建，复用旧 id
-                    existing = _find_existing_character(db, project_id, cname)
-                    if existing:
-                        logger.info(
-                            f"[Bootstrap] 跳过新角色「{cname}」：已存在（id={existing.id}, 当前名={existing.name}）"
-                        )
-                        if cname:
-                            char_map[cname] = existing.id
-                        continue
-                    char = Character(
-                        project_id=project_id,
-                        name=cname,
-                        role=c.get("role", role_default),
-                        profile=c.get("profile", {}),
-                        description=c.get("description", ""),
+            elif status == "user_filled":
+                # 用户填了的情况：用 LLM 把自由文本解析成结构化字段
+                user_values = stage_info.get("user_values") or {}
+                # stage_3a: user_values.protagonist / stage_3b: antagonist / stage_3c: supporting
+                field_map = {
+                    "stage_3a_protagonist": "protagonist",
+                    "stage_3b_antagonist": "antagonist",
+                    "stage_3c_supporting": "supporting",
+                }
+                user_text = user_values.get(field_map[stage_id], "")
+                if not user_text:
+                    continue
+                # supporting 是多角色，用换行/句号分块；主角/反派是单段
+                if stage_id == "stage_3c_supporting":
+                    # 多个配角：用 LLM 一次性解析
+                    structured = _parse_user_filled_character(
+                        user_text, role_default, role_label_zh, db=db,
                     )
-                    db.add(char)
-                    db.flush()
+                    chars = [structured] if structured else []
+                else:
+                    structured = _parse_user_filled_character(
+                        user_text, role_default, role_label_zh, db=db,
+                    )
+                    chars = [structured] if structured else []
+            else:
+                continue
+
+            for c in chars:
+                if not c:
+                    continue
+                cname = c.get("name", "").strip()
+                if not cname or cname == "未命名":
+                    continue
+                # 去重：同项目下已有同名的就跳过新建，复用旧 id
+                existing = _find_existing_character(db, project_id, cname)
+                if existing:
+                    logger.info(
+                        f"[Bootstrap] 跳过新角色「{cname}」：已存在（id={existing.id}, 当前名={existing.name}）"
+                    )
                     if cname:
-                        char_map[cname] = char.id
+                        char_map[cname] = existing.id
+                    continue
+                char = Character(
+                    project_id=project_id,
+                    name=cname,
+                    role=c.get("role", role_default),
+                    profile=c.get("profile", {}),
+                    description=c.get("description", ""),
+                )
+                db.add(char)
+                db.flush()
+                if cname:
+                    char_map[cname] = char.id
+                logger.info(
+                    f"[Bootstrap] 创建{role_label_zh}「{cname}」"
+                    f"（id={char.id}, 来源={'user_filled' if status == 'user_filled' else 'llm'}, "
+                    f"profile 字段数={len(c.get('profile', {}))})"
+                )
 
         # Stage 3C 的 relations
         if results.get("stage_3c_supporting", {}).get("status") == "ok":
@@ -1095,6 +1131,89 @@ def _extract_characters(data: dict, stage_id: str, role_default: str) -> list[di
     if data.get("name") or data.get("profile"):
         return [data]
     return []
+
+
+def _parse_user_filled_character(
+    user_text: str, role_default: str, role_label_zh: str, db=None,
+) -> dict | None:
+    """用 LLM 把用户填写的自由文本解析成结构化角色字段（与 stage_3a/3b 输出 schema 一致）。
+
+    用户填的是自由文本（不是 JSON），如：
+        **姓名**：陈默
+        - **年龄**：26岁
+        - **身份**：九重天系统·唯一指定天道客服
+        - **性格**：情绪稳定、逻辑严密
+        - **能力**：管理员权限
+
+    Returns:
+        {"name": "陈默", "profile": {...}, "description": "..."} 或 None（解析失败）
+    """
+    if not user_text or not user_text.strip():
+        return None
+
+    # 快速路径：尝试正则提取"姓名：X"（用户常见的 markdown 格式）
+    import re
+    name_match = re.search(r"姓\s*名\s*[:：]\s*([^\n\r*#-]+)", user_text)
+    fast_name = name_match.group(1).strip() if name_match else None
+
+    try:
+        from llm.factory import LLMFactory
+        system = (
+            "你是一个角色设定解析器。把用户提供的角色自由文本解析为结构化 JSON。\n"
+            f"用户填写的应该是「{role_label_zh}」。\n"
+            "输出 schema：\n"
+            "{\n"
+            '  "name": "角色名（2-4 个汉字，必填）",\n'
+            '  "profile": {\n'
+            '    "age": "年龄字符串（如「26岁」「未知」）",\n'
+            '    "gender": "男/女/其他/未知",\n'
+            '    "identity": "身份/职业（1 句话）",\n'
+            '    "personality": "性格特征（关键词，逗号分隔）",\n'
+            '    "goal": "核心目标（1 句话）",\n'
+            '    "ability": "能力/资源（1 句话）",\n'
+            '    "catchphrase": "口头禅（可空）",\n'
+            '    "background": "背景（1-2 句话）"\n'
+            "  },\n"
+            '  "description": "完整保留用户原文中关于该角色的描述（3-5 句话）"\n'
+            "}\n"
+            "只输出 JSON，不要任何解释。\n"
+        )
+        user_prompt = (
+            f"用户输入的角色设定：\n{user_text}\n\n"
+            "请按 schema 输出 JSON。"
+        )
+
+        llm = LLMFactory.create(db=db)
+        response = llm.generate(
+            prompt=user_prompt,
+            system_prompt=system,
+            max_tokens=1024,
+            temperature=0.2,
+            task_type="bootstrap_parse_user_character",
+        )
+        # 复用 workflow 内部的宽松 JSON 解析
+        result = _parse_json(response)
+        if not isinstance(result, dict):
+            return None
+        # 兜底：name 缺失时用 fast_name
+        if not result.get("name") and fast_name:
+            result["name"] = fast_name
+        # 最后兜底：name 仍缺失
+        if not result.get("name"):
+            result["name"] = f"（{role_label_zh}）" if role_label_zh else "未命名"
+        result.setdefault("profile", {})
+        result.setdefault("description", user_text[:1000])
+        result.setdefault("role", role_default)
+        return result
+    except Exception as e:
+        logger.warning(f"[Bootstrap] 解析用户填写{role_label_zh}失败: {e}")
+        # 兜底：纯文本入 description，name 用 fast_name
+        return {
+            "name": fast_name or f"（{role_label_zh}）",
+            "profile": {},
+            "description": user_text[:1000],
+            "role": role_default,
+        }
 
 
 def _resolve_foreshadow_ids(notes: str, foreshadow_map: dict) -> list[int]:
