@@ -899,15 +899,20 @@ def _continue_chapter_outlines_if_needed(
     max_loops: int = 10,
     target_total: int | None = None,
     mode: str = "auto",
+    starting_chapter: int | None = None,
 ) -> dict:
     """stage_4a_outline / stage_4a_chapter_outlines 续生成:循环续写直到覆盖 target_total。
 
     支持两种模式:
       - auto:     bootstrap 自动续写(首生成,默认从第 1 章起)
-      - extend:   用户触发的"扩写"模式,只补 [已有章数+1, target_total] 区间
+      - extend:   用户触发的"扩写"模式
+                  - 若传 starting_chapter: 从 starting_chapter 开始重新安排情节
+                    (会 OVERWRITE 该章及之后的旧大纲,让 LLM 重新构思)
+                  - 若不传 starting_chapter: 只 append 新章(老章完全不动)
 
     关键约束(extend 模式):
-      - 不修改已有章节(只 append 新章)
+      - 不修改 1 ~ (starting_chapter - 1) 的章节(这部分已有正文)
+      - [starting_chapter, target_total] 范围可以 OVERWRITE 旧大纲
       - 单次请求 max 100 章(batch_size 动态调整)
       - 动态 max_tokens: batch_size × 250 chars ≈ 600-800 tokens / 100 章 ≈ 16K
 
@@ -918,6 +923,9 @@ def _continue_chapter_outlines_if_needed(
         max_loops: 最多续写几次(防失控),默认 10
         target_total: 目标总章数(默认从 locked["total_chapters"] 取)
         mode: "auto" 或 "extend"
+        starting_chapter: extend 模式下 LLM 从哪一章开始重新构思
+                          None = 只 append 新章(max_existing+1)
+                          N = LLM 重新生成 N ~ target_total
     Returns:
         合并后的 result(dict),chapter_outlines 数量应覆盖 target_total
     """
@@ -934,8 +942,16 @@ def _continue_chapter_outlines_if_needed(
             missing_nums = list(range(1, total + 1))
         else:
             max_existing = max(existing_nums)
-            # 已有 max_existing 章,要扩到 total 章,缺 [max_existing+1, total]
-            missing_nums = list(range(max_existing + 1, total + 1))
+            # 决定起始章: 用户传入的 starting_chapter > max_existing ?
+            #   是 → 从用户指定的 starting_chapter 开始(扩写范围更大)
+            #   否 → 从 max_existing+1 开始(老章完全不动,只 append)
+            actual_start = starting_chapter if (starting_chapter and starting_chapter > max_existing) else (max_existing + 1)
+            if starting_chapter and starting_chapter <= max_existing:
+                logger.info(
+                    f"[continue] starting_chapter={starting_chapter} <= existing_max={max_existing},"
+                    f"改用 max_existing+1={max_existing+1}"
+                )
+            missing_nums = list(range(actual_start, total + 1))
     else:
         # auto 模式:覆盖 1~total
         existing_nums = {int(c.get("chapter_num", 0)) for c in chapter_outlines if c.get("chapter_num")}
@@ -990,25 +1006,37 @@ def _continue_chapter_outlines_if_needed(
             f"补第 {batch_start}-{batch_end} 章(共 {len(batch_nums)} 章, max_tokens={dynamic_max_tokens})"
         )
 
-        # 续写 prompt
+        # 续写 prompt (带"重新构思"模式说明)
+        is_rearrange = mode == "extend" and starting_chapter and starting_chapter > 1
+        rearrange_hint = ""
+        if is_rearrange:
+            rearrange_hint = (
+                "\n【重新构思模式】\n"
+                f"用户已写正文到第 {starting_chapter - 1} 章,从第 {starting_chapter} 章起的内容需要重新构思。\n"
+                f"本次任务不只是\"补全缺失章节\",而是要从 starting_chapter={starting_chapter} 起,"
+                f"把大纲重新安排到第 {batch_end} 章,合理承接前 {starting_chapter - 1} 章的正文。\n"
+                f"可大胆重新构思:同一关键事件可以有新的实现路径,不要死守旧版的占位大纲。\n"
+            )
+
         continue_system = (
             "你正在为一部长篇小说续写缺失的章节大纲。\n"
             f"小说总章节数:{total}。本轮需要补全第 {batch_start} 章到第 {batch_end} 章(共 {batch_nums[-1] - batch_nums[0] + 1} 章)。\n"
             "\n"
             "【已有上下文摘要】\n"
             f"{context_str}\n"
-            "\n"
-            "【续写要求】\n"
+            + rearrange_hint +
+            "\n【续写要求】\n"
             f"1. 仅输出 chapter_outlines 数组(其他字段都不需要)\n"
             f"2. 数组长度 = {len(batch_nums)}(第 {batch_start} 章到第 {batch_end} 章,不能漏)\n"
             "3. 每章只写 1 句话 key_content(≤40 字,描述本章 1 个核心事件)\n"
-            "4. 严格禁止与已有章节的 key_content 重复(去重自检:相邻/任意两章重合度 < 40%)\n"
+            "4. 严格禁止与已有章节(1 ~ starting_chapter-1)的 key_content 重复(去重自检:相邻/任意两章重合度 < 40%)\n"
             "5. 同一人物/场景/物品的关键事件只能出现 1 次\n"
             "6. 标题不要「第 N 章」纯序号,要 4-15 字相关标题\n"
             "7. 保持与已有章节的 volume_num 分配一致\n"
             "8. 续写时充分考虑衔接性(已发生事件的延续),不要突兀\n"
-            "\n"
-            "返回 JSON 格式:\n"
+            + ("9. 重新构思模式: 用户没写正文,可适度自由,允许同一关键事件有 2-3 种实现路径\n"
+               "   不要写死具体动作/对话/选择,只标核心事件方向,给用户写正文时选择空间\n" if is_rearrange else "")
+            + "\n返回 JSON 格式:\n"
             '{"chapter_outlines": [...]}'
         )
 
@@ -1033,22 +1061,37 @@ def _continue_chapter_outlines_if_needed(
                     f"[stage_4a_outline] 续写第 {loop_idx+1} 轮 LLM 没返回 chapter_outlines,停止续写"
                 )
                 break
-            # extend 模式:严格只 append 新章(章节号 > 已有最大),防止 LLM 改写老章
-            if mode == "extend" and chapter_outlines:
-                existing_max = max(
-                    int(c.get("chapter_num", 0)) for c in chapter_outlines
-                )
-                new_outlines = [
-                    c for c in new_outlines
-                    if int(c.get("chapter_num", 0)) > existing_max
-                ]
+
+            # extend 模式 + 有 starting_chapter → 重新构思模式
+            #    LLM 重新生成 [starting_chapter, target_total],会 OVERWRITE 已有大纲
+            #    但 [1, starting_chapter-1] 范围的章节号不收
+            # extend 模式 + 无 starting_chapter → append 模式(老章不收)
+            if mode == "extend":
+                if starting_chapter and starting_chapter > 1:
+                    # 重新构思模式: 只收 >= starting_chapter 的(LLM 会重新生成这段)
+                    new_outlines = [
+                        c for c in new_outlines
+                        if int(c.get("chapter_num", 0)) >= starting_chapter
+                    ]
+                else:
+                    # append 模式: 只收 > existing_max 的
+                    if chapter_outlines:
+                        existing_max = max(
+                            int(c.get("chapter_num", 0)) for c in chapter_outlines
+                        )
+                        new_outlines = [
+                            c for c in new_outlines
+                            if int(c.get("chapter_num", 0)) > existing_max
+                        ]
+
             chapter_outlines.extend(new_outlines)
             existing_nums = {int(c.get("chapter_num", 0)) for c in chapter_outlines if c.get("chapter_num")}
             missing_nums = sorted(set(range(1, total + 1)) - existing_nums)
             if mode == "extend" and chapter_outlines:
-                # extend 模式:missing_nums 只在已有 max 之上
+                # extend 模式:missing_nums 只在 starting_chapter 之上
                 existing_max = max(int(c.get("chapter_num", 0)) for c in chapter_outlines)
-                missing_nums = [n for n in missing_nums if n > existing_max]
+                base = max(starting_chapter, existing_max + 1) if starting_chapter else (existing_max + 1)
+                missing_nums = [n for n in missing_nums if n >= base]
             # 同步更新 context_summary 的最后 10 章(给下一轮用)
             context_summary["existing_chapter_titles"] = [
                 f"第{c.get('chapter_num')}章《{c.get('title', '?')}》: {c.get('key_content', '')}"
@@ -1154,6 +1197,32 @@ def extend_outline_chapters(
         return {"status": "failed", "error": "现有 chapter_outlines 缺少 chapter_num"}
     existing_max = max(existing_nums)
     old_total = existing_max
+
+    # ==== 计算"已写正文最大章号"(body_max) ====
+    #     用于扩写时: 从 body_max+1 开始重新安排情节
+    #     这部分章节用户还没写正文,可以重新构思大纲
+    body_max = 0
+    try:
+        from storage.models import Chapter
+        chapters_with_body = db.query(Chapter).filter(
+            Chapter.project_id == project_id,
+            Chapter.content.isnot(None),
+            Chapter.content != "",
+        ).all()
+        body_max = max((c.order + 1 for c in chapters_with_body), default=0)
+    except Exception as e:
+        logger.warning(f"[extend_outline] 查已写正文失败: {e}")
+
+    # 扩写起点: body_max + 1
+    # 例: 100 章大纲,50 章正文 → 从第 51 章开始重新安排
+    starting_chapter = body_max + 1
+    if starting_chapter > existing_max:
+        # 用户已写完所有大纲章节,从空白开始扩写
+        starting_chapter = existing_max + 1
+    logger.info(
+        f"[extend_outline] 扩写起点: body_max={body_max}, "
+        f"existing_max={existing_max}, starting_chapter={starting_chapter}"
+    )
 
     # ==== 缩减路径: target_total < existing_max ====
     #     删尾部章节 (existing_max ~ target_total+1)
@@ -1278,17 +1347,33 @@ def extend_outline_chapters(
     )
 
     # 准备扩展上下文(供 LLM 续写参考)
+    # 上下文包含 3 部分:
+    #   1. 已写正文 (1-body_max): 用户实际写过的章节,LLM 不能破坏剧情
+    #   2. 仅大纲未写正文 (body_max+1 ~ existing_max): 之前的占位大纲,
+    #      扩写时可以**重新构思**(这就是用户要的"重新安排情节")
+    #   3. 新扩写 (existing_max+1 ~ target_total): 全新章节
     context_summary = {
         "volumes": list(proj.volumes or []),
         "plot_lines": [pl.get("title", "") for pl in (proj.plot_lines or [])],
         "structure": dict(proj.structure or {}),
         "pacing_notes": proj.pacing_notes or "",
         "outline_text": (proj.outline_text or "")[:500],
-        "existing_chapter_titles": [
+        # 已写正文范围(不可破坏)
+        "written_chapters": [
             f"第{c.get('chapter_num')}章《{c.get('title', '?')}》: {c.get('key_content', '')}"
-            for c in existing_chapter_outlines[-10:]
+            for c in existing_chapter_outlines
+            if int(c.get("chapter_num", 0)) <= body_max
         ],
-        "extend_range": f"第{existing_max+1}章 - 第{target_total}章(共 {added_count} 章)",
+        # 仅大纲未写正文范围(可重新构思)
+        "draft_only_chapters": [
+            f"第{c.get('chapter_num')}章《{c.get('title', '?')}》: {c.get('key_content', '')}"
+            for c in existing_chapter_outlines
+            if body_max < int(c.get("chapter_num", 0)) <= existing_max
+        ],
+        # 总扩展范围
+        "extend_range": f"第{starting_chapter}章 - 第{target_total}章(共 {target_total - starting_chapter + 1} 章)",
+        "body_max": body_max,
+        "existing_max": existing_max,
     }
     context_str = _json.dumps(context_summary, ensure_ascii=False, indent=1)
 
@@ -1302,19 +1387,19 @@ def extend_outline_chapters(
             arch_body_hint = _build_chapter_body_status_hint(project_id, db)
             extend_arch_prompt = (
                 "你正在为一部已完成的小说扩写架构层(把故事从 N 章扩展到 target_total 章)。\n"
-                f"当前已有 {old_total} 章,目标 {target_total} 章,扩展区间:第 {existing_max+1} - {target_total} 章。\n"
+                f"当前已有 {old_total} 章,目标 {target_total} 章。\n"
+                f"已写正文到第 {body_max} 章,从第 {starting_chapter} 章开始需要重新构思大纲(给用户扩展留出空间)。\n"
                 "\n"
-                "【已有架构(不要修改)】\n"
+                "【已有架构 + 现有大纲状态(不要修改)】\n"
                 f"{context_str}\n"
                 "\n"
                 + (arch_body_hint if arch_body_hint else "") +
                 "\n【扩写要求】\n"
-                "1. 只输出扩展区间(第 existing_max+1 - target_total 章)的架构内容\n"
-                "2. volumes: 追加 1-2 个新卷(覆盖扩展区间),每卷给 title/from_chapter/to_chapter/summary/core_event\n"
-                "3. plot_lines: 追加剧情线(可复用已有或新增),给 title/from_chapter/to_chapter/description\n"
-                "4. structure.acts: 追加幕(可扩展第二/三/四幕以覆盖新章)\n"
-                "5. 充分延续已有架构(风格、主题保持一致),不能矛盾\n"
-                "6. reversal_schedule 和 climax_map 可选(暂不输出)\n"
+                f"1. volumes: 追加覆盖 [{starting_chapter} - {target_total}] 的卷(1-2 个),每卷给 title/from_chapter/to_chapter/summary/core_event\n"
+                f"2. plot_lines: 追加剧情线(覆盖 [{starting_chapter} - {target_total}] 范围),给 title/from_chapter/to_chapter/description\n"
+                f"3. structure.acts: 追加幕(覆盖 [{starting_chapter} - {target_total}] 范围)\n"
+                "4. 充分延续已有架构(风格、主题保持一致),不能矛盾\n"
+                "5. reversal_schedule 和 climax_map 可选(暂不输出)\n"
                 "\n"
                 "返回 JSON 格式:\n"
                 "{\n"
@@ -1323,7 +1408,11 @@ def extend_outline_chapters(
                 '  "structure": {"acts": [...]} // 追加的幕\n'
                 "}"
             )
-            user_prompt = f"扩写架构,扩展区间:第 {existing_max+1} - {target_total} 章。"
+            user_prompt = (
+                f"扩写架构。\n"
+                f"起始章(用户已写正文): 第 {body_max} 章\n"
+                f"需重新构思范围: 第 {starting_chapter} - {target_total} 章(共 {target_total - starting_chapter + 1} 章)"
+            )
             llm = LLMFactory.create(db=db)
             response = llm.generate(
                 prompt=user_prompt,
@@ -1347,20 +1436,33 @@ def extend_outline_chapters(
 
     # Step 2: 续写 chapter_outlines(沿用 _continue_chapter_outlines_if_needed)
     # 包装成 first_result 格式,让 _continue_* 能识别
+    # 如果是"重新构思模式"(有 starting_chapter),从 starting_chapter 之前的章节全部
+    # 移除(LLM 会重新生成这些 + 新增的),只保留 1 ~ starting_chapter-1 的"已写正文"
+    # 部分
+    if starting_chapter > 1:
+        kept_outlines_before = [
+            c for c in existing_chapter_outlines
+            if int(c.get("chapter_num", 0)) < starting_chapter
+        ]
+    else:
+        kept_outlines_before = list(existing_chapter_outlines)
+
     first_result = {
         "volumes": list(proj.volumes or []),
         "plot_lines": list(proj.plot_lines or []),
         "structure": dict(proj.structure or {}),
         "pacing_notes": proj.pacing_notes or "",
         "outline_text": proj.outline_text or "",
-        "chapter_outlines": list(existing_chapter_outlines),
+        # 只保留 1 ~ starting_chapter-1 的章节(已写正文不可破坏)
+        # LLM 重新生成 starting_chapter ~ target_total 全部
+        "chapter_outlines": kept_outlines_before,
         # 注入新扩的架构作为续写参考
         "_extend_volumes": new_volumes,
         "_extend_plot_lines": new_plot_lines,
         "_extend_structure_acts": new_structure_acts,
     }
 
-    # 用 extend 模式(只补 max_existing+1 ~ target_total)
+    # 用 extend 模式(传 starting_chapter 让 LLM 从已写正文之后重新构思)
     locked = {"total_chapters": target_total}
     result = _continue_chapter_outlines_if_needed(
         first_result=first_result,
@@ -1371,17 +1473,27 @@ def extend_outline_chapters(
         max_loops=10,
         target_total=target_total,
         mode="extend",
+        starting_chapter=starting_chapter,  # 关键: 告诉 LLM 从哪开始重新构思
     )
 
     new_chapter_outlines = result.get("chapter_outlines", [])
-    added_chapters = [
-        c for c in new_chapter_outlines
-        if int(c.get("chapter_num", 0)) > existing_max
-    ]
+    # 重新构思模式: 第 [starting_chapter, target_total] 范围的章都算"新生成的"
+    # 追加模式: only > existing_max
+    if starting_chapter > 1:
+        added_chapters = [
+            c for c in new_chapter_outlines
+            if int(c.get("chapter_num", 0)) >= starting_chapter
+        ]
+    else:
+        added_chapters = [
+            c for c in new_chapter_outlines
+            if int(c.get("chapter_num", 0)) > existing_max
+        ]
 
-    if len(added_chapters) < added_count:
+    if len(added_chapters) < (target_total - starting_chapter + 1):
         logger.warning(
-            f"[extend_outline] 续写不足:目标新增 {added_count} 章,实际 {len(added_chapters)} 章"
+            f"[extend_outline] 续写不足:目标新增 {target_total - starting_chapter + 1} 章,"
+            f"实际 {len(added_chapters)} 章"
         )
 
     # Step 3: 持久化(不修改已有 1~existing_max 任何字段)
