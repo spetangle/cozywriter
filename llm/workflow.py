@@ -400,6 +400,8 @@ STAGE_PROMPTS = {
             "【输入】上一阶段架构（分卷/剧情线/四幕/反转/高潮），会通过 prev_outputs 传入。\n"
             "【输出】chapter_outlines 数组（每章 1 条）\n"
             "\n"
+            "{body_status_hint}"  # 占位符:由调用方注入"已写正文 vs 仅大纲"状态
+            "\n"
             "═══════════════════════════════════════════════════════════════\n"
             "【每章节细纲 - 严格 1 章 1 句，必须覆盖 1~total_chapters 全部章节】\n"
             "═══════════════════════════════════════════════════════════════\n"
@@ -436,6 +438,15 @@ STAGE_PROMPTS = {
             "       不要在不同章让同一场景重复出现\n"
             "     - 同一物品/线索/谜题（如「神秘玉佩」「旧伤」「加密文件」）的揭示/获取/使用，\n"
             "       必须分布在不同章\n"
+            "\n"
+            "【对不同章节状态的差异化处理】\n"
+            "   - 已写正文章节(N 章):大纲只作\"参考性提示\",你不能为这些章编出\n"
+            "     与已有正文矛盾的事件(用户后面会用此大纲引导生成内容)\n"
+            "   - 仅大纲未写正文章节:大纲可适度具体(给用户写正文时参考),\n"
+            "     但**预留灵活度**:同一关键事件允许有 2-3 种实现路径,\n"
+            "     不要把人物对话/具体动作写死,只标核心事件方向\n"
+            "   - 扩写的新章节(超出原 total 的部分):更自由,可以大胆设计,\n"
+            "     但要与\"已写正文\"和\"仅大纲未写正文\"的章节保持情节连贯性\n"
             "\n"
             "【去重自检 - 生成完毕后请逐章检查】\n"
             "   1. 相邻两章的 key_content 不能描述同一件事\n"
@@ -669,6 +680,7 @@ def run_bootstrap_sync(run_id: int, user_input: dict, db=None) -> dict:
                     user_filled=user_filled,
                     prev_outputs=prev_outputs,
                     db=db,
+                    project_id=run.project_id,
                 )
 
                 stage_results[stage_id] = {
@@ -734,13 +746,27 @@ def run_bootstrap_sync(run_id: int, user_input: dict, db=None) -> dict:
 
 
 def _run_single_stage(stage_id: str, locked: dict, user_filled: dict,
-                      prev_outputs: dict, db=None) -> dict:
+                      prev_outputs: dict, db=None, project_id: int | None = None) -> dict:
     """单个 stage 的 LLM 调用 + JSON 解析"""
     defn = STAGE_DEFS[stage_id]
     prompt_def = STAGE_PROMPTS[stage_id]
 
+    # stage_4a_chapter_outlines 注入"已写正文 vs 仅大纲"状态
+    task_description = prompt_def["task"]
+    if stage_id == "stage_4a_chapter_outlines" and db is not None:
+        # 优先从参数拿 project_id,否则从 locked/prev_outputs 拿
+        pid = project_id
+        if not pid and isinstance(locked, dict):
+            pid = locked.get("project_id") or locked.get("_project_id")
+        if not pid and isinstance(prev_outputs, dict):
+            pid = prev_outputs.get("_project_id") or prev_outputs.get("project_id")
+        body_hint = _build_chapter_body_status_hint(pid, db) if pid else ""
+        task_description = task_description.replace("{body_status_hint}", body_hint)
+    else:
+        task_description = task_description.replace("{body_status_hint}", "")
+
     role = build_bootstrap_role(
-        task_description=prompt_def["task"],
+        task_description=task_description,
         locked_inputs=locked,
         prev_outputs=prev_outputs,
         max_tokens=defn["max_tokens"],
@@ -763,6 +789,100 @@ def _run_single_stage(stage_id: str, locked: dict, user_filled: dict,
     )
 
     return _parse_json(response)
+
+
+def _build_chapter_body_status_hint(project_id: int, db) -> str:
+    """构造「已写正文 vs 仅大纲」状态提示,注入 stage_4a_chapter_outlines 的 prompt。
+
+    让 LLM 知道:
+      - 哪些章已经写了正文(改大纲会跟用户实际写的内容冲突)
+      - 哪些章只有大纲没有正文(可以适度具体,但要预留灵活度)
+      - 哪些章是扩写的新章(更自由,但要与已有章节保持情节连贯)
+
+    Returns:
+        多行文本(空字符串表示没有章节记录,纯 bootstrap 首次生成)
+    """
+    from storage.models import Chapter
+    try:
+        chapters = db.query(Chapter).filter(Chapter.project_id == project_id).all()
+    except Exception:
+        return ""
+
+    if not chapters:
+        return ""  # bootstrap 首次生成,还没 Chapter 行
+
+    # 按 order 分类
+    with_body = sorted(
+        [c for c in chapters if (c.content or "").strip()],
+        key=lambda c: c.order,
+    )
+    without_body = sorted(
+        [c for c in chapters if not (c.content or "").strip()],
+        key=lambda c: c.order,
+    )
+
+    # 取每章标题 + order,前 30 + 后 10
+    def _fmt(chs, prefix):
+        if not chs:
+            return f"  (无)\n"
+        s = ""
+        for c in chs[:30]:
+            s += f"  {prefix}第{c.order+1}章《{c.title or '?'}》\n"
+        if len(chs) > 30:
+            s += f"  ... 共 {len(chs)} 章(仅显示前 30)\n"
+        return s
+
+    # 取已写正文范围 + 仅大纲范围
+    body_nums = [c.order + 1 for c in with_body]
+    outline_nums = [c.order + 1 for c in without_body]
+
+    if not body_nums and not outline_nums:
+        return ""
+
+    lines = [
+        "",
+        "═══════════════════════════════════════════════════════════════",
+        "【当前章节进度状态】",
+        "═══════════════════════════════════════════════════════════════",
+    ]
+    if body_nums:
+        # 范围 (按连续段压缩)
+        def _range_str(nums):
+            if not nums:
+                return ""
+            nums = sorted(set(nums))
+            ranges = []
+            s = nums[0]
+            for i in range(1, len(nums)):
+                if nums[i] != nums[i-1] + 1:
+                    ranges.append((s, nums[i-1]))
+                    s = nums[i]
+            ranges.append((s, nums[-1]))
+            return ", ".join([f"{a}-{b}" if a != b else str(a) for a, b in ranges])
+        lines.append(f"✅ 已写正文(共 {len(body_nums)} 章, 范围: {_range_str(body_nums)}):")
+        lines.append("  - 这部分章节大纲只能\"参考性\"调整,不能编出与已有正文矛盾的事件")
+        lines.append(_fmt(with_body, ""))
+    else:
+        lines.append("✅ 已写正文: (无)")
+
+    if outline_nums:
+        lines.append(f"📋 仅大纲未写正文(共 {len(outline_nums)} 章):")
+        lines.append("  - 这部分章节大纲可适度具体,但**预留灵活度**")
+        lines.append("  - 关键事件不要写死(具体动作/对话/选择),只标\"方向\"")
+        lines.append("  - 同一关键事件留 2-3 种实现路径,给用户写正文时选择")
+        lines.append(_fmt(without_body, ""))
+    else:
+        lines.append("📋 仅大纲未写正文: (无)")
+
+    lines.append("")
+    lines.append("【不同状态章节的扩写策略】")
+    lines.append("- 已写正文: 不要在这范围内引入新事件(用户会按正文扩展)")
+    lines.append("- 仅大纲未写正文: 这部分扩写要保持\"留白\"(不锁死具体选择)")
+    lines.append("- 新增的扩写章: 与已写/仅大纲的章节保持情节连贯,允许新事件")
+    lines.append("═══════════════════════════════════════════════════════════════")
+    lines.append("")
+
+    return "\n".join(lines)
 
 
 # 单次 LLM 请求生成 chapter_outlines 的最大章数（防止 prompt/output 超长）
@@ -1178,6 +1298,8 @@ def extend_outline_chapters(
     new_structure_acts = []
     if extend_architecture:
         try:
+            # 获取章节正文状态(已写正文 vs 仅大纲),注入架构扩写 prompt
+            arch_body_hint = _build_chapter_body_status_hint(project_id, db)
             extend_arch_prompt = (
                 "你正在为一部已完成的小说扩写架构层(把故事从 N 章扩展到 target_total 章)。\n"
                 f"当前已有 {old_total} 章,目标 {target_total} 章,扩展区间:第 {existing_max+1} - {target_total} 章。\n"
@@ -1185,7 +1307,8 @@ def extend_outline_chapters(
                 "【已有架构(不要修改)】\n"
                 f"{context_str}\n"
                 "\n"
-                "【扩写要求】\n"
+                + (arch_body_hint if arch_body_hint else "") +
+                "\n【扩写要求】\n"
                 "1. 只输出扩展区间(第 existing_max+1 - target_total 章)的架构内容\n"
                 "2. volumes: 追加 1-2 个新卷(覆盖扩展区间),每卷给 title/from_chapter/to_chapter/summary/core_event\n"
                 "3. plot_lines: 追加剧情线(可复用已有或新增),给 title/from_chapter/to_chapter/description\n"
@@ -2088,6 +2211,7 @@ def rerun_stage(run_id: int, stage_id: str, db) -> dict:
             user_filled=user_filled,
             prev_outputs=prev_outputs,
             db=db,
+            project_id=project_id,
         )
         # ── stage_4a_chapter_outlines 续生成：单独阶段也可能被截断
         #     (虽然 max_tokens=16384 通常够 100 章,但 LLM 偶尔输出 <N 章)
@@ -2275,6 +2399,7 @@ def rerun_all_failed_stages(run_id: int, db, only_failed: bool = True, force_all
                     user_filled=user_filled,
                     prev_outputs=prev_outputs,
                     db=db,
+                    project_id=run.project_id,
                 )
                 # ── stage_4a_chapter_outlines 续生成：单次 LLM 输出被 max_tokens 截断时
                 #     自动检测缺口并循环续写,直到覆盖 total_chapters
