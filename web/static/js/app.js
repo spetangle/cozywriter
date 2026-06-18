@@ -1501,7 +1501,7 @@ function app() {
 
     /**
      * 确认扩写/缩减:调后端 extend-outline API
-     * 完成后刷新项目数据 + 重新拉取 bootstrapData
+     * 异步模式: 拿到 task_id 后轮询, 完成后刷新项目数据 + bootstrapData
      */
     async confirmExtendOutline() {
       if (!this.currentProject) return;
@@ -1542,31 +1542,103 @@ function app() {
           { method: 'POST' }
         );
         const data = await res.json();
-        if (data.status === 'ok') {
+
+        // 无变化:直接同步返回
+        if (data.status === 'ok' && !data.task_id) {
+          await this._afterExtendOutline(data, isExpand);
+          return;
+        }
+
+        // 已提交任务
+        if (data.status === 'submitted' && data.task_id) {
           const action = isExpand ? '扩写' : '缩减';
           alert(
-            `✅ 大纲${action}完成!\n\n` +
-            `原 ${data.old_total} 章 → 新 ${data.new_total} 章\n` +
-            (isExpand
-              ? `新增 chapter_outlines: ${data.added_chapters} 章\n` +
-                `新增 volumes: ${(data.added_volumes || []).length} 个\n` +
-                `新增 plot_lines: ${(data.added_plot_lines || []).length} 条\n` +
-                `新增 acts: ${(data.added_acts || []).length} 个`
-              : `删除尾部 ${data.removed_chapters || 0} 章\n` +
-                `保留 ${data.kept_chapters || 0} 章`)
+            `⏳ 大纲${action}任务已提交\n\n` +
+            `${data.description}\n\n` +
+            `任务 ID: ${data.task_id}\n` +
+            `可在「任务管理」中查看实时进度。\n` +
+            `完成后会自动刷新项目数据。`
           );
-          // 刷新项目数据 + bootstrapData
-          await this.openProject(this.currentProject);
-          this._refreshBootstrapData();
-        } else {
-          alert('操作失败: ' + (data.error || JSON.stringify(data)));
+          // 刷新任务列表(让任务管理面板显示)
+          if (this.refreshAllTasks) this.refreshAllTasks();
+          // 自动打开任务管理面板,用户能看到进度
+          this.showTaskManager = true;
+          // 轮询任务直到完成
+          const task = await this._pollTask(data.task_id, {
+            onProgress: () => {
+              if (this.refreshAllTasks) this.refreshAllTasks();
+            },
+          });
+          if (task.status === 'completed' && task.result) {
+            await this._afterExtendOutline(task.result, isExpand);
+          } else if (task.status === 'failed') {
+            alert('操作失败: ' + (task.error || 'unknown'));
+          }
+          return;
         }
+
+        // 直接失败
+        alert('操作失败: ' + (data.error || JSON.stringify(data)));
       } catch (e) {
         console.error('[confirmExtendOutline] failed:', e);
         alert('操作失败: ' + e.message);
       } finally {
         this.extendOutlineBusy = false;
       }
+    },
+
+    /**
+     * 扩写/缩减完成后:弹结果 + 刷新项目数据 + 重新加载 bootstrapData
+     */
+    async _afterExtendOutline(data, isExpand) {
+      if (!this.currentProject) return;
+      if (data.status !== 'ok') {
+        alert('操作失败: ' + (data.error || JSON.stringify(data)));
+        return;
+      }
+      const action = isExpand ? '扩写' : '缩减';
+      // 弹结果统计
+      if (isExpand) {
+        alert(
+          `✅ 大纲${action}完成!\n\n` +
+          `原 ${data.old_total} 章 → 新 ${data.new_total} 章\n` +
+          `新增 chapter_outlines: ${data.added_chapters} 章\n` +
+          `新增 volumes: ${(data.added_volumes || []).length} 个\n` +
+          `新增 plot_lines: ${(data.added_plot_lines || []).length} 条\n` +
+          `新增 acts: ${(data.added_acts || []).length} 个`
+        );
+      } else {
+        alert(
+          `✅ 大纲${action}完成!\n\n` +
+          `原 ${data.old_total} 章 → 新 ${data.new_total} 章\n` +
+          `删除尾部 ${data.removed_chapters || 0} 章\n` +
+          `保留 ${data.kept_chapters || 0} 章`
+        );
+      }
+      // 刷新项目数据(后端 Project.total_chapters 已更新)
+      // 关键: 必须用后端返回的最新数据刷新 currentProject, 否则前端还显示旧 total_chapters
+      try {
+        const projRes = await fetch(`/api/projects/${this.currentProject.id}`);
+        if (projRes.ok) {
+          const freshProj = await projRes.json();
+          // 更新 currentProject
+          Object.assign(this.currentProject, freshProj);
+          // 重新计算字数
+          this._recalcProjectWordCount();
+        }
+      } catch (e) {
+        console.warn('[afterExtendOutline] fetch project failed:', e);
+      }
+      // 重新拉 bootstrapData(让大纲面板显示新 chapter_outlines)
+      await this._refreshBootstrapData();
+      // 重新加载章节列表(如果扩写到 > existing, 不会自动创建 Chapter; 但要刷新 total_chapters)
+      // 如果是缩减, 也不会删 Chapter(只是删 chapter_outlines 元数据)
+      await this.loadChapters(this.currentProject.id);
+      console.log(
+        `[afterExtendOutline] ${action} 完成:`,
+        `${data.old_total} → ${data.new_total},`,
+        `kept=${data.kept_chapters || '-'}, added=${data.added_chapters || '-'}, removed=${data.removed_chapters || '-'}`
+      );
     },
 
     /**

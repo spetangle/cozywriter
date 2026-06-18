@@ -584,27 +584,100 @@ async def extend_outline_chapters(
       2. 无变化 (target == existing): 直接返回
       3. 缩减 (target < existing): 删尾部章节(不删 Chapter,只删 chapter_outlines 元数据 + 失效伏笔)
 
-    Args:
-        target_chapters: 目标总章节数(必须 >= 0)
-        extend_architecture: 是否扩 volumes/plot_lines/structure(默认 True,仅扩写时生效)
-
-    行为:
-      1. 读现有 ProjectOutline(不动)
-      2. 算缺/多 [max_existing+1 ~ target] 区间
-      3. (可选) 扩架构层:新卷/新剧情线/新幕
-      4. 续写 chapter_outlines 的缺口(扩写) / 截断 chapter_outlines(缩减)
-      5. 持久化(扩写不动老章;缩减只删尾部,不动保留的)
+    异步模式: 立即返回 task_id,前端轮询 /api/tasks/{task_id} 获取进度与结果。
     """
     from llm.workflow import extend_outline_chapters as _extend
+    from api.tasks import submit_llm_task, get_task
+    from storage.database import SessionLocal
+
     if target_chapters < 0:
         return {"status": "failed", "error": "target_chapters 必须 >= 0"}
-    result = _extend(
+
+    # 查项目元信息(用于任务描述)
+    from storage.models.project import Project
+    proj = db.query(Project).filter(Project.id == project_id).first()
+    proj_title = proj.title if proj else f"#{project_id}"
+
+    # 计算"扩"或"缩"方向用于任务描述
+    from storage.models import ProjectOutline
+    proj_outline = db.query(ProjectOutline).filter(ProjectOutline.project_id == project_id).first()
+    existing_max = 0
+    if proj_outline and proj_outline.chapter_outlines:
+        existing_max = max(
+            [int(c.get("chapter_num", 0)) for c in proj_outline.chapter_outlines if c.get("chapter_num")],
+            default=0,
+        )
+    if target_chapters > existing_max:
+        action = "扩写"
+        diff = target_chapters - existing_max
+    elif target_chapters < existing_max:
+        action = "缩减"
+        diff = existing_max - target_chapters
+    else:
+        action = "无变化"
+        diff = 0
+    description = f"大纲{action} [{proj_title}] {existing_max}→{target_chapters} 章"
+    if action == "无变化":
+        # 直接同步返回(不进入线程池)
+        result = _extend(
+            project_id=project_id, target_total=target_chapters, db=db,
+            extend_architecture=extend_architecture,
+        )
+        return result
+
+    # 异步: 提交到线程池
+    def _async_extend_task(task_id: str, **kwargs):
+        local_db = SessionLocal()
+        try:
+            task = get_task(task_id)
+            if task is not None:
+                task.progress = 10
+                task.status = "running"
+
+            result = _extend(
+                project_id=kwargs["project_id"],
+                target_total=kwargs["target_chapters"],
+                db=local_db,
+                extend_architecture=kwargs.get("extend_architecture", True),
+            )
+            task = get_task(task_id)
+            if task is None:
+                return
+            if result.get("status") == "ok":
+                task.status = "completed"
+                task.result = result
+                task.progress = 100
+            else:
+                task.status = "failed"
+                task.error = result.get("error", "extend failed")
+                task.result = result
+        except Exception as e:
+            logger.error(f"[extend-outline async] failed: {e}")
+            task = get_task(task_id)
+            if task is not None:
+                task.status = "failed"
+                task.error = str(e)
+        finally:
+            local_db.close()
+
+    task = submit_llm_task(
+        task_type="extend_outline",
+        llm_call_fn=_async_extend_task,
         project_id=project_id,
-        target_total=target_chapters,
-        db=db,
+        description=description,
+        target_chapters=target_chapters,
         extend_architecture=extend_architecture,
     )
-    return result
+    return {
+        "status": "submitted",
+        "task_id": task.id,
+        "description": description,
+        "action": action,
+        "old_total": existing_max,
+        "target_total": target_chapters,
+        "diff": diff,
+        "message": f"已提交{action}任务,前端轮询 /api/tasks/{task.id} 获取进度",
+    }
 
 
 @router.post("/run/{run_id}/rerun-and-commit")

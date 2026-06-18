@@ -2889,3 +2889,148 @@ color: #92400e;
   border-radius:3px;
   transition:width .3s;
 }
+
+
+/* ═══ 扩写 / 缩减大纲浮层 ═══ */
+
+.extend-outline-status {
+  background: #f5f7fa;
+  border: 1px solid #e0e6ed;
+  border-radius: 6px;
+  padding: 14px 16px;
+  margin-bottom: 18px;
+  font-size: 13px;
+  line-height: 1.9;
+}
+
+.extend-status-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.extend-status-row.extend-status-highlight {
+  padding-top: 6px;
+  border-top: 1px dashed #d1d5db;
+  margin-top: 6px;
+}
+
+.extend-status-label {
+  color: #6b7280;
+}
+
+.extend-status-value {
+  color: #374151;
+  font-size: 14px;
+}
+
+.extend-status-value.extend-value-pos {
+  color: #059669;
+  font-weight: 600;
+}
+
+.extend-status-value.extend-value-neg {
+  color: #dc2626;
+  font-weight: 600;
+}
+
+.extend-status-value.extend-value-primary {
+  color: #1d4ed8;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.extend-outline-inputs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.extend-input-label {
+  display: block;
+  font-size: 12px;
+  color: #6b7280;
+  margin-bottom: 4px;
+}
+
+.extend-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+.extend-input:focus {
+  outline: 2px solid #3b82f6;
+  outline-offset: -1px;
+  border-color: #3b82f6;
+}
+
+.extend-input-hint {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-top: 2px;
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+}
+
+.extend-hint {
+  border-radius: 4px;
+  padding: 10px 12px;
+  font-size: 12px;
+  margin-bottom: 14px;
+  line-height: 1.5;
+}
+
+.extend-hint-success {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  color: #065f46;
+}
+
+.extend-hint-info {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1e3a8a;
+}
+
+.extend-hint-danger {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #7f1d1d;
+}
+
+.extend-arch-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.extend-arch-option input[type="checkbox"] {
+  cursor: pointer;
+}
+
+.extend-arch-option input[type="checkbox"]:disabled + span {
+  color: #9ca3af;
+}
+
+.extend-arch-disabled-hint {
+  color: #9ca3af;
+  font-size: 11px;
+  margin-left: 4px;
+}
+
+.modal-footer {
+  padding: 12px 24px;
+  border-top: 1px solid #e0e6ed;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  background: #fafbfc;
+}
