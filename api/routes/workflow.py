@@ -630,15 +630,20 @@ async def extend_outline_chapters(
         local_db = SessionLocal()
         try:
             task = get_task(task_id)
+            # project_id 不在 kwargs 里(被 submit_llm_task 的 named param 收走)
+            # 从 task 对象取
+            pid = task.project_id if task is not None else kwargs.get("project_id")
+            target = kwargs.get("target_chapters") or kwargs.get("target_total")
+            ext_arch = kwargs.get("extend_architecture", True)
             if task is not None:
                 task.progress = 10
                 task.status = "running"
 
             result = _extend(
-                project_id=kwargs["project_id"],
-                target_total=kwargs["target_chapters"],
+                project_id=pid,
+                target_total=target,
                 db=local_db,
-                extend_architecture=kwargs.get("extend_architecture", True),
+                extend_architecture=ext_arch,
             )
             task = get_task(task_id)
             if task is None:
