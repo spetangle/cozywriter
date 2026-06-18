@@ -85,12 +85,14 @@ function app() {
     // 「设定文档预览」界面（大纲/角色/世界观/伏笔/主题）的"重新生成"按钮状态
     // 按 stage_id 记录是否正在跑，避免同一 stage 并发触发
     rerunStageBusy: {},
-    // 扩写大纲浮层状态
+    // 扩写大纲浮层状态（支持扩写 / 缩减 / 无变化）
     showExtendOutlineModal: false,
-    extendOutlineTarget: null,           // 目标总章节数
-    extendOutlineArchitecture: true,     // 是否同时扩写架构
-    extendOutlineBusy: false,            // 是否正在扩写
-    extendOutlineHint: '',               // 提示文本
+    extendOutlineOriginalTotal: 0,       // 原目标总章节数 (Project.total_chapters)
+    extendOutlineGenerated: 0,            // 已生成一句话大纲的章数
+    extendOutlineExtendBy: 0,             // 计划向后扩展的章数 (可负:负数=缩减)
+    extendOutlineNewTotal: 0,             // 新目标章节总数
+    extendOutlineArchitecture: true,      // 是否同时扩写架构层 (仅扩写时生效)
+    extendOutlineBusy: false,             // 是否正在扩写
     // 创建项目表单（12 字段：4 必填 + 8 选填）
     newProjectForm: {
       // 4 必填
@@ -1436,71 +1438,132 @@ function app() {
     },
 
     /**
-     * 「扩写大纲」浮层入口
-     * 大纲面板 → 📈 扩写大纲 按钮 → 打开浮层 → 让用户输入目标总章节数
+     * 「扩写 / 缩减大纲」浮层入口
+     * 大纲面板 → 📈 扩写大纲 按钮 → 打开浮层
+     *
+     * 浮层展示 4 个状态数字:
+     *   原目标总章节数、原已生成大纲章数、计划向后扩展章数、新目标章节总数
+     * 其中"计划向后扩展"和"新目标章节总数"双向联动。
      */
     openExtendOutlineModal() {
       if (!this.currentProject) return;
-      // 默认建议值: 当前 total_chapters + 100 (或 200,看哪个更圆)
-      const cur = this.currentProject.total_chapters || 0;
-      // 1. 浮层打开时给合理建议
-      this.extendOutlineTarget = cur + 100;
+      this.extendOutlineOriginalTotal = this.currentProject.total_chapters || 0;
+      // 已生成大纲章数:从 bootstrapData.outline.chapter_outlines 算
+      let generated = 0;
+      if (this.bootstrapData && this.bootstrapData.outline
+          && Array.isArray(this.bootstrapData.outline.chapter_outlines)) {
+        generated = this.bootstrapData.outline.chapter_outlines.length;
+      }
+      this.extendOutlineGenerated = generated;
+      // 默认建议: 扩写 + 100 (无变化)
+      this.extendOutlineExtendBy = 100;
+      this.extendOutlineNewTotal = generated + 100;
       this.extendOutlineArchitecture = true;
-      // 2. hint:已写多少章,扩写要新加多少章
-      this.extendOutlineHint = `当前已有 ${cur} 章,扩到 ${this.extendOutlineTarget} 章将新增 ${this.extendOutlineTarget - cur} 章。`;
+      this.extendOutlineBusy = false;
       this.showExtendOutlineModal = true;
     },
 
     extendOutlineBtnTitle() {
-      return '基于已有大纲扩写更多章节(不会修改已完成章节)';
+      return '基于已有大纲扩写更多章节,或缩减小说篇幅';
     },
 
     /**
-     * 确认扩写:调后端 extend-outline API
+     * 双向联动输入:
+     *   - 用户改 "计划向后扩展" → 自动算 newTotal = generated + extendBy
+     *   - 用户改 "新目标章节总数" → 自动算 extendBy = newTotal - generated
+     */
+    onExtendOutlineChange(which, rawValue) {
+      // 容错:空 / 非数字
+      const v = parseInt(rawValue);
+      if (isNaN(v)) return;
+      if (which === 'extendBy') {
+        this.extendOutlineExtendBy = v;
+        this.extendOutlineNewTotal = this.extendOutlineGenerated + v;
+      } else if (which === 'newTotal') {
+        // newTotal 不能 < 0,夹回 0
+        this.extendOutlineNewTotal = Math.max(0, v);
+        this.extendOutlineExtendBy = this.extendOutlineNewTotal - this.extendOutlineGenerated;
+      }
+    },
+
+    /**
+     * 提交按钮可用性:
+     *   - 无变化(0)  → 不让提交,提示关闭
+     *   - 扩写 (>0)  → 可提交
+     *   - 缩减 (<0)  → 可提交,但 newTotal 必须 >= 0
+     */
+    canSubmitExtendOutline() {
+      if (this.extendOutlineBusy) return false;
+      if (this.extendOutlineExtendBy === 0) return false;  // 0 = 无变化
+      if (this.extendOutlineNewTotal < 0) return false;
+      return true;
+    },
+
+    /**
+     * 确认扩写/缩减:调后端 extend-outline API
      * 完成后刷新项目数据 + 重新拉取 bootstrapData
      */
     async confirmExtendOutline() {
       if (!this.currentProject) return;
-      const target = parseInt(this.extendOutlineTarget);
-      const cur = this.currentProject.total_chapters || 0;
-      if (!target || target <= cur) {
-        alert(`目标总章节数 (${target}) 必须 > 已有章数 (${cur})`);
+      const newTotal = this.extendOutlineNewTotal;
+      const generated = this.extendOutlineGenerated;
+      const diff = this.extendOutlineExtendBy;  // >0 扩写, <0 缩减
+
+      // 安全检查
+      if (newTotal < 0) {
+        alert('新目标章节总数不能 < 0');
         return;
       }
-      if (!confirm(
-        `确定把项目「${this.currentProject.title}」的大纲从 ${cur} 章扩到 ${target} 章吗？\n\n` +
-        `• 已有章节:不会修改\n` +
-        `• 新增章节: ${target - cur} 章\n` +
-        `• 架构层(分卷/剧情线/四幕): ${this.extendOutlineArchitecture ? '同步扩写' : '保留原架构'}`
-      )) return;
+      if (diff === 0) {
+        // 0 = 无变化,直接关
+        this.showExtendOutlineModal = false;
+        return;
+      }
+
+      // 二次确认
+      const isExpand = diff > 0;
+      const confirmMsg = isExpand
+        ? `确定把项目「${this.currentProject.title}」的大纲从 ${generated} 章扩到 ${newTotal} 章吗？\n\n` +
+          `• 已有章节:不会修改\n` +
+          `• 新增章节: ${diff} 章\n` +
+          `• 架构层(分卷/剧情线/四幕): ${this.extendOutlineArchitecture ? '同步扩写' : '保留原架构'}`
+        : `确定把项目「${this.currentProject.title}」的大纲从 ${generated} 章缩减到 ${newTotal} 章吗？\n\n` +
+          `• 尾部删除 ${Math.abs(diff)} 章\n` +
+          `• 保留的章节(1-${newTotal})不会修改\n` +
+          `• 警告:已生成的对应章节细纲/伏笔也会被清理`;
+      if (!confirm(confirmMsg)) return;
 
       this.extendOutlineBusy = true;
       this.showExtendOutlineModal = false;
       try {
         const res = await fetch(
           `/api/workflow/project/${this.currentProject.id}/extend-outline` +
-          `?target_chapters=${target}&extend_architecture=${this.extendOutlineArchitecture}`,
+          `?target_chapters=${newTotal}&extend_architecture=${this.extendOutlineArchitecture}`,
           { method: 'POST' }
         );
         const data = await res.json();
         if (data.status === 'ok') {
+          const action = isExpand ? '扩写' : '缩减';
           alert(
-            `✅ 大纲扩写完成!\n\n` +
+            `✅ 大纲${action}完成!\n\n` +
             `原 ${data.old_total} 章 → 新 ${data.new_total} 章\n` +
-            `新增 chapter_outlines: ${data.added_chapters} 章\n` +
-            `新增 volumes: ${(data.added_volumes || []).length} 个\n` +
-            `新增 plot_lines: ${(data.added_plot_lines || []).length} 条\n` +
-            `新增 acts: ${(data.added_acts || []).length} 个`
+            (isExpand
+              ? `新增 chapter_outlines: ${data.added_chapters} 章\n` +
+                `新增 volumes: ${(data.added_volumes || []).length} 个\n` +
+                `新增 plot_lines: ${(data.added_plot_lines || []).length} 条\n` +
+                `新增 acts: ${(data.added_acts || []).length} 个`
+              : `删除尾部 ${data.removed_chapters || 0} 章\n` +
+                `保留 ${data.kept_chapters || 0} 章`)
           );
           // 刷新项目数据 + bootstrapData
           await this.openProject(this.currentProject);
           this._refreshBootstrapData();
         } else {
-          alert('扩写失败: ' + (data.error || JSON.stringify(data)));
+          alert('操作失败: ' + (data.error || JSON.stringify(data)));
         }
       } catch (e) {
         console.error('[confirmExtendOutline] failed:', e);
-        alert('扩写失败: ' + e.message);
+        alert('操作失败: ' + e.message);
       } finally {
         this.extendOutlineBusy = false;
       }

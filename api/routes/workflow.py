@@ -577,20 +577,27 @@ async def extend_outline_chapters(
     extend_architecture: bool = True,
     db: Session = Depends(get_db),
 ):
-    """大纲扩展:在已有 chapter_outlines 基础上扩到 target_chapters 章。
+    """大纲扩写/缩减:在已有 chapter_outlines 基础上变更到 target_chapters 章。
+
+    支持 3 种情形:
+      1. 扩写 (target > existing): 新增 chapter_outlines + 可选扩架构层
+      2. 无变化 (target == existing): 直接返回
+      3. 缩减 (target < existing): 删尾部章节(不删 Chapter,只删 chapter_outlines 元数据 + 失效伏笔)
 
     Args:
-        target_chapters: 目标总章节数(必须 > 已有最大章号)
-        extend_architecture: 是否扩 volumes/plot_lines/structure(默认 True)
+        target_chapters: 目标总章节数(必须 >= 0)
+        extend_architecture: 是否扩 volumes/plot_lines/structure(默认 True,仅扩写时生效)
 
     行为:
       1. 读现有 ProjectOutline(不动)
-      2. 算缺 [max_existing+1, target_chapters] 区间
+      2. 算缺/多 [max_existing+1 ~ target] 区间
       3. (可选) 扩架构层:新卷/新剧情线/新幕
-      4. 续写 chapter_outlines 的缺口
-      5. 持久化(不修改已有任何字段)
+      4. 续写 chapter_outlines 的缺口(扩写) / 截断 chapter_outlines(缩减)
+      5. 持久化(扩写不动老章;缩减只删尾部,不动保留的)
     """
     from llm.workflow import extend_outline_chapters as _extend
+    if target_chapters < 0:
+        return {"status": "failed", "error": "target_chapters 必须 >= 0"}
     result = _extend(
         project_id=project_id,
         target_total=target_chapters,

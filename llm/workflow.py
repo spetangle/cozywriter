@@ -962,33 +962,46 @@ def extend_outline_chapters(
     db,
     extend_architecture: bool = True,
 ) -> dict:
-    """大纲扩展(续写型):在已有 chapter_outlines 基础上扩展到 target_total 章。
+    """大纲扩写/缩减(续写型):在已有 chapter_outlines 基础上变更到 target_total 章。
+
+    支持 3 种情形:
+      1. 扩写 (target_total > existing_max): 新增 chapter_outlines + 可选扩架构
+      2. 无变化 (target_total == existing_max): 直接返回,无任何操作
+      3. 缩减 (target_total < existing_max): 删尾部章节
+         - chapter_outlines 截断到 [1, target_total]
+         - volumes/plot_lines/structure 同步裁剪
+         - ChapterOutline 元数据表(对应 Chapter)同步删
+         - 失效伏笔(plant_order > target_total)同步删
+         - 注:Chapter.content 本身**不删**,让用户有备份可恢复
 
     与"首生成扩展"(auto 模式续写)的区别:
       - auto: bootstrap 期间,从 1~total 完整生成;total 超过单次上限时分批
-      - extend: 用户已有完整 1~N 章,要把 N 扩到 target_total
+      - extend: 用户已有完整 1~N 章,要把 N 扩/缩到 target_total
 
-    步骤:
-      1. 读现有 ProjectOutline + chapter_outlines
-      2. 算缺 [max_existing+1, target_total] 区间
-      3. (可选) 扩 volumes/plot_lines/structure:把新章范围(从 max_existing+1 到 target_total)
-         拆给 LLM 让它续写项目架构的扩展部分
-      4. 续写 chapter_outlines 的缺口(沿用 _continue_chapter_outlines_if_needed)
-      5. 持久化(不修改已有 1~max_existing 任何字段)
+    关键不变约束(扩写 + 缩减都遵守):
+      - 1~min(target_total, existing_max) 范围的章节**永远不动**
+      - 扩写: append 新章,不修改老章
+      - 缩减: 删尾部,不修改保留章节
 
     Args:
         project_id: 项目 ID
-        target_total: 目标总章节数(必须 > 当前已有)
+        target_total: 目标总章节数(必须 >= 0)
         db: SQLAlchemy Session
-        extend_architecture: 是否扩 volumes/plot_lines/structure(默认 True,扩卷)
+        extend_architecture: 是否扩 volumes/plot_lines/structure(默认 True,扩卷;缩减时不生效)
 
     Returns:
         {
             "status": "ok" | "failed",
             "old_total": N,
             "new_total": target_total,
-            "added_chapters": K,
-            "added_volumes": [...],  # 新增的卷
+            "kept_chapters": K,        # 缩减后保留
+            "removed_chapters": R,     # 缩减删除
+            "added_chapters": A,        # 扩写新增
+            "added_volumes": [...],    # 扩写新卷
+            "added_plot_lines": [...],  # 扩写新剧情线
+            "added_acts": [...],        # 扩写新幕
+            "deleted_outline_rows": N,  # 缩减删的 ChapterOutline 元数据
+            "deleted_foreshadowings": N,# 缩减删的失效伏笔
             "error": "...",
         }
     """
@@ -997,8 +1010,8 @@ def extend_outline_chapters(
     from llm.factory import LLMFactory
     import json as _json
 
-    if target_total <= 0:
-        return {"status": "failed", "error": f"target_total 必须 > 0 (got {target_total})"}
+    if target_total < 0:
+        return {"status": "failed", "error": f"target_total 必须 >= 0 (got {target_total})"}
 
     proj = db.query(ProjectOutline).filter(ProjectOutline.project_id == project_id).first()
     if not proj:
@@ -1022,10 +1035,119 @@ def extend_outline_chapters(
     existing_max = max(existing_nums)
     old_total = existing_max
 
-    if target_total <= existing_max:
+    # ==== 缩减路径: target_total < existing_max ====
+    #     删尾部章节 (existing_max ~ target_total+1)
+    if target_total < existing_max:
+        removed_count = existing_max - target_total
+        logger.info(
+            f"[extend_outline] project={project_id}: 缩减 {old_total} 章 → {target_total} 章,"
+            f"删尾部 {removed_count} 章"
+        )
+        # 保留 [1, target_total] 范围章节
+        kept_outlines = [
+            c for c in existing_chapter_outlines
+            if int(c.get("chapter_num", 0)) <= target_total
+        ]
+        # 同步删 volumes/plot_lines/structure 中范围外的部分
+        trimmed_volumes = [
+            v for v in (proj.volumes or [])
+            if int(v.get("to_chapter", 0)) <= target_total
+            or (
+                # 保留部分覆盖的卷(前端会显示已生成)
+                int(v.get("from_chapter", 0)) <= target_total
+                and int(v.get("to_chapter", 0)) > target_total
+                # 这种"半卷"改成"to_chapter=target_total"
+                and (v.update({"to_chapter": target_total}) or True)
+            )
+        ]
+        # 重新过滤(上面的 list comprehension 内有副作用问题,稳妥起见分两步)
+        safe_volumes = []
+        for v in (proj.volumes or []):
+            from_c = int(v.get("from_chapter", 0))
+            to_c = int(v.get("to_chapter", 0))
+            if to_c <= target_total:
+                safe_volumes.append(v)
+            elif from_c <= target_total:
+                v["to_chapter"] = target_total
+                safe_volumes.append(v)
+            # else: 整卷都在删除区,跳过
+        trimmed_plot_lines = [
+            pl for pl in (proj.plot_lines or [])
+            if int(pl.get("to_chapter", 0)) <= target_total
+            or int(pl.get("from_chapter", 0)) <= target_total
+        ]
+        # acts(4 幕结构):保留 from_chapter <= target_total 的幕
+        acts = (proj.structure or {}).get("acts", []) or []
+        safe_acts = [
+            a for a in acts
+            if int(a.get("from_chapter", 0)) <= target_total
+        ]
+        # 持久化
+        try:
+            proj.volumes = safe_volumes
+            proj.plot_lines = trimmed_plot_lines
+            proj.structure = {**(proj.structure or {}), "acts": safe_acts}
+            proj.chapter_outlines = kept_outlines
+            # Project.total_chapters
+            from storage.models.project import Project
+            project_row = db.query(Project).filter(Project.id == project_id).first()
+            if project_row:
+                project_row.total_chapters = target_total
+            # 同步删 ChapterOutline (Chapter.content 已在 DB,保留供用户备份)
+            # 注:只删 chapter_outlines 元数据表,不删 Chapter(让用户有备份)
+            from storage.models import ChapterOutline
+            deleted_outlines = db.query(ChapterOutline).filter(
+                ChapterOutline.chapter_id.in_(
+                    db.query(Chapter.id).filter(
+                        Chapter.project_id == project_id,
+                        Chapter.order >= target_total,
+                    ).subquery()
+                )
+            ).delete(synchronize_session=False)
+            # 同步删 foreshadowing 状态过期的(plant_chapter > target_total)
+            from storage.models import Foreshadowing
+            deleted_fores = db.query(Foreshadowing).filter(
+                Foreshadowing.project_id == project_id,
+                Foreshadowing.plant_order > target_total,
+            ).delete(synchronize_session=False)
+            db.commit()
+            logger.info(
+                f"[extend_outline] ✓ 缩减完成: {old_total} → {target_total} 章,"
+                f"删 chapter_outlines={removed_count} 条, 删 chapter_outline_rows={deleted_outlines},"
+                f" 删 foreshadowings={deleted_fores}"
+            )
+            return {
+                "status": "ok",
+                "old_total": old_total,
+                "new_total": target_total,
+                "kept_chapters": len(kept_outlines),
+                "removed_chapters": removed_count,
+                "deleted_outline_rows": deleted_outlines,
+                "deleted_foreshadowings": deleted_fores,
+                "added_chapters": 0,
+                "added_volumes": [],
+                "added_plot_lines": [],
+                "added_acts": [],
+                "error": None,
+            }
+        except Exception as e:
+            db.rollback()
+            logger.error(f"[extend_outline] 缩减持久化失败: {e}")
+            return {"status": "failed", "error": str(e)}
+
+    if target_total == existing_max:
         return {
-            "status": "failed",
-            "error": f"target_total ({target_total}) 必须 > 已有最大章号 ({existing_max})",
+            "status": "ok",
+            "old_total": old_total,
+            "new_total": target_total,
+            "kept_chapters": existing_max,
+            "removed_chapters": 0,
+            "added_chapters": 0,
+            "added_volumes": [],
+            "added_plot_lines": [],
+            "added_acts": [],
+            "error": None,
+            "message": "目标等于已有章数,无变化",
         }
 
     missing_nums = list(range(existing_max + 1, target_total + 1))
@@ -2050,6 +2172,8 @@ def rerun_all_failed_stages(run_id: int, db, only_failed: bool = True, force_all
             "chapter_word_count": user_input.get("chapter_word_count", 0),
             "genre": user_input.get("genre", ""),
             "description": user_input.get("description", ""),
+            # 续写机制需要：rerun 时也得把 total_chapters 透传下去
+            "total_chapters": int(user_input.get("total_chapters") or 0),
         }
         user_filled = {
             k: v for k, v in user_input.items()
@@ -2152,6 +2276,16 @@ def rerun_all_failed_stages(run_id: int, db, only_failed: bool = True, force_all
                     prev_outputs=prev_outputs,
                     db=db,
                 )
+                # ── stage_4a_chapter_outlines 续生成：单次 LLM 输出被 max_tokens 截断时
+                #     自动检测缺口并循环续写,直到覆盖 total_chapters
+                #     (100+ 章项目不调这里就只能输出 30-35 章)
+                if sid == "stage_4a_chapter_outlines" and isinstance(result, dict):
+                    wrapped = {"chapter_outlines": result.get("chapter_outlines", [])}
+                    wrapped = _continue_chapter_outlines_if_needed(
+                        wrapped, locked, user_filled, prev_outputs, db,
+                        target_total=locked.get("total_chapters") or 0,
+                    )
+                    result["chapter_outlines"] = wrapped.get("chapter_outlines", [])
                 stage_results[sid] = {
                     "status": "ok",
                     "data": result,
@@ -2180,6 +2314,48 @@ def rerun_all_failed_stages(run_id: int, db, only_failed: bool = True, force_all
             run.status = "completed"
         else:
             run.status = "partial"
+
+        # ── 后置兜底: 如果 chapter_outlines 仍不完整(老项目没有 stage_4a_chapter_outlines stage,
+        #     或新项目被截断),自动补一次续写
+        from storage.models import ProjectOutline
+        proj_check = db.query(ProjectOutline).filter(ProjectOutline.project_id == run.project_id).first()
+        if proj_check:
+            target_total = int(user_input.get("total_chapters") or 0)
+            existing_co = list(proj_check.chapter_outlines or [])
+            existing_max = max(
+                [int(c.get("chapter_num", 0)) for c in existing_co if c.get("chapter_num")],
+                default=0,
+            )
+            if target_total > 0 and existing_max < target_total:
+                logger.info(
+                    f"[Bootstrap rerun-all] chapter_outlines 兜底续写:"
+                    f"已有 {existing_max}/{target_total} 章,补 {target_total - existing_max} 章"
+                )
+                # 把现有 co 包装成 first_result 调续写
+                # 先合并 stage_4a_outline 和 stage_4a_chapter_outlines 的架构
+                arch_data = stage_results.get("stage_4a_outline", {}).get("data", {}) or {}
+                extra_data = stage_results.get("stage_4a_chapter_outlines", {}).get("data", {}) or {}
+                first_result = {
+                    "volumes": arch_data.get("volumes", proj_check.volumes or []),
+                    "plot_lines": arch_data.get("plot_lines", proj_check.plot_lines or []),
+                    "structure": arch_data.get("structure", proj_check.structure or {}),
+                    "pacing_notes": arch_data.get("pacing_notes", proj_check.pacing_notes or ""),
+                    "outline_text": arch_data.get("outline_text", proj_check.outline_text or ""),
+                    "chapter_outlines": existing_co,
+                }
+                wrapped = _continue_chapter_outlines_if_needed(
+                    first_result, locked, user_filled, {}, db,
+                    target_total=target_total,
+                )
+                final_co = wrapped.get("chapter_outlines", [])
+                if len(final_co) > existing_max:
+                    proj_check.chapter_outlines = final_co
+                    db.commit()
+                    logger.info(
+                        f"[Bootstrap rerun-all] 兜底续写后:chapter_outlines "
+                        f"{existing_max} → {len(final_co)} 章"
+                    )
+
         run.stage_results = stage_results
         # 更新 current_stage_index
         run.current_stage_index = sum(

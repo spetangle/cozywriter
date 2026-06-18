@@ -2663,44 +2663,105 @@
     <!--
       ═══ 扩写大纲浮层 ═══
       入口:大纲面板 → 「📈 扩写大纲」按钮
-      行为:弹窗让用户输入目标总章节数,确认后调
+      行为:弹窗显示当前状态,让用户输入目标总章节数,确认后调
            POST /api/workflow/project/{pid}/extend-outline
+      新目标可以 > 也可以 < 原目标(支持缩减小说篇幅)
     -->
     <template x-if="showExtendOutlineModal">
       <div class="modal-overlay" @click.self="showExtendOutlineModal = false">
-        <div class="modal-card" style="max-width:520px">
+        <div class="modal-card" style="max-width:560px">
           <div class="modal-header">
-            <h3>📈 扩写大纲</h3>
+            <h3>📈 扩写 / 缩减大纲</h3>
             <button class="modal-close" @click="showExtendOutlineModal = false">×</button>
           </div>
-          <div class="modal-body">
-            <p style="margin-top:0;color:var(--text-muted);font-size:13px">
-              在已有 <strong x-text="currentProject?.total_chapters || 0"></strong> 章基础上,
-              把大纲扩展到目标总章节数。<br>
-              <span style="color:#d9534f">⚠️ 已有章节不会被修改,只会新增。</span>
-            </p>
+          <div class="modal-body" style="padding:20px 24px">
 
-            <label style="display:block;margin:12px 0">
-              <span style="display:block;margin-bottom:4px">目标总章节数(必须 > 已有章数)</span>
-              <input type="number" x-model.number="extendOutlineTarget" min="1"
-                     :placeholder="(currentProject?.total_chapters || 0) + 100"
-                     style="width:100%;padding:8px;border:1px solid var(--border);border-radius:4px">
+            <!-- 状态展示区 -->
+            <div style="background:#f5f7fa;border:1px solid #e0e6ed;border-radius:6px;padding:14px 16px;margin-bottom:18px;font-size:13px;line-height:1.9">
+              <div style="display:flex;justify-content:space-between;gap:12px">
+                <span style="color:#6b7280">原目标总章节数</span>
+                <strong x-text="extendOutlineOriginalTotal" style="color:#374151;font-size:14px"></strong>
+              </div>
+              <div style="display:flex;justify-content:space-between;gap:12px">
+                <span style="color:#6b7280">已生成一句话大纲</span>
+                <strong x-text="`【${extendOutlineGenerated}】章`" style="color:#374151;font-size:14px"></strong>
+              </div>
+              <div style="display:flex;justify-content:space-between;gap:12px;padding-top:6px;border-top:1px dashed #d1d5db;margin-top:6px">
+                <span style="color:#6b7280">计划向后扩展</span>
+                <strong x-text="`【${extendOutlineExtendBy}】章`"
+                        :style="extendOutlineExtendBy >= 0 ? 'color:#059669' : 'color:#dc2626'"></strong>
+              </div>
+              <div style="display:flex;justify-content:space-between;gap:12px">
+                <span style="color:#6b7280">新目标章节总数</span>
+                <strong x-text="`【${extendOutlineNewTotal}】章`" style="color:#1d4ed8;font-size:14px"></strong>
+              </div>
+            </div>
+
+            <!-- 输入区(两个数值双向联动) -->
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+              <div>
+                <label style="display:block;font-size:12px;color:#6b7280;margin-bottom:4px">
+                  计划向后扩展 (章数, 可负)
+                </label>
+                <input type="number" step="1"
+                       :value="extendOutlineExtendBy"
+                       @input="onExtendOutlineChange('extendBy', $event.target.value)"
+                       style="width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:4px;font-size:14px;box-sizing:border-box">
+                <div style="font-size:11px;color:#9ca3af;margin-top:2px">ZZZ = AAAA - YYYY</div>
+              </div>
+              <div>
+                <label style="display:block;font-size:12px;color:#6b7280;margin-bottom:4px">
+                  新目标章节总数
+                </label>
+                <input type="number" step="1" min="0"
+                       :value="extendOutlineNewTotal"
+                       @input="onExtendOutlineChange('newTotal', $event.target.value)"
+                       style="width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:4px;font-size:14px;box-sizing:border-box">
+                <div style="font-size:11px;color:#9ca3af;margin-top:2px">AAAA = YYYY + ZZZ</div>
+              </div>
+            </div>
+
+            <!-- 提示语(根据伸缩方向显示不同) -->
+            <div x-show="extendOutlineExtendBy > 0" style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:4px;padding:10px 12px;font-size:12px;color:#065f46;margin-bottom:14px">
+              ✅ <strong>扩写</strong>:新增 <span x-text="extendOutlineExtendBy"></span> 章,
+              不会修改已有 <span x-text="extendOutlineGenerated"></span> 章的内容。
+            </div>
+            <div x-show="extendOutlineExtendBy === 0" style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:4px;padding:10px 12px;font-size:12px;color:#1e3a8a;margin-bottom:14px">
+              ℹ️ <strong>无变化</strong>:保持现有大纲不变。
+            </div>
+            <div x-show="extendOutlineExtendBy < 0" style="background:#fef2f2;border:1px solid #fecaca;border-radius:4px;padding:10px 12px;font-size:12px;color:#7f1d1d;margin-bottom:14px">
+              ⚠️ <strong>缩减</strong>:从尾部删除 <span x-text="Math.abs(extendOutlineExtendBy)"></span> 章
+              (删除尾部编号最大的章节大纲和对应伏笔/情节)。
+              <span x-show="extendOutlineNewTotal < extendOutlineGenerated * 0.3" style="color:#dc2626">
+                <br>📌 注意:如果新总章节数 < 30% 已有章节数,删减幅度较大,建议先备份。
+              </span>
+            </div>
+
+            <!-- 架构层扩写选项 -->
+            <label style="display:flex;align-items:center;gap:8px;padding:8px 0;cursor:pointer">
+              <input type="checkbox" x-model="extendOutlineArchitecture" :checked="true"
+                     :disabled="extendOutlineExtendBy < 0"
+                     style="cursor:pointer">
+              <span style="font-size:13px">
+                同时扩写架构层 (分卷/剧情线/四幕)
+                <span x-show="extendOutlineExtendBy < 0" style="color:#9ca3af;font-size:11px">
+                  (缩减时不适用)
+                </span>
+              </span>
             </label>
-
-            <label style="display:flex;align-items:center;gap:6px;margin:8px 0">
-              <input type="checkbox" x-model="extendOutlineArchitecture" :checked="true">
-              <span>同时扩写架构层(分卷/剧情线/四幕)</span>
-            </label>
-
-            <div x-show="extendOutlineHint" style="font-size:12px;color:var(--text-muted);margin-top:8px"
-                 x-text="extendOutlineHint"></div>
           </div>
-          <div class="modal-footer">
-            <button class="btn-secondary" @click="showExtendOutlineModal = false">取消</button>
+          <div class="modal-footer" style="padding:12px 24px;border-top:1px solid #e0e6ed;display:flex;gap:8px;justify-content:flex-end">
+            <button class="btn-secondary" @click="showExtendOutlineModal = false"
+                    style="padding:8px 18px">取消</button>
             <button class="btn-primary" @click="confirmExtendOutline()"
-                    :disabled="!extendOutlineTarget || extendOutlineBusy">
-              <span x-show="!extendOutlineBusy">📈 开始扩写</span>
-              <span x-show="extendOutlineBusy">⏳ 扩写中...</span>
+                    :disabled="!canSubmitExtendOutline()"
+                    style="padding:8px 18px">
+              <span x-show="!extendOutlineBusy">
+                <span x-show="extendOutlineExtendBy > 0">📈 开始扩写</span>
+                <span x-show="extendOutlineExtendBy === 0">无变化,关闭</span>
+                <span x-show="extendOutlineExtendBy < 0">✂️ 开始缩减</span>
+              </span>
+              <span x-show="extendOutlineBusy">⏳ 处理中...</span>
             </button>
           </div>
         </div>
