@@ -30,7 +30,7 @@ router = APIRouter(prefix="/api/inspirations", tags=["灵感"])
 class InspirationCreate(BaseModel):
     content: str
     title: str = ""
-    project_id: int | None = None  # 可选：null=全局灵感池
+    project_id: str | None = None  # 可选：null=全局灵感池
     tags: list[str] = []
     source: str = ""  # 脑洞/阅读/梦境/生活/...
     related_characters: list[dict] = []  # [{"project_id":1,"character_id":2}]
@@ -40,7 +40,7 @@ class InspirationCreate(BaseModel):
 class InspirationUpdate(BaseModel):
     content: str | None = None
     title: str | None = None
-    project_id: int | None = None  # 允许改绑到项目（或 null 退回全局）
+    project_id: str | None = None  # 允许改绑到项目（或 null 退回全局）
     tags: list[str] | None = None
     source: str | None = None
     related_characters: list[dict] | None = None
@@ -49,7 +49,7 @@ class InspirationUpdate(BaseModel):
 
 class InspirationResponse(BaseModel):
     id: int
-    project_id: int | None
+    project_id: str | None
     title: str
     content: str
     tags: list
@@ -77,7 +77,7 @@ class CreateProjectFromInspirationRequest(BaseModel):
 
 
 class CreateProjectFromInspirationResponse(BaseModel):
-    project_id: int
+    project_id: str
     run_id: int | None = None
     status: str
     message: str = ""
@@ -85,7 +85,7 @@ class CreateProjectFromInspirationResponse(BaseModel):
 
 class FuseInspirationRequest(BaseModel):
     """将灵感融合进现有项目"""
-    project_id: int  # 目标项目
+    project_id: str  # 目标项目
     target: str  # "chapter:N" | "outline" | "world" | "character"
     # 比如 "chapter:5" 表示融合到第 5 章；"outline" 表示融入项目大纲
     note: str = ""  # 额外说明（如何融合）
@@ -94,7 +94,7 @@ class FuseInspirationRequest(BaseModel):
 class FuseInspirationResponse(BaseModel):
     status: str
     target: str
-    project_id: int
+    project_id: str
     message: str
     fused_content: str | None = None  # 若融合到 chapter/outline，返回融合后片段
 
@@ -103,7 +103,7 @@ class FuseInspirationResponse(BaseModel):
 
 @router.get("", response_model=list[InspirationResponse])
 async def list_inspirations(
-    project_id: int | None = Query(None, description="按项目筛选；None=全局灵感池"),
+    project_id: str | None = Query(None, description="按项目筛选；None=全局灵感池"),
     tag: str | None = Query(None),
     q: str | None = Query(None, description="搜索关键字（标题/内容）"),
     source: str | None = Query(None),
@@ -165,7 +165,7 @@ async def create_inspiration(data: InspirationCreate, db: Session = Depends(get_
 
 @router.get("/tags")
 async def list_all_tags(
-    project_id: int | None = Query(None, description="None=全局标签云"),
+    project_id: str | None = Query(None, description="None=全局标签云"),
     db: Session = Depends(get_db),
 ):
     """获取标签云（去重 + 计数）"""
@@ -189,7 +189,7 @@ async def list_all_tags(
 
 @router.get("/sources")
 async def list_sources(
-    project_id: int | None = Query(None),
+    project_id: str | None = Query(None),
     db: Session = Depends(get_db),
 ):
     """获取所有 source 字段（去重）"""

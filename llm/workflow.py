@@ -683,6 +683,17 @@ def run_bootstrap_sync(run_id: int, user_input: dict, db=None) -> dict:
                     project_id=run.project_id,
                 )
 
+                # ── stage_4a_chapter_outlines 续生成：单次 LLM 输出被 max_tokens 截断时
+                #     自动检测缺口并循环续写,直到覆盖 total_chapters。
+                #     创建 100+ 章项目必须走这里(单次只能输出 ~130 章)。
+                if stage_id == "stage_4a_chapter_outlines" and isinstance(result, dict):
+                    wrapped = {"chapter_outlines": result.get("chapter_outlines", [])}
+                    wrapped = _continue_chapter_outlines_if_needed(
+                        wrapped, locked, user_filled, prev_outputs, db,
+                        target_total=locked.get("total_chapters") or 0,
+                    )
+                    result["chapter_outlines"] = wrapped.get("chapter_outlines", [])
+
                 stage_results[stage_id] = {
                     "status": "ok",
                     "data": result,

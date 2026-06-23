@@ -14,7 +14,7 @@ class Inspiration(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     # 关键：project_id 改为可空
-    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=True)
+    project_id = Column(String(32), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True)
     title = Column(String(200), default="")  # 灵感标题（一句话）
     content = Column(Text, nullable=False)  # 灵感内容
     tags = Column(JSON, default=list)  # 标签列表

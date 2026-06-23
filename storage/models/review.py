@@ -10,7 +10,7 @@ class ReviewSession(Base):
     __tablename__ = "review_sessions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(String(32), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     chapter_id = Column(Integer, ForeignKey("chapters.id", ondelete="CASCADE"), nullable=True)
     session_type = Column(String(30), default="chapter")
     content_reviewed = Column(Text, default="")

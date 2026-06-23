@@ -97,7 +97,7 @@ class ProjectUpdate(BaseModel):
 
 
 class ProjectResponse(BaseModel):
-    id: int
+    id: str
     title: str
     description: str
     genre: str = ""
@@ -128,7 +128,7 @@ class BootstrapStageInfo(BaseModel):
 
 class BootstrapResponse(BaseModel):
     """创建项目响应 - 包含 bootstrap workflow 信息"""
-    project_id: int
+    project_id: str
     run_id: int | None = None
     status: str  # missing_required / submitted / running / completed / awaiting_confirm / committed / failed
     missing: list[str] = []
@@ -174,7 +174,7 @@ async def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
     missing = _check_required(data)
     if missing:
         return BootstrapResponse(
-            project_id=0,
+            project_id="",
             status="missing_required",
             missing=missing,
             questionnaire=[MISSING_QUESTIONNAIRE[f] for f in missing],
@@ -255,7 +255,7 @@ async def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
-async def get_project(project_id: int, db: Session = Depends(get_db)):
+async def get_project(project_id: str, db: Session = Depends(get_db)):
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -263,7 +263,7 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/{project_id}", response_model=ProjectResponse)
-async def update_project(project_id: int, data: ProjectUpdate, db: Session = Depends(get_db)):
+async def update_project(project_id: str, data: ProjectUpdate, db: Session = Depends(get_db)):
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -280,17 +280,40 @@ async def update_project(project_id: int, data: ProjectUpdate, db: Session = Dep
 
 
 @router.delete("/{project_id}")
-async def delete_project(project_id: int, db: Session = Depends(get_db)):
+async def delete_project(project_id: str, db: Session = Depends(get_db)):
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    # 先清理 RAG 残留,避免新项目复用 id 时误命中旧向量数据
+    try:
+        from rag.knowledge_base import KnowledgeBase
+        kb = KnowledgeBase()
+        rag_cleanup = kb.delete_project_data(project_id)
+    except Exception as e:
+        rag_cleanup = {"error": str(e)}
     db.delete(project)
     db.commit()
-    return {"status": "ok"}
+    return {"status": "ok", "rag_cleanup": rag_cleanup}
+
+
+@router.post("/rag/sweep-orphans")
+async def sweep_rag_orphans(db: Session = Depends(get_db)):
+    """清理 RAG 里的孤儿记录(指向已删除的 chapter/character/world)。
+
+    用于：以前项目被删除但 RAG 没清,导致新项目误命中。
+    """
+    try:
+        from rag.knowledge_base import KnowledgeBase
+        kb = KnowledgeBase()
+        deleted = kb.sweep_orphan_records()
+        total = sum(deleted.values())
+        return {"status": "ok", "deleted": deleted, "total": total}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{project_id}/bootstrap-status")
-async def get_bootstrap_status(project_id: int, db: Session = Depends(get_db)):
+async def get_bootstrap_status(project_id: str, db: Session = Depends(get_db)):
     """获取项目引导补全 workflow 的当前状态"""
     run = (
         db.query(WorkflowRun)

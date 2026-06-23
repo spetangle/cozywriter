@@ -49,7 +49,7 @@ class CommitResponse(BaseModel):
 
 class WorkflowStatusResponse(BaseModel):
     run_id: int
-    project_id: int
+    project_id: str
     name: str
     status: str
     current_stage_index: int
@@ -160,7 +160,7 @@ async def get_run(run_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/project/{project_id}/latest")
-async def get_latest_run(project_id: int, db: Session = Depends(get_db)):
+async def get_latest_run(project_id: str, db: Session = Depends(get_db)):
     """获取项目最近的 workflow run（通常是 bootstrap）"""
     run = (
         db.query(WorkflowRun)
@@ -180,7 +180,7 @@ async def get_latest_run(project_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/project/{project_id}/bootstrap-data")
-async def get_bootstrap_data(project_id: int, db: Session = Depends(get_db)):
+async def get_bootstrap_data(project_id: str, db: Session = Depends(get_db)):
     """获取 bootstrap 产出的"设定文档"（按 stage 整理成结构化视图，给"设定预览"面板用）
 
     返回：
@@ -572,7 +572,7 @@ async def commit_run(run_id: int, db: Session = Depends(get_db)):
 
 @router.post("/project/{project_id}/extend-outline")
 async def extend_outline_chapters(
-    project_id: int,
+    project_id: str,
     target_chapters: int,
     extend_architecture: bool = True,
     db: Session = Depends(get_db),

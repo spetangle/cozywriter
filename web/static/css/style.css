@@ -558,6 +558,525 @@ button {
 .rel-desc { font-size: 13px; color: var(--text-muted); margin-bottom: 4px; }
 .rel-strength { font-size: 12px; color: var(--text-muted); }
 
+/* ─── 角色关系图谱 ─── */
+/* 整体布局：左侧画布 + 右侧详情面板 */
+.relation-graph-layout {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+  height: calc(100vh - 220px);
+  min-height: 520px;
+}
+
+.relation-graph-canvas-wrap {
+  flex: 1;
+  position: relative;
+  background:
+    radial-gradient(circle at 25% 25%, rgba(99,102,241,0.05) 0%, transparent 50%),
+    radial-gradient(circle at 75% 75%, rgba(236,72,153,0.05) 0%, transparent 50%),
+    var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.relation-graph-svg {
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  user-select: none;
+  display: block;
+}
+.relation-graph-svg.dragging-canvas { cursor: grabbing; }
+.relation-graph-svg.add-mode { cursor: crosshair; }
+
+/* 工具栏（悬浮在画布右上）*/
+.relation-graph-toolbar {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(255,255,255,0.95);
+  backdrop-filter: blur(6px);
+  padding: 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  z-index: 10;
+}
+.relation-graph-toolbar button {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text);
+  transition: all .15s;
+}
+.relation-graph-toolbar button:hover { background: var(--bg); border-color: var(--primary); color: var(--primary); }
+.relation-graph-toolbar button.active { background: var(--primary); color: white; border-color: var(--primary); }
+
+/* 左上图例 */
+.relation-graph-legend {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: rgba(255,255,255,0.95);
+  backdrop-filter: blur(6px);
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  font-size: 12px;
+  z-index: 10;
+}
+.relation-graph-legend-title { font-weight: 600; color: var(--text-muted); margin-bottom: 4px; font-size: 11px; }
+.relation-graph-legend-item { display: flex; align-items: center; gap: 6px; color: var(--text); }
+.relation-graph-legend-dot {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid; flex-shrink: 0;
+}
+
+/* 画布节点 + 边样式 */
+.rg-node-group { cursor: pointer; }
+.rg-node-group:hover .rg-node-circle { stroke-width: 3; }
+.rg-node-group.selected .rg-node-circle { stroke-width: 4; }
+.rg-node-group.dragging { cursor: grabbing; }
+
+.rg-node-circle {
+  fill: var(--surface);
+  stroke-width: 2;
+  transition: stroke-width .15s, filter .15s;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.08));
+}
+.rg-node-group:hover .rg-node-circle { filter: drop-shadow(0 4px 8px rgba(0,0,0,0.15)); }
+
+.rg-node-icon {
+  font-size: 22px;
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+  user-select: none;
+}
+.rg-node-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-anchor: middle;
+  fill: var(--text);
+  pointer-events: none;
+  user-select: none;
+  paint-order: stroke;
+  stroke: rgba(255,255,255,0.85);
+  stroke-width: 3;
+}
+.rg-node-role {
+  font-size: 10px;
+  text-anchor: middle;
+  fill: var(--text-muted);
+  pointer-events: none;
+  user-select: none;
+  paint-order: stroke;
+  stroke: rgba(255,255,255,0.85);
+  stroke-width: 2.5;
+}
+
+/* 边 */
+.rg-edge {
+  fill: none;
+  cursor: pointer;
+  transition: stroke-width .15s;
+}
+.rg-edge-hit { stroke: transparent; stroke-width: 14; }
+.rg-edge:hover { stroke-width: 4; }
+.rg-edge.selected { stroke-width: 4; }
+
+.rg-edge-label-bg {
+  fill: rgba(255,255,255,0.95);
+  stroke-width: 1;
+  rx: 4;
+  ry: 4;
+}
+.rg-edge-label {
+  font-size: 11px;
+  font-weight: 500;
+  text-anchor: middle;
+  fill: var(--text);
+  pointer-events: none;
+  user-select: none;
+  paint-order: stroke;
+  stroke: rgba(255,255,255,0.6);
+  stroke-width: 2;
+}
+
+/* 边状态色：stable/developing/tense/broken */
+.rg-edge.status-stable { stroke: #10b981; }
+.rg-edge.status-developing { stroke: #3b82f6; }
+.rg-edge.status-tense { stroke: #f59e0b; }
+.rg-edge.status-broken { stroke: #ef4444; }
+.rg-edge-label-bg.status-stable { stroke: #10b981; }
+.rg-edge-label-bg.status-developing { stroke: #3b82f6; }
+.rg-edge-label-bg.status-tense { stroke: #f59e0b; }
+.rg-edge-label-bg.status-broken { stroke: #ef4444; }
+
+/* 节点角色色：主角/反派/配角/龙套 */
+.rg-node-circle.role-主角 { stroke: #dc2626; }
+.rg-node-circle.role-反派 { stroke: #7c3aed; }
+.rg-node-circle.role-配角 { stroke: #3b82f6; }
+.rg-node-circle.role-龙套 { stroke: #94a3b8; }
+.rg-node-label.role-主角 { fill: #dc2626; }
+.rg-node-label.role-反派 { fill: #7c3aed; }
+
+/* 悬浮提示 */
+.rg-tooltip {
+  position: absolute;
+  background: rgba(15,23,42,0.95);
+  color: white;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 20;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+  transform: translate(-50%, -120%);
+}
+.rg-tooltip.hidden { display: none; }
+
+/* 模式提示 banner */
+.rg-mode-banner {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--primary);
+  color: white;
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 4px 12px rgba(99,102,241,0.3);
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.rg-mode-banner button {
+  background: rgba(255,255,255,0.25);
+  color: white;
+  border: none;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* 右侧详情面板 */
+.relation-graph-side {
+  width: 320px;
+  flex-shrink: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  overflow-y: auto;
+}
+.relation-graph-side-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+  padding: 20px;
+}
+.rgs-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.rgs-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  background: var(--bg);
+  border: 2px solid;
+  flex-shrink: 0;
+}
+.rgs-avatar.role-主角 { border-color: #dc2626; }
+.rgs-avatar.role-反派 { border-color: #7c3aed; }
+.rgs-avatar.role-配角 { border-color: #3b82f6; }
+.rgs-avatar.role-龙套 { border-color: #94a3b8; }
+.rgs-name { font-size: 16px; font-weight: 600; }
+.rgs-role { font-size: 12px; color: var(--text-muted); }
+
+.rgs-section {
+  margin-bottom: 14px;
+}
+.rgs-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.rgs-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  padding: 3px 0;
+  color: var(--text);
+}
+.rgs-row span:first-child { color: var(--text-muted); }
+
+.rgs-relations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rgs-rel-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  background: var(--bg);
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all .15s;
+}
+.rgs-rel-item:hover { border-color: var(--primary); }
+.rgs-rel-item.selected { border-color: var(--primary); background: #eef2ff; }
+.rgs-rel-pair { font-weight: 500; }
+.rgs-rel-type { color: var(--primary); font-size: 11px; }
+
+.rgs-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+/* ─── 剧情追踪表 ─── */
+.plot-table-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.plot-table-toolbar .plot-search {
+  flex: 1;
+  min-width: 200px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+}
+.plot-table-toolbar select {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--text);
+}
+.plot-table-toolbar input[type="number"] {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  width: 80px;
+}
+.plot-table-wrap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: auto;
+  max-height: calc(100vh - 280px);
+}
+
+.plot-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.plot-table thead th {
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: left;
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.plot-table tbody td {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.plot-table tbody tr:hover { background: #fafbff; }
+.plot-table tbody tr.expanded { background: #f8fafc; }
+.plot-table tbody tr.expanded td { border-bottom: 1px dashed var(--border); }
+
+.pt-cell-title { min-width: 180px; }
+.pt-cell-title strong { color: var(--text); }
+.pt-cell-importance { min-width: 64px; }
+.pt-stage-cell { min-width: 78px; text-align: center; }
+.pt-stage-cell .pt-chapter-badge {
+  display: inline-block;
+  min-width: 36px;
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  background: #eef2ff;
+  color: var(--primary);
+}
+.pt-stage-cell.empty .pt-chapter-badge { background: #f1f5f9; color: #94a3b8; }
+.pt-stage-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  display: block;
+  margin-bottom: 3px;
+  letter-spacing: 0.5px;
+}
+
+/* 状态徽章 */
+.pt-status {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.pt-status.planning { background: #f1f5f9; color: #64748b; }
+.pt-status.introduced { background: #dbeafe; color: #1d4ed8; }
+.pt-status.developing { background: #ede9fe; color: #6d28d9; }
+.pt-status.climaxed { background: #fee2e2; color: #b91c1c; }
+.pt-status.resolved { background: #dcfce7; color: #15803d; }
+.pt-status.abandoned { background: #f3f4f6; color: #6b7280; }
+
+/* 重要性徽章 */
+.pt-imp { font-size: 11px; font-weight: 500; }
+.pt-imp.major { color: #b91c1c; }
+.pt-imp.minor { color: #64748b; }
+
+/* 标签 */
+.pt-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  background: #f1f5f9;
+  color: var(--text-muted);
+  border-radius: 8px;
+  font-size: 10px;
+  margin-right: 3px;
+  margin-bottom: 2px;
+}
+
+/* 展开行 */
+.pt-expand-row td { background: #f8fafc; padding: 0; }
+.pt-expand-inner {
+  padding: 14px 18px;
+  border-left: 3px solid var(--primary);
+  margin: 4px 8px;
+}
+.pt-expand-inner h5 { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+.pt-expand-inner p { font-size: 13px; line-height: 1.6; margin-bottom: 10px; }
+.pt-stage-notes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.pt-stage-note {
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.pt-stage-note-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+.pt-stage-note-text { line-height: 1.5; }
+.pt-stage-note-empty { color: #cbd5e1; font-style: italic; }
+
+/* 行操作按钮 */
+.pt-row-actions { display: flex; gap: 4px; }
+.pt-row-actions button {
+  padding: 2px 8px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.pt-row-actions button:hover { background: var(--bg); color: var(--primary); border-color: var(--primary); }
+.pt-row-actions button.danger:hover { color: #dc2626; border-color: #dc2626; background: #fef2f2; }
+
+/* 空态 */
+.plot-table-empty {
+  padding: 60px 20px;
+  text-align: center;
+  color: var(--text-muted);
+}
+.plot-table-empty .empty-icon { font-size: 48px; margin-bottom: 8px; }
+
+/* 编辑弹窗表单 */
+.pt-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.pt-form-grid label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.pt-form-grid input, .pt-form-grid select, .pt-form-grid textarea {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.pt-form-grid textarea { resize: vertical; min-height: 60px; }
+
 /* ─── Word Progress ─── */
 .word-progress { margin-top: 8px; }
 .wp-bar { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin-bottom: 6px; }

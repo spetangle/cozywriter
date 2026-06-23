@@ -16,7 +16,7 @@ class ConsistencyCheckResult(BaseModel):
 
 
 @router.get("/check", response_model=ConsistencyCheckResult)
-async def check_consistency(project_id: int, chapter_id: int | None = None, db: Session = Depends(get_db)):
+async def check_consistency(project_id: str, chapter_id: int | None = None, db: Session = Depends(get_db)):
     """
     对章节进行一致性检查
     检查：人物性格突变、物品数量错误、能力超出设定、资源消耗异常
@@ -138,7 +138,7 @@ async def check_consistency(project_id: int, chapter_id: int | None = None, db: 
 
 
 @router.get("/report")
-async def consistency_report(project_id: int, db: Session = Depends(get_db)):
+async def consistency_report(project_id: str, db: Session = Depends(get_db)):
     """生成项目一致性综合报告"""
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:

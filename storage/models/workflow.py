@@ -10,7 +10,7 @@ class WorkflowRun(Base):
     __tablename__ = "workflow_runs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(String(32), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     name = Column(String(200), default="补全工作流")
     # 工作流定义（静态模板引用 + 自定义参数）
     stages = Column(JSON, default=list)  # Stage 配置列表

@@ -20,7 +20,7 @@ class QuestionnaireUpdate(BaseModel):
     title: str | None = None
     answers: dict | None = None
     status: str | None = None
-    created_project_id: int | None = None
+    created_project_id: str | None = None
 
 
 class QuestionnaireResponse(BaseModel):
@@ -29,7 +29,7 @@ class QuestionnaireResponse(BaseModel):
     answers: dict
     questionnaire_type: str
     status: str
-    created_project_id: int | None
+    created_project_id: str | None
     created_at: object
     updated_at: object
 

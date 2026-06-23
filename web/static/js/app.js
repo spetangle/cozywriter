@@ -134,6 +134,28 @@ function app() {
     showRelationForm: false,
     relationForm: { from_character_id: null, to_character_id: null, relation_type: '友情', description: '', strength: 5 },
 
+    // ─── 角色关系图谱（可交互） ───
+    relGraphNodes: [],         // 图谱节点（含 _key 唯一标识 + x/y 坐标 + role + name）
+    relGraphEdges: [],         // 图谱边（来源 characterRelations + AI relations 合并）
+    relGraphView: { x: 0, y: 0, scale: 1 },  // 平移 + 缩放
+    relGraphDragging: {       // 拖拽状态
+      canvas: false,           // 是否正在拖动画布
+      node: null,              // 当前正在拖拽的节点 key
+      lastX: 0,                // 鼠标上一帧位置
+      lastY: 0,
+      panStartView: null,      // 拖画布开始时的视图位置
+    },
+    relGraphSelectedNodeId: null,    // 当前选中节点
+    relGraphSelectedEdgeId: null,    // 当前选中边
+    relGraphAddMode: false,          // 是否处于"新建关系"模式
+    relGraphAddStep: 'pickFrom',     // pickFrom / pickTo / confirm
+    relGraphAddFrom: null,           // 已选的起点节点 key
+    relGraphAddTo: null,             // 已选的终点节点 key
+    relGraphToggleLabels: true,      // 是否显示关系标签
+    relGraphEditForm: { relation_type: '', description: '', strength: 5, status: 'stable' },  // 边编辑表单
+    relGraphNewForm: { relation_type: '友情', description: '', strength: 5 },  // 新建表单
+    relGraphLoaded: false,           // 是否已加载过图（避免重复 load）
+
     // 一致性检查
     consistencyResult: null,
     consistencyReport: null,
@@ -207,6 +229,15 @@ function app() {
 
     // 伏笔面板筛选：'all' | 'planted' | 'active' | 'resolved' | 'abandoned'
     foreshadowingFilter: 'all',
+
+    // 剧情追踪
+    plotPoints: [],
+    plotSearch: { q: '', status: '', importance: '', rangeMin: null, rangeMax: null },
+    plotExpandedId: null,
+    showPlotPointForm: false,
+    plotForm: { id: null, title: '', description: '', tagInput: '', importance: 'major', status: 'planning',
+                intro_chapter_id: null, develop_chapter_id: null, climax_chapter_id: null, resolve_chapter_id: null,
+                intro_note: '', develop_note: '', climax_note: '', resolve_note: '' },
 
     // 预览面板
     previewSubTab: 'content',   // content / outline / review
@@ -1884,6 +1915,7 @@ function app() {
         this.loadCharacterRelations(project.id),
         this.loadConsistencyReport(project.id),
         this.loadChapterOutlines(project.id),
+        this.loadPlotPoints(),
         // 设定预览数据：失败不阻塞打开项目（catch 静默）
         this.loadBootstrapData(project.id).catch((e) => {
           console.warn('[BootstrapData] load failed (silently ignored):', e);
@@ -2139,6 +2171,7 @@ function app() {
       this.characterArcs = [];
       this.characterRelations = [];
       this.chapterOutlines = [];
+      this.plotPoints = [];
       this.consistencyReport = null;
       // 停掉 banner 轮询
       this._stopBannerPolling();
@@ -2341,7 +2374,7 @@ function app() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            project_id: parseInt(f.project_id),
+            project_id: f.project_id,  // 8位 hex string,不要 parseInt
             target,
             note: f.note,
           }),
@@ -2679,6 +2712,129 @@ function app() {
       } catch (e) { console.error(e); }
     },
 
+    // ─── 剧情追踪 ───
+    async loadPlotPoints() {
+      if (!this.currentProject) return;
+      try {
+        const params = new URLSearchParams();
+        if (this.plotSearch.q) params.set('q', this.plotSearch.q);
+        if (this.plotSearch.status) params.set('status', this.plotSearch.status);
+        if (this.plotSearch.importance) params.set('importance', this.plotSearch.importance);
+        if (this.plotSearch.rangeMin || this.plotSearch.rangeMax) {
+          const lo = this.plotSearch.rangeMin || '';
+          const hi = this.plotSearch.rangeMax || '';
+          params.set('chapter_range', `${lo}-${hi}`);
+        }
+        const res = await fetch(`/api/projects/${this.currentProject.id}/plot-points?${params}`);
+        this.plotPoints = await res.json();
+      } catch (e) { console.error(e); }
+    },
+
+    openPlotPointForm(pp = null) {
+      if (pp) {
+        this.plotForm = {
+          id: pp.id,
+          title: pp.title || '',
+          description: pp.description || '',
+          tagInput: (pp.tags || []).join(', '),
+          importance: pp.importance || 'major',
+          status: pp.status || 'planning',
+          intro_chapter_id: pp.intro_chapter_id || null,
+          develop_chapter_id: pp.develop_chapter_id || null,
+          climax_chapter_id: pp.climax_chapter_id || null,
+          resolve_chapter_id: pp.resolve_chapter_id || null,
+          intro_note: pp.intro_note || '',
+          develop_note: pp.develop_note || '',
+          climax_note: pp.climax_note || '',
+          resolve_note: pp.resolve_note || '',
+        };
+      } else {
+        this.plotForm = {
+          id: null, title: '', description: '', tagInput: '',
+          importance: 'major', status: 'planning',
+          intro_chapter_id: null, develop_chapter_id: null, climax_chapter_id: null, resolve_chapter_id: null,
+          intro_note: '', develop_note: '', climax_note: '', resolve_note: '',
+        };
+      }
+      this.showPlotPointForm = true;
+    },
+
+    async savePlotPoint() {
+      if (!this.currentProject) return;
+      if (!this.plotForm.title.trim()) {
+        alert('请输入标题');
+        return;
+      }
+      const tags = (this.plotForm.tagInput || '').split(',').map((t) => t.trim()).filter(Boolean);
+      const payload = {
+        title: this.plotForm.title,
+        description: this.plotForm.description,
+        tags,
+        importance: this.plotForm.importance,
+        status: this.plotForm.status,
+        intro_chapter_id: this.plotForm.intro_chapter_id || null,
+        develop_chapter_id: this.plotForm.develop_chapter_id || null,
+        climax_chapter_id: this.plotForm.climax_chapter_id || null,
+        resolve_chapter_id: this.plotForm.resolve_chapter_id || null,
+        intro_note: this.plotForm.intro_note,
+        develop_note: this.plotForm.develop_note,
+        climax_note: this.plotForm.climax_note,
+        resolve_note: this.plotForm.resolve_note,
+      };
+      try {
+        const url = this.plotForm.id
+          ? `/api/projects/${this.currentProject.id}/plot-points/${this.plotForm.id}`
+          : `/api/projects/${this.currentProject.id}/plot-points`;
+        const method = this.plotForm.id ? 'PUT' : 'POST';
+        const res = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        this.showPlotPointForm = false;
+        await this.loadPlotPoints();
+      } catch (e) {
+        alert('保存失败：' + e.message);
+      }
+    },
+
+    async deletePlotPoint(pp) {
+      if (!confirm(`确定删除剧情点「${pp.title}」？`)) return;
+      try {
+        const res = await fetch(
+          `/api/projects/${this.currentProject.id}/plot-points/${pp.id}`,
+          { method: 'DELETE' }
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        await this.loadPlotPoints();
+      } catch (e) {
+        alert('删除失败：' + e.message);
+      }
+    },
+
+    togglePlotExpanded(id) {
+      this.plotExpandedId = this.plotExpandedId === id ? null : id;
+    },
+
+    /** 把 chapter id 映射成 "第N章" 显示；null 返回 null */
+    getChapterOrder(chapterId) {
+      if (!chapterId) return null;
+      const ch = this.chapters.find((c) => c.id === chapterId);
+      return ch ? ch.order + 1 : null;
+    },
+
+    plotStatusLabel(s) {
+      return ({
+        planning: '规划中',
+        introduced: '已引入',
+        developing: '发展中',
+        climaxed: '高潮中',
+        resolved: '已回收',
+        abandoned: '已废弃',
+      })[s] || s;
+    },
+
     async saveForeshadowing() {
       if (!this.currentProject) return;
       try {
@@ -2784,6 +2940,684 @@ function app() {
         this.showRelationForm = false;
         this.relationForm = { from_character_id: null, to_character_id: null, relation_type: '友情', description: '', strength: 5 };
       } catch (e) { alert('保存失败: ' + e.message); }
+    },
+
+    // ─── 角色关系图谱（可交互） ───
+    // ──────────────────────────────────────────────────────────
+    // 设计：
+    //  1. 节点来自 mergedCharacters()（AI + 手动合并），边来自手动 characterRelations + AI bootstrapData.relations
+    //  2. 节点唯一 key: 手动角色用 'm-{id}', AI 角色用 'a-{name}'
+    //  3. 边的 from/to 引用上面的 _key；加载时把 AI 关系 from/to (name) 转成 _key
+    //  4. 节点位置 (x,y) 自动用环形布局；用户拖动后保存到 localStorage
+    //  5. SVG 渲染：g[transform=translate+scale] 处理 pan/zoom；node 是 g 元素，绑定 mousedown 拖拽
+    //  6. 新建关系模式：依次点两个节点 → 弹出表单 → POST /character-relations
+    //  7. 边编辑：选中边 → 右侧面板显示表单 → PUT /character-relations/{id}
+    //  8. 边删除：DELETE /character-relations/{id}
+    // ──────────────────────────────────────────────────────────
+
+    /**
+     * 角色 → 图谱节点 key 映射。
+     * 手动角色（_source='manual'，有 id）→ 'm-{id}'
+     * AI 角色（_source='ai'，无 id）→ 'a-{name}'
+     */
+    relGraphCharKey(c) {
+      if (!c) return null;
+      if (c._source === 'manual' && c._id) return 'm-' + c._id;
+      return 'a-' + (c.name || 'unknown');
+    },
+
+    /**
+     * 把所有 AI 关系 (from/to 是 name) 和 手动关系 (from_character_id/to_character_id 是 id)
+     * 统一转成图谱边的 from/to（key 形式），并合并去重。
+     */
+    getAllGraphRelations() {
+      const chars = this.mergedCharacters();
+      const keyByName = {};    // name → key
+      const keyById = {};      // id → key
+      for (const c of chars) {
+        const key = this.relGraphCharKey(c);
+        if (c.name) keyByName[c.name] = key;
+        if (c._id) keyById[c._id] = key;
+      }
+
+      const edges = [];
+      const seen = new Set();
+
+      // 手动关系（有 id，可编辑/删除）
+      for (const r of (this.characterRelations || [])) {
+        const from = keyById[r.from_character_id];
+        const to = keyById[r.to_character_id];
+        if (!from || !to || from === to) continue;
+        const dedupKey = from + '|' + to + '|' + (r.relation_type || '');
+        if (seen.has(dedupKey)) continue;
+        seen.add(dedupKey);
+        edges.push({
+          id: 'm-' + r.id,
+          _realId: r.id,
+          _editable: true,
+          from,
+          to,
+          relation_type: r.relation_type || '未分类',
+          description: r.description || '',
+          strength: r.strength || 5,
+          status: r.status || 'stable',
+        });
+      }
+
+      // AI 关系（只读）
+      for (const r of (this.bootstrapAiRelations() || [])) {
+        const from = keyByName[r.from];
+        const to = keyByName[r.to];
+        if (!from || !to || from === to) continue;
+        const dedupKey = from + '|' + to + '|' + (r.type || '');
+        if (seen.has(dedupKey)) continue;
+        seen.add(dedupKey);
+        edges.push({
+          id: 'ai-' + (r.from + '-' + r.to + '-' + (r.type || '')),
+          _editable: false,
+          from,
+          to,
+          relation_type: r.type || '未分类',
+          description: r.description || '',
+          strength: r.strength || 5,
+          status: r.status || 'stable',
+        });
+      }
+
+      return edges;
+    },
+
+    /**
+     * 把节点摆放到一个圆环（主角居中，其它环上均匀分布）。
+     * 已存在的节点保持当前 x/y；新增的节点补到合适位置。
+     */
+    relGraphAutoLayout() {
+      const chars = this.mergedCharacters();
+      if (chars.length === 0) {
+        this.relGraphNodes = [];
+        this.relGraphEdges = [];
+        this._renderRelGraphSvg();
+        return;
+      }
+      const W = (this.$refs.relGraphWrap && this.$refs.relGraphWrap.clientWidth) || 900;
+      const H = (this.$refs.relGraphWrap && this.$refs.relGraphWrap.clientHeight) || 600;
+      const cx = W / 2;
+      const cy = H / 2;
+
+      // 已有位置：内存 > localStorage
+      const savedPos = this._loadRelGraphPositions();
+      const oldPos = {};
+      for (const n of this.relGraphNodes) oldPos[n._key] = { x: n.x, y: n.y };
+      for (const k of Object.keys(savedPos)) {
+        if (!oldPos[k] && this._isFinite(savedPos[k].x) && this._isFinite(savedPos[k].y)) {
+          oldPos[k] = savedPos[k];
+        }
+      }
+
+      const roleOrder = { '主角': 0, '反派': 1, '配角': 2, '龙套': 3 };
+      const sorted = chars.slice().sort((a, b) => {
+        const ra = roleOrder[a.role] ?? 9;
+        const rb = roleOrder[b.role] ?? 9;
+        if (ra !== rb) return ra - rb;
+        return (a.name || '').localeCompare(b.name || '', 'zh-CN');
+      });
+
+      // 主角居中
+      const protagonists = sorted.filter((c) => c.role === '主角');
+      const others = sorted.filter((c) => c.role !== '主角');
+      const nodes = [];
+
+      // 主角：1 个居中，多个第一圈
+      if (protagonists.length === 1) {
+        const c = protagonists[0];
+        const key = this.relGraphCharKey(c);
+        const old = oldPos[key];
+        nodes.push({
+          _key: key,
+          _id: c._id,
+          _source: c._source,
+          name: c.name || '未命名',
+          role: c.role,
+          description: c.description || '',
+          profile: c.profile || {},
+          _roleIcon: '👑',
+          x: old && this._isFinite(old.x) ? old.x : cx,
+          y: old && this._isFinite(old.y) ? old.y : cy,
+        });
+      } else if (protagonists.length > 1) {
+        const r = Math.min(W, H) * 0.18;
+        protagonists.forEach((c, i) => {
+          const key = this.relGraphCharKey(c);
+          const old = oldPos[key];
+          const ang = (i / protagonists.length) * Math.PI * 2 - Math.PI / 2;
+          nodes.push({
+            _key: key,
+            _id: c._id,
+            _source: c._source,
+            name: c.name || '未命名',
+            role: c.role,
+            description: c.description || '',
+            profile: c.profile || {},
+            _roleIcon: '👑',
+            x: old && this._isFinite(old.x) ? old.x : cx + Math.cos(ang) * r,
+            y: old && this._isFinite(old.y) ? old.y : cy + Math.sin(ang) * r,
+          });
+        });
+      }
+
+      // 其它角色均匀分布在多圈
+      if (others.length > 0) {
+        const ringCount = Math.min(3, Math.ceil(others.length / 8));
+        const minR = Math.min(W, H) * 0.22;
+        const maxR = Math.min(W, H) * 0.4;
+        others.forEach((c, i) => {
+          const ring = Math.min(ringCount - 1, Math.floor(i / Math.ceil(others.length / ringCount)));
+          const ringStart = ringCount === 1 ? 0 : Math.floor(i / Math.ceil(others.length / ringCount)) * Math.ceil(others.length / ringCount);
+          const ringSize = Math.min(others.length - ringStart, Math.ceil(others.length / ringCount));
+          const idxInRing = i - ringStart;
+          const r = minR + (maxR - minR) * (ring / Math.max(1, ringCount - 1));
+          const ang = (idxInRing / ringSize) * Math.PI * 2 - Math.PI / 2;
+          const key = this.relGraphCharKey(c);
+          const old = oldPos[key];
+          const roleIcon = c.role === '反派' ? '⚔️' : c.role === '龙套' ? '🗣️' : '🎭';
+          nodes.push({
+            _key: key,
+            _id: c._id,
+            _source: c._source,
+            name: c.name || '未命名',
+            role: c.role || '配角',
+            description: c.description || '',
+            profile: c.profile || {},
+            _roleIcon: roleIcon,
+            x: old && this._isFinite(old.x) ? old.x : cx + Math.cos(ang) * r,
+            y: old && this._isFinite(old.y) ? old.y : cy + Math.sin(ang) * r,
+          });
+        });
+      }
+
+      this.relGraphNodes = nodes;
+      this.relGraphEdges = this.getAllGraphRelations();
+      this._saveRelGraphPositions();
+      this._applyRelGraphTransform();
+      this._renderRelGraphSvg();
+    },
+
+    _isFinite(v) { return typeof v === 'number' && Number.isFinite(v); },
+
+    /**
+     * 加载（首次打开面板时）：保证节点 / 边准备好并渲染。
+     * 渲染逻辑 = 重建 SVG DOM（避免 Alpine 频繁 diff 卡顿）。
+     */
+    renderRelationGraph() {
+      // 每次切换到图谱页都重建一次（AI 数据可能变化）
+      const chars = this.mergedCharacters();
+      if (chars.length === 0) {
+        this.relGraphNodes = [];
+        this.relGraphEdges = [];
+        this._renderRelGraphSvg();
+        return;
+      }
+      // 自动布局：保留用户已拖动的位置
+      this.relGraphAutoLayout();
+    },
+
+    /**
+     * 把 relGraphNodes / relGraphEdges 真正画到 SVG。
+     * 直接 DOM 操作（不用 Alpine x-for）——节点/边很多时 x-for 频繁 diff 会卡。
+     */
+    _renderRelGraphSvg() {
+      if (!this.$refs.relGraphEdges || !this.$refs.relGraphNodes) return;
+      const edgesG = this.$refs.relGraphEdges;
+      const nodesG = this.$refs.relGraphNodes;
+      const SVG_NS = 'http://www.w3.org/2000/svg';
+      edgesG.innerHTML = '';
+      nodesG.innerHTML = '';
+
+      // ─── 边 ───
+      const nodeByKey = {};
+      for (const n of this.relGraphNodes) nodeByKey[n._key] = n;
+
+      for (const e of this.relGraphEdges) {
+        const fromN = nodeByKey[e.from];
+        const toN = nodeByKey[e.to];
+        if (!fromN || !toN) continue;
+        const dx = toN.x - fromN.x;
+        const dy = toN.y - fromN.y;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len === 0) continue;
+        // 缩短线条：避开节点圆（半径约 32）
+        const ux = dx / len, uy = dy / len;
+        const r1 = 32, r2 = 32;
+        const x1 = fromN.x + ux * r1;
+        const y1 = fromN.y + uy * r1;
+        const x2 = toN.x - ux * r2;
+        const y2 = toN.y - uy * r2;
+        const mx = (x1 + x2) / 2;
+        const my = (y1 + y2) / 2;
+
+        // 命中层（透明粗线，方便点击）
+        const hit = document.createElementNS(SVG_NS, 'line');
+        hit.setAttribute('class', 'rg-edge-hit');
+        hit.setAttribute('x1', x1); hit.setAttribute('y1', y1);
+        hit.setAttribute('x2', x2); hit.setAttribute('y2', y2);
+        hit.dataset.edgeId = e.id;
+        hit.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          this.relGraphSelectedEdgeId = e.id;
+          this.relGraphSelectedNodeId = null;
+          this.relGraphEditForm = {
+            relation_type: e.relation_type,
+            description: e.description,
+            strength: e.strength,
+            status: e.status,
+          };
+          this._renderRelGraphSvg();
+        });
+        edgesG.appendChild(hit);
+
+        // 可见边
+        const line = document.createElementNS(SVG_NS, 'line');
+        const status = e.status || 'stable';
+        line.setAttribute('class', `rg-edge status-${status}` + (this.relGraphSelectedEdgeId === e.id ? ' selected' : ''));
+        const width = 1 + (e.strength || 5) * 0.3;
+        line.setAttribute('stroke-width', width);
+        line.setAttribute('marker-end', `url(#rg-arrow-${status})`);
+        line.setAttribute('x1', x1); line.setAttribute('y1', y1);
+        line.setAttribute('x2', x2); line.setAttribute('y2', y2);
+        edgesG.appendChild(line);
+
+        // 标签（关系类型）
+        if (this.relGraphToggleLabels) {
+          const labelText = e.relation_type || '关系';
+          // 估算文字宽度
+          const labelW = Math.max(28, labelText.length * 12 + 10);
+          const labelH = 16;
+          const bg = document.createElementNS(SVG_NS, 'rect');
+          bg.setAttribute('class', `rg-edge-label-bg status-${status}`);
+          bg.setAttribute('x', mx - labelW / 2);
+          bg.setAttribute('y', my - labelH / 2);
+          bg.setAttribute('width', labelW);
+          bg.setAttribute('height', labelH);
+          edgesG.appendChild(bg);
+          const text = document.createElementNS(SVG_NS, 'text');
+          text.setAttribute('class', 'rg-edge-label');
+          text.setAttribute('x', mx);
+          text.setAttribute('y', my + 1);
+          text.textContent = labelText;
+          edgesG.appendChild(text);
+        }
+      }
+
+      // ─── 节点 ───
+      for (const n of this.relGraphNodes) {
+        const g = document.createElementNS(SVG_NS, 'g');
+        const isSelected = this.relGraphSelectedNodeId === n._key;
+        const isAddSource = this.relGraphAddMode && this.relGraphAddFrom === n._key;
+        const isAddTarget = this.relGraphAddMode && this.relGraphAddFrom && this.relGraphAddFrom !== n._key && this.relGraphAddStep === 'pickTo';
+        g.setAttribute('class', 'rg-node-group' + (isSelected ? ' selected' : ''));
+        g.setAttribute('transform', `translate(${n.x}, ${n.y})`);
+        g.dataset.nodeKey = n._key;
+        g.style.cursor = this.relGraphAddMode ? 'crosshair' : 'pointer';
+
+        // 圆环
+        const circle = document.createElementNS(SVG_NS, 'circle');
+        circle.setAttribute('class', `rg-node-circle role-${n.role || '配角'}`);
+        circle.setAttribute('r', isSelected ? 34 : 30);
+        circle.setAttribute('cx', 0);
+        circle.setAttribute('cy', 0);
+        g.appendChild(circle);
+
+        // 高亮"待选"状态
+        if (this.relGraphAddMode && isAddSource) {
+          const halo = document.createElementNS(SVG_NS, 'circle');
+          halo.setAttribute('r', 38);
+          halo.setAttribute('fill', 'none');
+          halo.setAttribute('stroke', '#6366f1');
+          halo.setAttribute('stroke-width', '2');
+          halo.setAttribute('stroke-dasharray', '4 3');
+          g.appendChild(halo);
+        }
+
+        // 图标（emoji）
+        const icon = document.createElementNS(SVG_NS, 'text');
+        icon.setAttribute('class', 'rg-node-icon');
+        icon.setAttribute('x', 0);
+        icon.setAttribute('y', -2);
+        icon.textContent = n._roleIcon || '👤';
+        g.appendChild(icon);
+
+        // 角色标签
+        const roleLabel = document.createElementNS(SVG_NS, 'text');
+        roleLabel.setAttribute('class', 'rg-node-role');
+        roleLabel.setAttribute('x', 0);
+        roleLabel.setAttribute('y', 14);
+        roleLabel.textContent = n.role || '配角';
+        g.appendChild(roleLabel);
+
+        // 名字
+        const nameLabel = document.createElementNS(SVG_NS, 'text');
+        nameLabel.setAttribute('class', `rg-node-label role-${n.role || '配角'}`);
+        nameLabel.setAttribute('x', 0);
+        nameLabel.setAttribute('y', 44);
+        nameLabel.textContent = n.name;
+        g.appendChild(nameLabel);
+
+        // 鼠标事件
+        g.addEventListener('mousedown', (ev) => this._onNodeMouseDown(ev, n._key));
+        g.addEventListener('mouseenter', (ev) => this._showRelGraphTooltip(ev, `${n.name} · ${n.role || '配角'}`));
+        g.addEventListener('mousemove', (ev) => this._showRelGraphTooltip(ev, `${n.name} · ${n.role || '配角'}`));
+        g.addEventListener('mouseleave', () => this._hideRelGraphTooltip());
+        g.addEventListener('click', (ev) => this._onNodeClick(ev, n._key));
+
+        nodesG.appendChild(g);
+      }
+    },
+
+    /**
+     * 应用 pan/zoom 到 content group
+     */
+    _applyRelGraphTransform() {
+      if (!this.$refs.relGraphContent) return;
+      const v = this.relGraphView;
+      this.$refs.relGraphContent.setAttribute(
+        'transform',
+        `translate(${v.x}, ${v.y}) scale(${v.scale})`
+      );
+    },
+
+    /**
+     * 把当前节点位置保存到 localStorage（按项目 ID 隔离）。
+     */
+    _saveRelGraphPositions() {
+      if (!this.currentProject) return;
+      try {
+        const key = `relGraph-pos-${this.currentProject.id}`;
+        const data = {};
+        for (const n of this.relGraphNodes) {
+          data[n._key] = { x: n.x, y: n.y };
+        }
+        localStorage.setItem(key, JSON.stringify(data));
+      } catch (e) {}
+    },
+
+    _loadRelGraphPositions() {
+      if (!this.currentProject) return {};
+      try {
+        const key = `relGraph-pos-${this.currentProject.id}`;
+        const raw = localStorage.getItem(key);
+        if (!raw) return {};
+        return JSON.parse(raw);
+      } catch (e) { return {}; }
+    },
+
+    // ─── 交互：拖拽节点 ───
+    _onNodeMouseDown(ev, nodeKey) {
+      if (this.relGraphAddMode) return;  // 添加模式下交给 click 处理
+      ev.stopPropagation();
+      ev.preventDefault();
+      const node = this.relGraphNodes.find((n) => n._key === nodeKey);
+      if (!node) return;
+
+      // 把屏幕坐标换算成 SVG 坐标
+      const svg = this.$refs.relGraphSvg;
+      const pt = this._screenToSvg(ev.clientX, ev.clientY);
+
+      this.relGraphDragging.node = nodeKey;
+      this.relGraphDragging.lastX = pt.x;
+      this.relGraphDragging.lastY = pt.y;
+      // 选中节点
+      this.relGraphSelectedNodeId = nodeKey;
+      this.relGraphSelectedEdgeId = null;
+      this._renderRelGraphSvg();
+
+      const move = (e) => {
+        const p = this._screenToSvg(e.clientX, e.clientY);
+        const dx = p.x - this.relGraphDragging.lastX;
+        const dy = p.y - this.relGraphDragging.lastY;
+        this.relGraphDragging.lastX = p.x;
+        this.relGraphDragging.lastY = p.y;
+        const node = this.relGraphNodes.find((n) => n._key === this.relGraphDragging.node);
+        if (node) {
+          node.x += dx;
+          node.y += dy;
+          this._renderRelGraphSvg();
+        }
+      };
+      const up = () => {
+        this.relGraphDragging.node = null;
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        this._saveRelGraphPositions();
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    },
+
+    // ─── 交互：拖画布 ───
+    onRelGraphCanvasMouseDown(ev) {
+      // 节点拖拽已 stopPropagation，所以这里只有"点空白"会进来
+      if (ev.target.closest('.rg-node-group')) return;
+      if (this.relGraphAddMode) return;  // 添加模式不拖画布
+      ev.preventDefault();
+      this.relGraphDragging.canvas = true;
+      this.relGraphDragging.lastX = ev.clientX;
+      this.relGraphDragging.lastY = ev.clientY;
+      this.relGraphDragging.panStartView = { ...this.relGraphView };
+      // 选中清空
+      this.relGraphSelectedNodeId = null;
+      this.relGraphSelectedEdgeId = null;
+      this._renderRelGraphSvg();
+    },
+
+    onRelGraphCanvasMouseMove(ev) {
+      if (!this.relGraphDragging.canvas) return;
+      const dx = ev.clientX - this.relGraphDragging.lastX;
+      const dy = ev.clientY - this.relGraphDragging.lastY;
+      this.relGraphDragging.lastX = ev.clientX;
+      this.relGraphDragging.lastY = ev.clientY;
+      this.relGraphView.x += dx;
+      this.relGraphView.y += dy;
+      this._applyRelGraphTransform();
+    },
+
+    onRelGraphCanvasMouseUp() {
+      if (this.relGraphDragging.canvas) {
+        this.relGraphDragging.canvas = false;
+      }
+    },
+
+    // ─── 交互：滚轮缩放（以鼠标位置为中心） ───
+    onRelGraphWheel(ev) {
+      const svg = this.$refs.relGraphSvg;
+      if (!svg) return;
+      const rect = svg.getBoundingClientRect();
+      const mx = ev.clientX - rect.left;
+      const my = ev.clientY - rect.top;
+      const factor = ev.deltaY < 0 ? 1.15 : 0.87;
+      const newScale = Math.min(3, Math.max(0.2, this.relGraphView.scale * factor));
+      const realFactor = newScale / this.relGraphView.scale;
+      // 保持鼠标点不动：tx = mx - (mx - tx) * factor
+      this.relGraphView.x = mx - (mx - this.relGraphView.x) * realFactor;
+      this.relGraphView.y = my - (my - this.relGraphView.y) * realFactor;
+      this.relGraphView.scale = newScale;
+      this._applyRelGraphTransform();
+    },
+
+    relGraphZoomIn() {
+      this.relGraphView.scale = Math.min(3, this.relGraphView.scale * 1.2);
+      this._applyRelGraphTransform();
+    },
+    relGraphZoomOut() {
+      this.relGraphView.scale = Math.max(0.2, this.relGraphView.scale * 0.85);
+      this._applyRelGraphTransform();
+    },
+    relGraphResetView() {
+      this.relGraphView = { x: 0, y: 0, scale: 1 };
+      this._applyRelGraphTransform();
+    },
+
+    // ─── 屏幕坐标 → SVG 内容坐标（考虑 pan + zoom） ───
+    _screenToSvg(clientX, clientY) {
+      const svg = this.$refs.relGraphSvg;
+      const rect = svg.getBoundingClientRect();
+      const mx = clientX - rect.left;
+      const my = clientY - rect.top;
+      return {
+        x: (mx - this.relGraphView.x) / this.relGraphView.scale,
+        y: (my - this.relGraphView.y) / this.relGraphView.scale,
+      };
+    },
+
+    // ─── 节点点击 ───
+    _onNodeClick(ev, nodeKey) {
+      if (this.relGraphAddMode) {
+        ev.stopPropagation();
+        this._handleAddModeClick(nodeKey);
+        return;
+      }
+      // 普通点击：选中节点
+      this.relGraphSelectedNodeId = nodeKey;
+      this.relGraphSelectedEdgeId = null;
+      this._renderRelGraphSvg();
+    },
+
+    _handleAddModeClick(nodeKey) {
+      if (this.relGraphAddStep === 'pickFrom') {
+        this.relGraphAddFrom = nodeKey;
+        this.relGraphAddStep = 'pickTo';
+      } else if (this.relGraphAddStep === 'pickTo') {
+        if (nodeKey === this.relGraphAddFrom) return;  // 不能自环
+        this.relGraphAddTo = nodeKey;
+        this.relGraphAddStep = 'confirm';
+      }
+      this._renderRelGraphSvg();
+    },
+
+    // ─── Tooltip ───
+    _showRelGraphTooltip(ev, text) {
+      const tip = this.$refs.relGraphTooltip;
+      const wrap = this.$refs.relGraphWrap;
+      if (!tip || !wrap) return;
+      const rect = wrap.getBoundingClientRect();
+      tip.textContent = text;
+      tip.style.left = (ev.clientX - rect.left) + 'px';
+      tip.style.top = (ev.clientY - rect.top) + 'px';
+      tip.classList.remove('hidden');
+    },
+    _hideRelGraphTooltip() {
+      const tip = this.$refs.relGraphTooltip;
+      if (tip) tip.classList.add('hidden');
+    },
+
+    // ─── 节点查询 ───
+    getRelGraphNodeById(key) {
+      return this.relGraphNodes.find((n) => n._key === key);
+    },
+    getRelGraphEdgeById(id) {
+      return this.relGraphEdges.find((e) => e.id === id);
+    },
+    getRelGraphCharName(key) {
+      const n = this.relGraphNodes.find((nn) => nn._key === key);
+      return n ? n.name : '未知';
+    },
+    getRelGraphNodeRelations(key) {
+      return this.relGraphEdges.filter((e) => e.from === key || e.to === key);
+    },
+
+    // ─── 边编辑保存 ───
+    async saveRelationGraphEdit() {
+      const edge = this.getRelGraphEdgeById(this.relGraphSelectedEdgeId);
+      if (!edge || !edge._editable || !edge._realId) {
+        alert('该关系不可编辑（仅可编辑手动添加的关系）');
+        return;
+      }
+      try {
+        const res = await fetch(
+          `/api/projects/${this.currentProject.id}/character-relations/${edge._realId}`,
+          {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(this.relGraphEditForm),
+          }
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const updated = await res.json();
+        // 同步更新 characterRelations 数组
+        const idx = this.characterRelations.findIndex((r) => r.id === edge._realId);
+        if (idx >= 0) this.characterRelations[idx] = updated;
+        // 重渲染图谱
+        this.relGraphEdges = this.getAllGraphRelations();
+        this._renderRelGraphSvg();
+        alert('✓ 已保存');
+      } catch (e) {
+        alert('保存失败：' + e.message);
+      }
+    },
+
+    async deleteRelationFromGraph(realId) {
+      if (!confirm('确定删除这条关系？')) return;
+      try {
+        const res = await fetch(
+          `/api/projects/${this.currentProject.id}/character-relations/${realId}`,
+          { method: 'DELETE' }
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        // 从手动数组里删掉
+        this.characterRelations = this.characterRelations.filter((r) => r.id !== realId);
+        this.relGraphSelectedEdgeId = null;
+        this.relGraphEdges = this.getAllGraphRelations();
+        this._renderRelGraphSvg();
+      } catch (e) {
+        alert('删除失败：' + e.message);
+      }
+    },
+
+    // ─── 新建关系（通过图谱两节点连） ───
+    async confirmRelationGraphCreate() {
+      const fromNode = this.getRelGraphNodeById(this.relGraphAddFrom);
+      const toNode = this.getRelGraphNodeById(this.relGraphAddTo);
+      if (!fromNode || !toNode) return;
+
+      // AI 角色无法直接创建手动关系（没有 db id），提示用户先到「角色」页转手动
+      if (!fromNode._id || !toNode._id) {
+        alert('AI 生成的角色暂不支持直接在图谱中新建关系，请先在「角色」面板手动添加同名角色。');
+        this.relGraphAddStep = 'pickFrom';
+        this.relGraphAddFrom = null;
+        this.relGraphAddTo = null;
+        return;
+      }
+
+      try {
+        const payload = {
+          from_character_id: fromNode._id,
+          to_character_id: toNode._id,
+          relation_type: this.relGraphNewForm.relation_type,
+          description: this.relGraphNewForm.description || '',
+          strength: this.relGraphNewForm.strength,
+        };
+        const res = await fetch(
+          `/api/projects/${this.currentProject.id}/character-relations`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          }
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const r = await res.json();
+        this.characterRelations.push(r);
+        this.relGraphEdges = this.getAllGraphRelations();
+        this.relGraphAddStep = 'pickFrom';
+        this.relGraphAddFrom = null;
+        this.relGraphAddTo = null;
+        this.relGraphNewForm = { relation_type: '友情', description: '', strength: 5 };
+        // 自动选中刚创建的边
+        this.relGraphSelectedEdgeId = 'm-' + r.id;
+        this.relGraphSelectedNodeId = null;
+        this._renderRelGraphSvg();
+      } catch (e) {
+        alert('创建失败：' + e.message);
+      }
     },
 
     // ─── 一致性检查 ───

@@ -28,7 +28,7 @@ class OutlineNodeUpdate(BaseModel):
 
 class OutlineNodeResponse(BaseModel):
     id: int
-    project_id: int
+    project_id: str
     parent_id: int | None
     title: str
     content: str
@@ -43,7 +43,7 @@ class OutlineNodeResponse(BaseModel):
 # ─── Routes ───
 
 @router.get("", response_model=list[OutlineNodeResponse])
-async def list_outline(project_id: int, db: Session = Depends(get_db)):
+async def list_outline(project_id: str, db: Session = Depends(get_db)):
     """获取项目大纲"""
     nodes = (
         db.query(OutlineNode)
@@ -55,7 +55,7 @@ async def list_outline(project_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=OutlineNodeResponse)
-async def create_outline_node(project_id: int, data: OutlineNodeCreate, db: Session = Depends(get_db)):
+async def create_outline_node(project_id: str, data: OutlineNodeCreate, db: Session = Depends(get_db)):
     """创建大纲节点"""
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -75,7 +75,7 @@ async def create_outline_node(project_id: int, data: OutlineNodeCreate, db: Sess
 
 
 @router.put("/{node_id}", response_model=OutlineNodeResponse)
-async def update_outline_node(project_id: int, node_id: int, data: OutlineNodeUpdate, db: Session = Depends(get_db)):
+async def update_outline_node(project_id: str, node_id: int, data: OutlineNodeUpdate, db: Session = Depends(get_db)):
     """更新大纲节点"""
     node = (
         db.query(OutlineNode)
@@ -100,7 +100,7 @@ async def update_outline_node(project_id: int, node_id: int, data: OutlineNodeUp
 
 
 @router.delete("/{node_id}")
-async def delete_outline_node(project_id: int, node_id: int, db: Session = Depends(get_db)):
+async def delete_outline_node(project_id: str, node_id: int, db: Session = Depends(get_db)):
     """删除大纲节点（会删除所有子节点）"""
     node = (
         db.query(OutlineNode)

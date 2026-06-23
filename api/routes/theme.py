@@ -28,7 +28,7 @@ class ThemeUpdate(BaseModel):
 
 class ThemeResponse(BaseModel):
     id: int
-    project_id: int
+    project_id: str
     theme_type: str
     title: str
     description: str
@@ -55,7 +55,7 @@ class ForeshadowingUpdate(BaseModel):
 
 class ForeshadowingResponse(BaseModel):
     id: int
-    project_id: int
+    project_id: str
     plant_chapter_id: int | None
     resolve_chapter_id: int | None
     title: str
@@ -119,12 +119,12 @@ class CharacterRelationUpdate(BaseModel):
 # ─── Theme Routes ───
 
 @router.get("/themes", response_model=list[ThemeResponse])
-async def list_themes(project_id: int, db: Session = Depends(get_db)):
+async def list_themes(project_id: str, db: Session = Depends(get_db)):
     return db.query(Theme).filter(Theme.project_id == project_id).all()
 
 
 @router.post("/themes", response_model=ThemeResponse)
-async def create_theme(project_id: int, data: ThemeCreate, db: Session = Depends(get_db)):
+async def create_theme(project_id: str, data: ThemeCreate, db: Session = Depends(get_db)):
     theme = Theme(project_id=project_id, **data.model_dump())
     db.add(theme)
     db.commit()
@@ -133,7 +133,7 @@ async def create_theme(project_id: int, data: ThemeCreate, db: Session = Depends
 
 
 @router.put("/themes/{theme_id}", response_model=ThemeResponse)
-async def update_theme(project_id: int, theme_id: int, data: ThemeUpdate, db: Session = Depends(get_db)):
+async def update_theme(project_id: str, theme_id: int, data: ThemeUpdate, db: Session = Depends(get_db)):
     theme = db.query(Theme).filter(Theme.id == theme_id, Theme.project_id == project_id).first()
     if not theme:
         raise HTTPException(status_code=404, detail="Theme not found")
@@ -145,7 +145,7 @@ async def update_theme(project_id: int, theme_id: int, data: ThemeUpdate, db: Se
 
 
 @router.delete("/themes/{theme_id}")
-async def delete_theme(project_id: int, theme_id: int, db: Session = Depends(get_db)):
+async def delete_theme(project_id: str, theme_id: int, db: Session = Depends(get_db)):
     theme = db.query(Theme).filter(Theme.id == theme_id, Theme.project_id == project_id).first()
     if not theme:
         raise HTTPException(status_code=404, detail="Theme not found")
@@ -157,7 +157,7 @@ async def delete_theme(project_id: int, theme_id: int, db: Session = Depends(get
 # ─── Foreshadowing Routes ───
 
 @router.get("/foreshadowings", response_model=list[ForeshadowingResponse])
-async def list_foreshadowings(project_id: int, status: str | None = None, db: Session = Depends(get_db)):
+async def list_foreshadowings(project_id: str, status: str | None = None, db: Session = Depends(get_db)):
     query = db.query(Foreshadowing).filter(Foreshadowing.project_id == project_id)
     if status:
         query = query.filter(Foreshadowing.status == status)
@@ -165,7 +165,7 @@ async def list_foreshadowings(project_id: int, status: str | None = None, db: Se
 
 
 @router.post("/foreshadowings", response_model=ForeshadowingResponse)
-async def create_foreshadowing(project_id: int, data: ForeshadowingCreate, db: Session = Depends(get_db)):
+async def create_foreshadowing(project_id: str, data: ForeshadowingCreate, db: Session = Depends(get_db)):
     fs = Foreshadowing(project_id=project_id, **data.model_dump())
     db.add(fs)
     db.commit()
@@ -174,7 +174,7 @@ async def create_foreshadowing(project_id: int, data: ForeshadowingCreate, db: S
 
 
 @router.put("/foreshadowings/{fs_id}", response_model=ForeshadowingResponse)
-async def update_foreshadowing(project_id: int, fs_id: int, data: ForeshadowingUpdate, db: Session = Depends(get_db)):
+async def update_foreshadowing(project_id: str, fs_id: int, data: ForeshadowingUpdate, db: Session = Depends(get_db)):
     fs = db.query(Foreshadowing).filter(Foreshadowing.id == fs_id, Foreshadowing.project_id == project_id).first()
     if not fs:
         raise HTTPException(status_code=404, detail="Foreshadowing not found")
@@ -186,7 +186,7 @@ async def update_foreshadowing(project_id: int, fs_id: int, data: ForeshadowingU
 
 
 @router.delete("/foreshadowings/{fs_id}")
-async def delete_foreshadowing(project_id: int, fs_id: int, db: Session = Depends(get_db)):
+async def delete_foreshadowing(project_id: str, fs_id: int, db: Session = Depends(get_db)):
     fs = db.query(Foreshadowing).filter(Foreshadowing.id == fs_id, Foreshadowing.project_id == project_id).first()
     if not fs:
         raise HTTPException(status_code=404, detail="Foreshadowing not found")
@@ -198,7 +198,7 @@ async def delete_foreshadowing(project_id: int, fs_id: int, db: Session = Depend
 # ─── ConsistencyRecord Routes ───
 
 @router.get("/consistency")
-async def list_consistency(project_id: int, entity_type: str | None = None, db: Session = Depends(get_db)):
+async def list_consistency(project_id: str, entity_type: str | None = None, db: Session = Depends(get_db)):
     query = db.query(ConsistencyRecord).filter(ConsistencyRecord.project_id == project_id)
     if entity_type:
         query = query.filter(ConsistencyRecord.entity_type == entity_type)
@@ -206,7 +206,7 @@ async def list_consistency(project_id: int, entity_type: str | None = None, db: 
 
 
 @router.post("/consistency")
-async def create_consistency(project_id: int, data: ConsistencyRecordCreate, db: Session = Depends(get_db)):
+async def create_consistency(project_id: str, data: ConsistencyRecordCreate, db: Session = Depends(get_db)):
     rec = ConsistencyRecord(project_id=project_id, **data.model_dump())
     db.add(rec)
     db.commit()
@@ -215,7 +215,7 @@ async def create_consistency(project_id: int, data: ConsistencyRecordCreate, db:
 
 
 @router.put("/consistency/{record_id}")
-async def update_consistency(project_id: int, record_id: int, data: ConsistencyRecordUpdate, db: Session = Depends(get_db)):
+async def update_consistency(project_id: str, record_id: int, data: ConsistencyRecordUpdate, db: Session = Depends(get_db)):
     rec = db.query(ConsistencyRecord).filter(
         ConsistencyRecord.id == record_id, ConsistencyRecord.project_id == project_id
     ).first()
@@ -231,7 +231,7 @@ async def update_consistency(project_id: int, record_id: int, data: ConsistencyR
 # ─── CharacterArc Routes ───
 
 @router.get("/character-arcs")
-async def list_character_arcs(project_id: int, character_id: int | None = None, db: Session = Depends(get_db)):
+async def list_character_arcs(project_id: str, character_id: int | None = None, db: Session = Depends(get_db)):
     query = db.query(CharacterArc).filter(CharacterArc.project_id == project_id)
     if character_id:
         query = query.filter(CharacterArc.character_id == character_id)
@@ -239,7 +239,7 @@ async def list_character_arcs(project_id: int, character_id: int | None = None, 
 
 
 @router.post("/character-arcs")
-async def create_character_arc(project_id: int, data: CharacterArcCreate, db: Session = Depends(get_db)):
+async def create_character_arc(project_id: str, data: CharacterArcCreate, db: Session = Depends(get_db)):
     arc = CharacterArc(project_id=project_id, **data.model_dump())
     db.add(arc)
     db.commit()
@@ -248,7 +248,7 @@ async def create_character_arc(project_id: int, data: CharacterArcCreate, db: Se
 
 
 @router.put("/character-arcs/{arc_id}")
-async def update_character_arc(project_id: int, arc_id: int, data: CharacterArcUpdate, db: Session = Depends(get_db)):
+async def update_character_arc(project_id: str, arc_id: int, data: CharacterArcUpdate, db: Session = Depends(get_db)):
     arc = db.query(CharacterArc).filter(CharacterArc.id == arc_id, CharacterArc.project_id == project_id).first()
     if not arc:
         raise HTTPException(status_code=404, detail="Arc not found")
@@ -262,12 +262,12 @@ async def update_character_arc(project_id: int, arc_id: int, data: CharacterArcU
 # ─── CharacterRelation Routes ───
 
 @router.get("/character-relations")
-async def list_character_relations(project_id: int, db: Session = Depends(get_db)):
+async def list_character_relations(project_id: str, db: Session = Depends(get_db)):
     return db.query(CharacterRelation).filter(CharacterRelation.project_id == project_id).all()
 
 
 @router.post("/character-relations")
-async def create_character_relation(project_id: int, data: CharacterRelationCreate, db: Session = Depends(get_db)):
+async def create_character_relation(project_id: str, data: CharacterRelationCreate, db: Session = Depends(get_db)):
     rel = CharacterRelation(project_id=project_id, **data.model_dump())
     db.add(rel)
     db.commit()
@@ -276,7 +276,7 @@ async def create_character_relation(project_id: int, data: CharacterRelationCrea
 
 
 @router.put("/character-relations/{rel_id}")
-async def update_character_relation(project_id: int, rel_id: int, data: CharacterRelationUpdate, db: Session = Depends(get_db)):
+async def update_character_relation(project_id: str, rel_id: int, data: CharacterRelationUpdate, db: Session = Depends(get_db)):
     rel = db.query(CharacterRelation).filter(
         CharacterRelation.id == rel_id, CharacterRelation.project_id == project_id
     ).first()
@@ -290,7 +290,7 @@ async def update_character_relation(project_id: int, rel_id: int, data: Characte
 
 
 @router.delete("/character-relations/{rel_id}")
-async def delete_character_relation(project_id: int, rel_id: int, db: Session = Depends(get_db)):
+async def delete_character_relation(project_id: str, rel_id: int, db: Session = Depends(get_db)):
     rel = db.query(CharacterRelation).filter(
         CharacterRelation.id == rel_id, CharacterRelation.project_id == project_id
     ).first()

@@ -29,7 +29,7 @@ class WorldEntryUpdate(BaseModel):
 
 class WorldEntryResponse(BaseModel):
     id: int
-    project_id: int
+    project_id: str
     category: str
     title: str
     content: str
@@ -44,7 +44,7 @@ class WorldEntryResponse(BaseModel):
 # ─── Routes ───
 
 @router.get("", response_model=list[WorldEntryResponse])
-async def list_world_entries(project_id: int, category: str | None = None, db: Session = Depends(get_db)):
+async def list_world_entries(project_id: str, category: str | None = None, db: Session = Depends(get_db)):
     """获取世界观条目列表"""
     query = db.query(WorldEntry).filter(WorldEntry.project_id == project_id)
     if category:
@@ -54,7 +54,7 @@ async def list_world_entries(project_id: int, category: str | None = None, db: S
 
 
 @router.post("", response_model=WorldEntryResponse)
-async def create_world_entry(project_id: int, data: WorldEntryCreate, db: Session = Depends(get_db)):
+async def create_world_entry(project_id: str, data: WorldEntryCreate, db: Session = Depends(get_db)):
     """创建世界观条目"""
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -83,7 +83,7 @@ async def create_world_entry(project_id: int, data: WorldEntryCreate, db: Sessio
 
 @router.put("/{entry_id}", response_model=WorldEntryResponse)
 async def update_world_entry(
-    project_id: int, entry_id: int, data: WorldEntryUpdate, db: Session = Depends(get_db)
+    project_id: str, entry_id: int, data: WorldEntryUpdate, db: Session = Depends(get_db)
 ):
     """更新世界观条目"""
     entry = (
@@ -117,7 +117,7 @@ async def update_world_entry(
 
 
 @router.delete("/{entry_id}")
-async def delete_world_entry(project_id: int, entry_id: int, db: Session = Depends(get_db)):
+async def delete_world_entry(project_id: str, entry_id: int, db: Session = Depends(get_db)):
     """删除世界观条目"""
     entry = (
         db.query(WorldEntry)

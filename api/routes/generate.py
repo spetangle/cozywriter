@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/generate", tags=["生成"])
 # ─── Schemas ───
 
 class GenerateRequest(BaseModel):
-    project_id: int
+    project_id: str
     chapter_id: int | None = None
     prompt: str
     mode: str = "continue"  # continue / polish / expand
@@ -47,7 +47,7 @@ MODE_USER_PROMPTS = {
 # ─── 核心生成函数（同步） ───
 
 def _do_generate(
-    project_id: int,
+    project_id: str,
     chapter_id: int | None,
     prompt: str,
     mode: str,
@@ -139,7 +139,7 @@ def _do_generate(
 
 # ─── 异步任务函数 ───
 
-def _async_generate_task(task_id: str, project_id: int, chapter_id: int | None, prompt: str, mode: str, provider: str | None):
+def _async_generate_task(task_id: str, project_id: str, chapter_id: int | None, prompt: str, mode: str, provider: str | None):
     """异步生成任务（在线程池中执行）"""
     from storage.database import SessionLocal
     db = SessionLocal()

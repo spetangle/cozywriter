@@ -10,7 +10,7 @@ class Theme(Base):
     __tablename__ = "themes"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(String(32), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     theme_type = Column(String(30), nullable=False)
     title = Column(String(200), nullable=False)
     description = Column(Text, default="")
@@ -26,7 +26,7 @@ class Foreshadowing(Base):
     __tablename__ = "foreshadowings"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(String(32), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     plant_chapter_id = Column(Integer, ForeignKey("chapters.id", ondelete="SET NULL"), nullable=True)
     resolve_chapter_id = Column(Integer, ForeignKey("chapters.id", ondelete="SET NULL"), nullable=True)
     title = Column(String(200), nullable=False)

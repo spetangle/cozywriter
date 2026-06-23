@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api", tags=["章节"])
 class ChapterCreate(BaseModel):
     # 修复：project_id 改为可选（从 URL 路径中取，避免 422）
     # 之前这里必填， 但前端只发 {title, order}，后端验证 project_id 缺失 → 422
-    project_id: int | None = None
+    project_id: str | None = None
     title: str
     order: int = 0
     content: str = ""
@@ -33,7 +33,7 @@ class ChapterUpdate(BaseModel):
 
 class ChapterResponse(BaseModel):
     id: int
-    project_id: int
+    project_id: str
     title: str
     order: int
     content: str
@@ -59,7 +59,7 @@ class VersionResponse(BaseModel):
 
 # ─── 隔离辅助 ───
 
-def _verify_chapter(chapter_id: int, project_id: int, db: Session) -> Chapter:
+def _verify_chapter(chapter_id: int, project_id: str, db: Session) -> Chapter:
     """验证章节属于指定项目，不属于则抛出 404"""
     chapter = db.query(Chapter).filter(
         Chapter.id == chapter_id,
@@ -79,7 +79,7 @@ def _count_words(text: str) -> int:
 # ─── Routes ───
 
 @router.get("/projects/{project_id}/chapters", response_model=list[ChapterResponse])
-async def list_chapters(project_id: int, db: Session = Depends(get_db)):
+async def list_chapters(project_id: str, db: Session = Depends(get_db)):
     """获取项目下所有章节"""
     chapters = (
         db.query(Chapter)
@@ -91,7 +91,7 @@ async def list_chapters(project_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/projects/{project_id}/chapters", response_model=ChapterResponse)
-async def create_chapter(project_id: int, data: ChapterCreate, db: Session = Depends(get_db)):
+async def create_chapter(project_id: str, data: ChapterCreate, db: Session = Depends(get_db)):
     """创建章节
 
     如果 bootstrap 已生成过该项目大纲的 chapter_outlines，会按 order 自动取对应的细纲，
@@ -175,14 +175,14 @@ async def create_chapter(project_id: int, data: ChapterCreate, db: Session = Dep
 # ─── 跨项目隔离：chapter_id 必须带 project_id 验证 ───
 
 @router.get("/projects/{project_id}/chapters/{chapter_id}", response_model=ChapterResponse)
-async def get_chapter(project_id: int, chapter_id: int, db: Session = Depends(get_db)):
+async def get_chapter(project_id: str, chapter_id: int, db: Session = Depends(get_db)):
     """获取章节详情（带项目隔离验证）"""
     chapter = _verify_chapter(chapter_id, project_id, db)
     return chapter
 
 
 @router.put("/projects/{project_id}/chapters/{chapter_id}", response_model=ChapterResponse)
-async def update_chapter(project_id: int, chapter_id: int, data: ChapterUpdate, db: Session = Depends(get_db)):
+async def update_chapter(project_id: str, chapter_id: int, data: ChapterUpdate, db: Session = Depends(get_db)):
     """更新章节（自动创建版本快照）"""
     chapter = _verify_chapter(chapter_id, project_id, db)
 
@@ -229,7 +229,7 @@ async def update_chapter(project_id: int, chapter_id: int, data: ChapterUpdate, 
 
 
 @router.delete("/projects/{project_id}/chapters/{chapter_id}")
-async def delete_chapter(project_id: int, chapter_id: int, db: Session = Depends(get_db)):
+async def delete_chapter(project_id: str, chapter_id: int, db: Session = Depends(get_db)):
     """删除单个章节
 
     同步清理:
@@ -289,7 +289,7 @@ class BatchDeleteRequest(BaseModel):
 
 @router.post("/projects/{project_id}/chapters/batch-delete")
 async def batch_delete_chapters(
-    project_id: int, req: BatchDeleteRequest, db: Session = Depends(get_db)
+    project_id: str, req: BatchDeleteRequest, db: Session = Depends(get_db)
 ):
     """批量删除章节(完整清理章节相关所有数据)
 
@@ -382,7 +382,7 @@ async def batch_delete_chapters(
 
 
 @router.post("/projects/{project_id}/chapters/reindex-rag")
-async def reindex_project_rag_endpoint(project_id: int, with_signatures: bool = True, db: Session = Depends(get_db)):
+async def reindex_project_rag_endpoint(project_id: str, with_signatures: bool = True, db: Session = Depends(get_db)):
     """全量 reindex 一个项目的 RAG 索引（含 chapter_events 集合）。
 
     用于：
@@ -402,7 +402,7 @@ async def reindex_project_rag_endpoint(project_id: int, with_signatures: bool = 
 
 
 @router.get("/projects/{project_id}/chapters/{chapter_id}/prep-info")
-async def get_chapter_prep_info(project_id: int, chapter_id: int, db: Session = Depends(get_db)):
+async def get_chapter_prep_info(project_id: str, chapter_id: int, db: Session = Depends(get_db)):
     """获取章节的"已发生事件清单 + RAG 相似事件"（给前端展示）。
 
     复用 build_chapter_prep_info()，只取其中 RAG / 去重相关字段返回。
@@ -422,7 +422,7 @@ async def get_chapter_prep_info(project_id: int, chapter_id: int, db: Session = 
 
 
 @router.get("/projects/{project_id}/chapters/{chapter_id}/versions", response_model=list[VersionResponse])
-async def list_versions(project_id: int, chapter_id: int, db: Session = Depends(get_db)):
+async def list_versions(project_id: str, chapter_id: int, db: Session = Depends(get_db)):
     """获取章节版本历史"""
     _verify_chapter(chapter_id, project_id, db)
     versions = (
@@ -435,7 +435,7 @@ async def list_versions(project_id: int, chapter_id: int, db: Session = Depends(
 
 
 @router.post("/projects/{project_id}/chapters/{chapter_id}/rollback/{version_num}", response_model=ChapterResponse)
-async def rollback_chapter(project_id: int, chapter_id: int, version_num: int, db: Session = Depends(get_db)):
+async def rollback_chapter(project_id: str, chapter_id: int, version_num: int, db: Session = Depends(get_db)):
     """回滚到指定版本"""
     chapter = _verify_chapter(chapter_id, project_id, db)
 
@@ -472,7 +472,7 @@ async def rollback_chapter(project_id: int, chapter_id: int, version_num: int, d
 # ═══════════════════════════════════════════════════════════════
 
 class PipelineRequest(BaseModel):
-    project_id: int
+    project_id: str
     chapter_id: int
     provider: str | None = None
     auto_revise: bool = True
@@ -484,7 +484,7 @@ class PipelineResponse(BaseModel):
     status: str
     task_id: str | None = None
     run_id: int | None = None
-    project_id: int | None = None
+    project_id: str | None = None
     chapter_id: int | None = None
     final_word_count: int | None = None
     stages: dict = {}
@@ -610,7 +610,7 @@ def _async_pipeline_task(task_id: str, req: PipelineRequest):
 # ═══════════════════════════════════════════════════════════════
 
 class ReviseRequest(BaseModel):
-    project_id: int
+    project_id: str
     chapter_id: int
     provider: str | None = None
 
@@ -715,7 +715,7 @@ def _async_revise_task(task_id: str, req: ReviseRequest):
 # ═══════════════════════════════════════════════════════════════
 
 class WordAdjustRequest(BaseModel):
-    project_id: int
+    project_id: str
     chapter_id: int
     provider: str | None = None
     # 可选：手动覆盖项目默认的 min~max 区间

@@ -32,7 +32,7 @@ async def get_all_tasks():
 
 
 @router.get("/project/{project_id}", response_model=list[TaskStatusResponse])
-async def get_project_tasks_status(project_id: int):
+async def get_project_tasks_status(project_id: str):
     tasks = get_project_tasks(project_id)
     return [TaskStatusResponse(**t.to_dict()) for t in reversed(tasks)]
 

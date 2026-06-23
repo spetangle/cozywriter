@@ -10,7 +10,7 @@ class Character(Base):
     __tablename__ = "characters"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(String(32), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     name = Column(String(100), nullable=False)
     role = Column(String(50), default="配角")
     profile = Column(JSON, default=dict)
@@ -50,7 +50,7 @@ class CharacterArc(Base):
     __tablename__ = "character_arcs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(String(32), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     character_id = Column(Integer, ForeignKey("characters.id", ondelete="CASCADE"), nullable=False)
     arc_type = Column(String(30), nullable=False)
     start_state = Column(Text, default="")
@@ -70,7 +70,7 @@ class CharacterRelation(Base):
     __tablename__ = "character_relations"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(String(32), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     from_character_id = Column(Integer, ForeignKey("characters.id", ondelete="CASCADE"), nullable=False)
     to_character_id = Column(Integer, ForeignKey("characters.id", ondelete="CASCADE"), nullable=False)
     relation_type = Column(String(50), nullable=False)

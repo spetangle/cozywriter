@@ -227,6 +227,7 @@
                 <button @click="activePanel = 'worldbuilding'; _saveLastView()" :class="{ active: activePanel === 'worldbuilding' }">🌍 世界观</button>
                 <button @click="activePanel = 'theme'; subPanel = 'themes'; _saveLastView()" :class="{ active: activePanel === 'theme' }">🎯 主题/伏笔</button>
                 <!-- 一致性检查已自动化、评审是单章节功能,菜单移除;功能保留在背景自动跑 -->
+                <button @click="activePanel = 'plot-tracker'; _saveLastView()" :class="{ active: activePanel === 'plot-tracker' }">📊 剧情追踪</button>
                 <button @click="activePanel = 'inspirations'; _saveLastView()" :class="{ active: activePanel === 'inspirations' }">💡 灵感</button>
                 <button @click="openExportModal()">📤 导出</button>
               </div>
@@ -779,6 +780,7 @@
                     <button :class="{ active: subPanel === 'characters' }" @click="subPanel = 'characters'">角色</button>
                     <button :class="{ active: subPanel === 'arcs' }" @click="subPanel = 'arcs'">角色弧光</button>
                     <button :class="{ active: subPanel === 'relations' }" @click="subPanel = 'relations'">关系矩阵</button>
+                    <button :class="{ active: subPanel === 'graph' }" @click="subPanel = 'graph'; $nextTick(() => renderRelationGraph())">🕸️ 关系图谱</button>
                   </div>
                 </div>
 
@@ -1004,6 +1006,523 @@
                   </div>
                 </template>
 
+                <!-- 关系图谱（SVG 可拖拽/缩放/编辑） -->
+                <template x-if="subPanel === 'graph'">
+                  <div class="panel-section">
+                    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+                      <button class="btn-secondary" @click="relGraphAddMode = !relGraphAddMode" :class="{ active: relGraphAddMode }">
+                        <span x-show="!relGraphAddMode">➕ 新建关系</span>
+                        <span x-show="relGraphAddMode">✕ 退出新建模式</span>
+                      </button>
+                      <button class="btn-secondary" @click="relGraphAutoLayout()">🔄 自动布局</button>
+                      <button class="btn-secondary" @click="relGraphResetView()">🎯 居中</button>
+                      <span style="font-size:12px;color:var(--text-muted);margin-left:auto">
+                        💡 提示：拖动节点调整位置 · 滚轮缩放 · 空白处拖动平移 · 点击节点/关系查看详情
+                      </span>
+                    </div>
+
+                    <div class="relation-graph-layout">
+                      <!-- 画布 -->
+                      <div class="relation-graph-canvas-wrap" x-ref="relGraphWrap">
+                        <svg class="relation-graph-svg"
+                             :class="{ 'add-mode': relGraphAddMode, 'dragging-canvas': relGraphDragging.canvas }"
+                             x-ref="relGraphSvg"
+                             @mousedown="onRelGraphCanvasMouseDown($event)"
+                             @mousemove="onRelGraphCanvasMouseMove($event)"
+                             @mouseup="onRelGraphCanvasMouseUp($event)"
+                             @mouseleave="onRelGraphCanvasMouseUp($event)"
+                             @wheel.prevent="onRelGraphWheel($event)">
+                          <defs>
+                            <!-- 箭头标记 -->
+                            <marker id="rg-arrow-stable" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                              <path d="M0,0 L10,5 L0,10 z" fill="#10b981" />
+                            </marker>
+                            <marker id="rg-arrow-developing" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                              <path d="M0,0 L10,5 L0,10 z" fill="#3b82f6" />
+                            </marker>
+                            <marker id="rg-arrow-tense" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                              <path d="M0,0 L10,5 L0,10 z" fill="#f59e0b" />
+                            </marker>
+                            <marker id="rg-arrow-broken" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                              <path d="M0,0 L10,5 L0,10 z" fill="#ef4444" />
+                            </marker>
+                          </defs>
+                          <g x-ref="relGraphContent">
+                            <!-- 边（在节点下方）-->
+                            <g x-ref="relGraphEdges"></g>
+                            <!-- 节点 -->
+                            <g x-ref="relGraphNodes"></g>
+                          </g>
+                        </svg>
+
+                        <!-- 右上工具栏 -->
+                        <div class="relation-graph-toolbar">
+                          <button @click="relGraphZoomIn()" title="放大">➕</button>
+                          <button @click="relGraphZoomOut()" title="缩小">➖</button>
+                          <button @click="relGraphResetView()" title="重置视图">🎯</button>
+                          <button @click="relGraphToggleLabels = !relGraphToggleLabels; renderRelationGraph()" title="切换标签">
+                            <span x-show="relGraphToggleLabels">🏷️</span>
+                            <span x-show="!relGraphToggleLabels">🚫🏷️</span>
+                          </button>
+                        </div>
+
+                        <!-- 左上图例 -->
+                        <div class="relation-graph-legend">
+                          <div class="relation-graph-legend-title">角色</div>
+                          <div class="relation-graph-legend-item"><span class="relation-graph-legend-dot" style="border-color:#dc2626"></span>主角</div>
+                          <div class="relation-graph-legend-item"><span class="relation-graph-legend-dot" style="border-color:#7c3aed"></span>反派</div>
+                          <div class="relation-graph-legend-item"><span class="relation-graph-legend-dot" style="border-color:#3b82f6"></span>配角</div>
+                          <div class="relation-graph-legend-item"><span class="relation-graph-legend-dot" style="border-color:#94a3b8"></span>龙套</div>
+                          <div class="relation-graph-legend-title" style="margin-top:6px">关系状态</div>
+                          <div class="relation-graph-legend-item"><span class="relation-graph-legend-dot" style="border-color:#10b981;background:#10b981"></span>稳定</div>
+                          <div class="relation-graph-legend-item"><span class="relation-graph-legend-dot" style="border-color:#3b82f6;background:#3b82f6"></span>发展中</div>
+                          <div class="relation-graph-legend-item"><span class="relation-graph-legend-dot" style="border-color:#f59e0b;background:#f59e0b"></span>紧张</div>
+                          <div class="relation-graph-legend-item"><span class="relation-graph-legend-dot" style="border-color:#ef4444;background:#ef4444"></span>破裂</div>
+                        </div>
+
+                        <!-- 模式 banner -->
+                        <template x-if="relGraphAddMode">
+                          <div class="rg-mode-banner">
+                            <span x-text="relGraphAddStep === 'pickFrom' ? '① 点击第一个角色（关系起点）' : '② 点击第二个角色（关系终点）'"></span>
+                            <button @click="relGraphAddMode = false; relGraphAddStep = 'pickFrom'; relGraphAddFrom = null">取消</button>
+                          </div>
+                        </template>
+
+                        <!-- tooltip -->
+                        <div class="rg-tooltip hidden" x-ref="relGraphTooltip"></div>
+                      </div>
+
+                      <!-- 右侧详情面板 -->
+                      <div class="relation-graph-side" x-ref="relGraphSide">
+                        <!-- 节点详情 -->
+                        <template x-if="relGraphSelectedNodeId && !relGraphSelectedEdgeId">
+                          <div>
+                            <template x-if="getRelGraphNodeById(relGraphSelectedNodeId) as node">
+                              <div>
+                                <div class="rgs-header">
+                                  <div class="rgs-avatar" :class="`role-${node.role || '配角'}`">
+                                    <span x-text="node._roleIcon"></span>
+                                  </div>
+                                  <div>
+                                    <div class="rgs-name" x-text="node.name"></div>
+                                    <div class="rgs-role" x-text="node.role || '配角'"></div>
+                                  </div>
+                                </div>
+                                <div class="rgs-section" x-show="node.description">
+                                  <div class="rgs-section-title">简介</div>
+                                  <div style="font-size:13px;line-height:1.6" x-text="node.description"></div>
+                                </div>
+                                <template x-if="node.profile && Object.keys(node.profile).length > 0">
+                                  <div class="rgs-section">
+                                    <div class="rgs-section-title">属性</div>
+                                    <template x-for="(val, key) in node.profile" :key="key">
+                                      <div class="rgs-row"><span x-text="key"></span><strong x-text="val"></strong></div>
+                                    </template>
+                                  </div>
+                                </template>
+                                <div class="rgs-section">
+                                  <div class="rgs-section-title">相关关系（<span x-text="getRelGraphNodeRelations(node._key).length"></span>）</div>
+                                  <div class="rgs-relations-list">
+                                    <template x-for="rel in getRelGraphNodeRelations(node._key)" :key="rel.id">
+                                      <div class="rgs-rel-item" :class="{ selected: relGraphSelectedEdgeId === rel.id }"
+                                           @click="relGraphSelectedEdgeId = rel.id; renderRelationGraph()">
+                                        <span class="rgs-rel-pair">
+                                          <span x-text="getRelGraphCharName(rel.from)"></span>
+                                          <span style="color:var(--text-muted)"> → </span>
+                                          <span x-text="getRelGraphCharName(rel.to)"></span>
+                                        </span>
+                                        <span class="rgs-rel-type" x-text="rel.relation_type"></span>
+                                      </div>
+                                    </template>
+                                    <template x-if="getRelGraphNodeRelations(node._key).length === 0">
+                                      <div style="font-size:12px;color:var(--text-muted);padding:6px">暂无关系</div>
+                                    </template>
+                                  </div>
+                                </div>
+                                <div class="rgs-actions">
+                                  <button class="btn-small" @click="relGraphAddMode = true; relGraphAddStep = 'pickFrom'; relGraphAddFrom = node._key">➕ 与此角色新建关系</button>
+                                </div>
+                              </div>
+                            </template>
+                          </div>
+                        </template>
+
+                        <!-- 边详情 -->
+                        <template x-if="relGraphSelectedEdgeId">
+                          <div>
+                            <template x-if="getRelGraphEdgeById(relGraphSelectedEdgeId) as edge">
+                              <div>
+                                <div class="rgs-header">
+                                  <div class="rgs-avatar" :style="`border-color: var(--primary)`" style="font-size:18px">🔗</div>
+                                  <div>
+                                    <div class="rgs-name" style="font-size:14px">关系详情</div>
+                                    <div class="rgs-role">编辑或删除</div>
+                                  </div>
+                                </div>
+                                <div class="rgs-section">
+                                  <div class="rgs-section-title">起点 → 终点</div>
+                                  <div class="rgs-row">
+                                    <strong x-text="getRelGraphCharName(edge.from)"></strong>
+                                    <span style="color:var(--primary);font-weight:600">→</span>
+                                    <strong x-text="getRelGraphCharName(edge.to)"></strong>
+                                  </div>
+                                </div>
+                                <div class="rgs-section">
+                                  <label style="font-size:12px;color:var(--text-muted)">关系类型</label>
+                                  <select x-model="relGraphEditForm.relation_type" style="width:100%;padding:6px;border:1px solid var(--border);border-radius:4px;margin-top:4px">
+                                    <option value="友情">友情</option>
+                                    <option value="爱情">爱情</option>
+                                    <option value="亲情">亲情</option>
+                                    <option value="敌对">敌对</option>
+                                    <option value="竞争">竞争</option>
+                                    <option value="师生">师生</option>
+                                    <option value="同盟">同盟</option>
+                                    <option value="背叛">背叛</option>
+                                    <option value="主仆">主仆</option>
+                                    <option value="暗恋">暗恋</option>
+                                    <option value="宿敌">宿敌</option>
+                                    <option value="陌生">陌生</option>
+                                  </select>
+                                </div>
+                                <div class="rgs-section">
+                                  <label style="font-size:12px;color:var(--text-muted)">关系状态</label>
+                                  <select x-model="relGraphEditForm.status" style="width:100%;padding:6px;border:1px solid var(--border);border-radius:4px;margin-top:4px">
+                                    <option value="stable">稳定</option>
+                                    <option value="developing">发展中</option>
+                                    <option value="tense">紧张</option>
+                                    <option value="broken">破裂</option>
+                                  </select>
+                                </div>
+                                <div class="rgs-section">
+                                  <label style="font-size:12px;color:var(--text-muted)">
+                                    关系强度: <strong x-text="relGraphEditForm.strength"></strong> / 10
+                                  </label>
+                                  <input type="range" min="1" max="10" x-model.number="relGraphEditForm.strength" style="width:100%;margin-top:4px">
+                                </div>
+                                <div class="rgs-section">
+                                  <label style="font-size:12px;color:var(--text-muted)">关系描述</label>
+                                  <textarea x-model="relGraphEditForm.description" rows="3" placeholder="补充说明..." style="width:100%;padding:6px;border:1px solid var(--border);border-radius:4px;margin-top:4px;resize:vertical"></textarea>
+                                </div>
+                                <div class="rgs-actions">
+                                  <button class="btn-primary btn-small" @click="saveRelationGraphEdit()">💾 保存</button>
+                                  <button class="btn-secondary btn-small" @click="relGraphSelectedEdgeId = null; renderRelationGraph()">取消</button>
+                                  <button class="btn-small" style="margin-left:auto;background:#fee2e2;color:#dc2626" @click="deleteRelationFromGraph(edge.id)">🗑️ 删除</button>
+                                </div>
+                              </div>
+                            </template>
+                          </div>
+                        </template>
+
+                        <!-- 空态 -->
+                        <template x-if="!relGraphSelectedNodeId && !relGraphSelectedEdgeId">
+                          <div class="relation-graph-side-empty">
+                            <div>
+                              <div style="font-size:32px;margin-bottom:8px">🕸️</div>
+                              <div>点击节点或关系查看详情</div>
+                              <div style="margin-top:8px;font-size:12px">
+                                共 <strong x-text="mergedCharacters().length"></strong> 个角色 ·
+                                <strong x-text="getAllGraphRelations().length"></strong> 条关系
+                              </div>
+                            </div>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
+
+                    <!-- 新建关系弹窗（仅在新建模式下，用户点完两个节点后弹出）-->
+                    <template x-if="relGraphAddMode && relGraphAddStep === 'confirm' && relGraphAddFrom && relGraphAddTo">
+                      <div class="modal-overlay" @click.self="relGraphAddStep = 'pickFrom'; relGraphAddFrom = null; relGraphAddTo = null">
+                        <div class="modal" style="max-width:480px">
+                          <h3>新建关系</h3>
+                          <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">
+                            <strong x-text="getRelGraphCharName(relGraphAddFrom)"></strong>
+                            →
+                            <strong x-text="getRelGraphCharName(relGraphAddTo)"></strong>
+                          </p>
+                          <label style="font-size:12px;color:var(--text-muted)">关系类型</label>
+                          <select x-model="relGraphNewForm.relation_type" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:4px;margin-bottom:10px">
+                            <option value="友情">友情</option>
+                            <option value="爱情">爱情</option>
+                            <option value="亲情">亲情</option>
+                            <option value="敌对">敌对</option>
+                            <option value="竞争">竞争</option>
+                            <option value="师生">师生</option>
+                            <option value="同盟">同盟</option>
+                            <option value="背叛">背叛</option>
+                            <option value="主仆">主仆</option>
+                            <option value="暗恋">暗恋</option>
+                            <option value="宿敌">宿敌</option>
+                            <option value="陌生">陌生</option>
+                          </select>
+                          <label style="font-size:12px;color:var(--text-muted)">
+                            关系强度: <strong x-text="relGraphNewForm.strength"></strong> / 10
+                          </label>
+                          <input type="range" min="1" max="10" x-model.number="relGraphNewForm.strength" style="width:100%;margin-bottom:10px">
+                          <label style="font-size:12px;color:var(--text-muted)">关系描述（可选）</label>
+                          <textarea x-model="relGraphNewForm.description" rows="2" placeholder="补充说明..." style="width:100%;padding:8px;border:1px solid var(--border);border-radius:4px;margin-bottom:14px;resize:vertical"></textarea>
+                          <div style="display:flex;justify-content:flex-end;gap:8px">
+                            <button class="btn-secondary" @click="relGraphAddStep = 'pickFrom'; relGraphAddFrom = null; relGraphAddTo = null">取消</button>
+                            <button class="btn-primary" @click="confirmRelationGraphCreate()">✓ 创建</button>
+                          </div>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
+              </div>
+            </template>
+
+            <!-- ═══ 剧情追踪表 ═══ -->
+            <template x-if="activePanel === 'plot-tracker' && currentProject">
+              <div class="panel-page">
+                <div class="panel-page-header">
+                  <h2>📊 剧情追踪</h2>
+                  <div style="display:flex;gap:8px;margin-left:auto">
+                    <button class="btn-secondary" @click="openPlotPointForm()" title="新建剧情点">➕ 新建剧情点</button>
+                  </div>
+                </div>
+
+                <!-- 工具栏：搜索 + 筛选 -->
+                <div class="plot-table-toolbar">
+                  <input type="text" class="plot-search"
+                         x-model="plotSearch.q"
+                         @input.debounce.300ms="loadPlotPoints()"
+                         placeholder="🔍 搜索标题 / 描述 / 标签...">
+
+                  <label style="font-size:12px;color:var(--text-muted)">状态</label>
+                  <select x-model="plotSearch.status" @change="loadPlotPoints()">
+                    <option value="">全部</option>
+                    <option value="planning">规划中</option>
+                    <option value="introduced">已引入</option>
+                    <option value="developing">发展中</option>
+                    <option value="climaxed">高潮中</option>
+                    <option value="resolved">已回收</option>
+                    <option value="abandoned">已废弃</option>
+                  </select>
+
+                  <label style="font-size:12px;color:var(--text-muted)">重要性</label>
+                  <select x-model="plotSearch.importance" @change="loadPlotPoints()">
+                    <option value="">全部</option>
+                    <option value="major">主线</option>
+                    <option value="minor">支线</option>
+                  </select>
+
+                  <label style="font-size:12px;color:var(--text-muted)">章节范围</label>
+                  <input type="number" min="1" x-model.number="plotSearch.rangeMin"
+                         @change="loadPlotPoints()" placeholder="起始章" style="width:80px">
+                  <span style="color:var(--text-muted)">—</span>
+                  <input type="number" min="1" x-model.number="plotSearch.rangeMax"
+                         @change="loadPlotPoints()" placeholder="结束章" style="width:80px">
+                  <button class="btn-tiny" @click="plotSearch.rangeMin = null; plotSearch.rangeMax = null; loadPlotPoints()"
+                          x-show="plotSearch.rangeMin || plotSearch.rangeMax">清空</button>
+
+                  <span style="margin-left:auto;font-size:12px;color:var(--text-muted)">
+                    共 <strong x-text="plotPoints.length"></strong> 条
+                  </span>
+                </div>
+
+                <!-- 表格 -->
+                <div class="plot-table-wrap">
+                  <table class="plot-table" x-show="plotPoints.length > 0">
+                    <thead>
+                      <tr>
+                        <th style="width:32px"></th>
+                        <th class="pt-cell-importance">重要性</th>
+                        <th class="pt-cell-title">标题</th>
+                        <th class="pt-stage-cell"><span class="pt-stage-label">🌱 引入</span></th>
+                        <th class="pt-stage-cell"><span class="pt-stage-label">📈 发展</span></th>
+                        <th class="pt-stage-cell"><span class="pt-stage-label">⚡ 高潮</span></th>
+                        <th class="pt-stage-cell"><span class="pt-stage-label">✅ 回收</span></th>
+                        <th>状态</th>
+                        <th>标签</th>
+                        <th style="width:140px">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <template x-for="pp in plotPoints" :key="pp.id">
+                        <template x-for="rowSpan in [1]" :key="pp.id + '-row'">
+                          <tbody>
+                            <tr :class="{ expanded: plotExpandedId === pp.id }">
+                              <td>
+                                <button class="pt-row-actions" @click="togglePlotExpanded(pp.id)"
+                                        style="padding:2px 6px;border:none;background:transparent;cursor:pointer;font-size:14px">
+                                  <span x-text="plotExpandedId === pp.id ? '▼' : '▶'"></span>
+                                </button>
+                              </td>
+                              <td><span class="pt-imp" :class="pp.importance" x-text="pp.importance === 'major' ? '主线' : '支线'"></span></td>
+                              <td>
+                                <strong x-text="pp.title"></strong>
+                                <template x-if="pp.description">
+                                  <div style="font-size:11px;color:var(--text-muted);margin-top:2px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                                       x-text="pp.description"></div>
+                                </template>
+                              </td>
+                              <td class="pt-stage-cell" :class="{ empty: !pp.intro_chapter_id }">
+                                <span class="pt-chapter-badge" x-text="getChapterOrder(pp.intro_chapter_id) || '—'"></span>
+                              </td>
+                              <td class="pt-stage-cell" :class="{ empty: !pp.develop_chapter_id }">
+                                <span class="pt-chapter-badge" x-text="getChapterOrder(pp.develop_chapter_id) || '—'"></span>
+                              </td>
+                              <td class="pt-stage-cell" :class="{ empty: !pp.climax_chapter_id }">
+                                <span class="pt-chapter-badge" x-text="getChapterOrder(pp.climax_chapter_id) || '—'"></span>
+                              </td>
+                              <td class="pt-stage-cell" :class="{ empty: !pp.resolve_chapter_id }">
+                                <span class="pt-chapter-badge" x-text="getChapterOrder(pp.resolve_chapter_id) || '—'"></span>
+                              </td>
+                              <td>
+                                <span class="pt-status" :class="pp.status" x-text="plotStatusLabel(pp.status)"></span>
+                              </td>
+                              <td>
+                                <template x-for="tag in (pp.tags || [])" :key="tag">
+                                  <span class="pt-tag" x-text="tag"></span>
+                                </template>
+                              </td>
+                              <td>
+                                <div class="pt-row-actions">
+                                  <button @click="openPlotPointForm(pp)">✏️ 编辑</button>
+                                  <button class="danger" @click="deletePlotPoint(pp)">🗑️</button>
+                                </div>
+                              </td>
+                            </tr>
+                            <!-- 展开行：阶段备注 + 完整描述 -->
+                            <template x-if="plotExpandedId === pp.id">
+                              <tr class="pt-expand-row">
+                                <td colspan="10">
+                                  <div class="pt-expand-inner">
+                                    <template x-if="pp.description">
+                                      <div>
+                                        <h5>📝 剧情描述</h5>
+                                        <p x-text="pp.description"></p>
+                                      </div>
+                                    </template>
+                                    <h5>📌 各阶段备注</h5>
+                                    <div class="pt-stage-notes">
+                                      <div class="pt-stage-note">
+                                        <div class="pt-stage-note-label">🌱 引入 · 第 <span x-text="getChapterOrder(pp.intro_chapter_id) || '?'"></span> 章</div>
+                                        <div class="pt-stage-note-text" :class="{ 'pt-stage-note-empty': !pp.intro_note }" x-text="pp.intro_note || '（无备注）'"></div>
+                                      </div>
+                                      <div class="pt-stage-note">
+                                        <div class="pt-stage-note-label">📈 发展 · 第 <span x-text="getChapterOrder(pp.develop_chapter_id) || '?'"></span> 章</div>
+                                        <div class="pt-stage-note-text" :class="{ 'pt-stage-note-empty': !pp.develop_note }" x-text="pp.develop_note || '（无备注）'"></div>
+                                      </div>
+                                      <div class="pt-stage-note">
+                                        <div class="pt-stage-note-label">⚡ 高潮 · 第 <span x-text="getChapterOrder(pp.climax_chapter_id) || '?'"></span> 章</div>
+                                        <div class="pt-stage-note-text" :class="{ 'pt-stage-note-empty': !pp.climax_note }" x-text="pp.climax_note || '（无备注）'"></div>
+                                      </div>
+                                      <div class="pt-stage-note">
+                                        <div class="pt-stage-note-label">✅ 回收 · 第 <span x-text="getChapterOrder(pp.resolve_chapter_id) || '?'"></span> 章</div>
+                                        <div class="pt-stage-note-text" :class="{ 'pt-stage-note-empty': !pp.resolve_note }" x-text="pp.resolve_note || '（无备注）'"></div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </td>
+                              </tr>
+                            </template>
+                          </tbody>
+                        </template>
+                      </template>
+                    </tbody>
+                  </table>
+
+                  <!-- 空态 -->
+                  <div class="plot-table-empty" x-show="plotPoints.length === 0">
+                    <div class="empty-icon">📊</div>
+                    <p>暂无剧情点</p>
+                    <p style="font-size:12px">点击右上角「➕ 新建剧情点」开始追踪你的故事线</p>
+                  </div>
+                </div>
+
+                <!-- 编辑/新建弹窗 -->
+                <template x-if="showPlotPointForm">
+                  <div class="modal-overlay" @click.self="showPlotPointForm = false">
+                    <div class="modal" style="max-width:720px">
+                      <h3 x-text="plotForm.id ? '编辑剧情点' : '新建剧情点'"></h3>
+
+                      <div class="pt-form-grid">
+                        <div style="grid-column: 1 / -1">
+                          <label>标题 *</label>
+                          <input type="text" x-model="plotForm.title" placeholder="例如：林安觉醒异常之力">
+                        </div>
+                        <div style="grid-column: 1 / -1">
+                          <label>描述</label>
+                          <textarea x-model="plotForm.description" placeholder="这个剧情点的核心内容..." rows="2"></textarea>
+                        </div>
+                        <div>
+                          <label>重要性</label>
+                          <select x-model="plotForm.importance">
+                            <option value="major">主线</option>
+                            <option value="minor">支线</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label>状态</label>
+                          <select x-model="plotForm.status">
+                            <option value="planning">规划中</option>
+                            <option value="introduced">已引入</option>
+                            <option value="developing">发展中</option>
+                            <option value="climaxed">高潮中</option>
+                            <option value="resolved">已回收</option>
+                            <option value="abandoned">已废弃</option>
+                          </select>
+                        </div>
+                        <div style="grid-column: 1 / -1">
+                          <label>标签（英文逗号分隔）</label>
+                          <input type="text" x-model="plotForm.tagInput" placeholder="主线, 悬疑, 感情线">
+                        </div>
+                      </div>
+
+                      <h5 style="font-size:13px;margin:14px 0 8px;color:var(--text-muted)">📌 各阶段章节（可留空）</h5>
+                      <div class="pt-form-grid">
+                        <div>
+                          <label>🌱 引入</label>
+                          <select x-model.number="plotForm.intro_chapter_id">
+                            <option :value="null">— 暂未引入 —</option>
+                            <template x-for="ch in chapters" :key="ch.id">
+                              <option :value="ch.id" x-text="`第${ch.order + 1}章 ${ch.title}`"></option>
+                            </template>
+                          </select>
+                          <textarea x-model="plotForm.intro_note" placeholder="引入方式 / 引子..." rows="2" style="margin-top:4px"></textarea>
+                        </div>
+                        <div>
+                          <label>📈 发展</label>
+                          <select x-model.number="plotForm.develop_chapter_id">
+                            <option :value="null">— 暂未发展 —</option>
+                            <template x-for="ch in chapters" :key="ch.id">
+                              <option :value="ch.id" x-text="`第${ch.order + 1}章 ${ch.title}`"></option>
+                            </template>
+                          </select>
+                          <textarea x-model="plotForm.develop_note" placeholder="发展 / 推进过程..." rows="2" style="margin-top:4px"></textarea>
+                        </div>
+                        <div>
+                          <label>⚡ 高潮</label>
+                          <select x-model.number="plotForm.climax_chapter_id">
+                            <option :value="null">— 暂未到达 —</option>
+                            <template x-for="ch in chapters" :key="ch.id">
+                              <option :value="ch.id" x-text="`第${ch.order + 1}章 ${ch.title}`"></option>
+                            </template>
+                          </select>
+                          <textarea x-model="plotForm.climax_note" placeholder="高潮 / 转折..." rows="2" style="margin-top:4px"></textarea>
+                        </div>
+                        <div>
+                          <label>✅ 回收</label>
+                          <select x-model.number="plotForm.resolve_chapter_id">
+                            <option :value="null">— 暂未回收 —</option>
+                            <template x-for="ch in chapters" :key="ch.id">
+                              <option :value="ch.id" x-text="`第${ch.order + 1}章 ${ch.title}`"></option>
+                            </template>
+                          </select>
+                          <textarea x-model="plotForm.resolve_note" placeholder="回收方式 / 结局..." rows="2" style="margin-top:4px"></textarea>
+                        </div>
+                      </div>
+
+                      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+                        <button class="btn-secondary" @click="showPlotPointForm = false">取消</button>
+                        <button class="btn-primary" @click="savePlotPoint()">💾 保存</button>
+                      </div>
+                    </div>
+                  </div>
+                </template>
               </div>
             </template>
 

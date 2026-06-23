@@ -10,7 +10,7 @@ class ProjectOutline(Base):
     __tablename__ = "project_outlines"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, unique=True)
+    project_id = Column(String(32), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, unique=True)
     plot_lines = Column(JSON, default=list)
     structure = Column(JSON, default=dict)
     pacing_notes = Column(Text, default="")

@@ -32,7 +32,7 @@ class CharacterUpdate(BaseModel):
 
 class CharacterResponse(BaseModel):
     id: int
-    project_id: int
+    project_id: str
     name: str
     role: str
     profile: dict
@@ -48,14 +48,14 @@ class CharacterResponse(BaseModel):
 # ─── Routes ───
 
 @router.get("", response_model=list[CharacterResponse])
-async def list_characters(project_id: int, db: Session = Depends(get_db)):
+async def list_characters(project_id: str, db: Session = Depends(get_db)):
     """获取项目下所有角色"""
     characters = db.query(Character).filter(Character.project_id == project_id).all()
     return characters
 
 
 @router.post("", response_model=CharacterResponse)
-async def create_character(project_id: int, data: CharacterCreate, db: Session = Depends(get_db)):
+async def create_character(project_id: str, data: CharacterCreate, db: Session = Depends(get_db)):
     """创建角色"""
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -85,7 +85,7 @@ async def create_character(project_id: int, data: CharacterCreate, db: Session =
 
 @router.put("/{character_id}", response_model=CharacterResponse)
 async def update_character(
-    project_id: int, character_id: int, data: CharacterUpdate, db: Session = Depends(get_db)
+    project_id: str, character_id: int, data: CharacterUpdate, db: Session = Depends(get_db)
 ):
     """更新角色"""
     character = (
@@ -121,7 +121,7 @@ async def update_character(
 
 
 @router.delete("/{character_id}")
-async def delete_character(project_id: int, character_id: int, db: Session = Depends(get_db)):
+async def delete_character(project_id: str, character_id: int, db: Session = Depends(get_db)):
     """删除角色"""
     character = (
         db.query(Character)

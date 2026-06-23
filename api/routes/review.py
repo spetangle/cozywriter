@@ -19,7 +19,7 @@ router = APIRouter(prefix="/api/reviews", tags=["评审"])
 # ─── Schemas ───
 
 class ReviewCreate(BaseModel):
-    project_id: int
+    project_id: str
     chapter_id: int | None = None
     session_type: str = "chapter"
     content_reviewed: str = ""
@@ -34,7 +34,7 @@ class ReviewSubmitResponse(BaseModel):
 
 # ─── 同步评审函数 ───
 
-def _do_review(project_id: int, chapter_id: int | None, session_type: str, db: Session) -> dict:
+def _do_review(project_id: str, chapter_id: int | None, session_type: str, db: Session) -> dict:
     """执行同步评审"""
     start = time.time()
 
@@ -138,7 +138,7 @@ def _do_review(project_id: int, chapter_id: int | None, session_type: str, db: S
 
 # ─── 异步任务函数 ───
 
-def _async_review_task(task_id: str, project_id: int, chapter_id: int | None, session_type: str):
+def _async_review_task(task_id: str, project_id: str, chapter_id: int | None, session_type: str):
     from storage.database import SessionLocal
     db = SessionLocal()
     try:
@@ -180,7 +180,7 @@ async def create_review(
 
 
 @router.get("/{review_id}", response_model=dict)
-async def get_review_result(review_id: int, project_id: int, db: Session = Depends(get_db)):
+async def get_review_result(review_id: int, project_id: str, db: Session = Depends(get_db)):
     """获取评审结果（带项目隔离）"""
     session = db.query(ReviewSession).filter(
         ReviewSession.id == review_id,
@@ -209,7 +209,7 @@ async def get_review_result(review_id: int, project_id: int, db: Session = Depen
 
 
 @router.post("/{review_id}/revise", response_model=dict)
-async def revise_review(review_id: int, project_id: int, db: Session = Depends(get_db)):
+async def revise_review(review_id: int, project_id: str, db: Session = Depends(get_db)):
     """根据评审意见修订章节"""
     session = db.query(ReviewSession).filter(
         ReviewSession.id == review_id,
@@ -229,7 +229,7 @@ async def revise_review(review_id: int, project_id: int, db: Session = Depends(g
 
 
 @router.get("/project/{project_id}", response_model=list[dict])
-async def list_reviews(project_id: int, chapter_id: int | None = None, db: Session = Depends(get_db)):
+async def list_reviews(project_id: str, chapter_id: int | None = None, db: Session = Depends(get_db)):
     """列出项目下所有评审会话（按时间倒序）。
 
     返回完整字段（包括 8 维度评分、critique、suggestions），

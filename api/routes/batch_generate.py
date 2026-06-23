@@ -12,7 +12,7 @@ router = APIRouter(prefix="/api/chapters", tags=["批量生成"])
 
 
 class BatchGenerateRequest(BaseModel):
-    project_id: int
+    project_id: str
     start_chapter: int = Field(..., ge=0, description="从第几章之后开始（即 start_chapter 为已存在的最后一章序号，0表示从第1章开始）")
     count: int = Field(..., ge=1, le=100, description="要生成的章节数量")
     provider: str | None = None

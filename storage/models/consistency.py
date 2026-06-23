@@ -10,7 +10,7 @@ class ConsistencyRecord(Base):
     __tablename__ = "consistency_records"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(String(32), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     entity_type = Column(String(30), nullable=False)
     entity_id = Column(Integer, nullable=False)
     character_id = Column(Integer, ForeignKey("characters.id", ondelete="SET NULL"), nullable=True)

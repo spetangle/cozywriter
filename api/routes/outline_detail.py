@@ -42,7 +42,7 @@ class ProjectOutlineUpdate(BaseModel):
 
 class ProjectOutlineResponse(BaseModel):
     id: int
-    project_id: int
+    project_id: str
     plot_lines: list
     structure: dict
     pacing_notes: str
@@ -127,7 +127,7 @@ class ChapterOutlineResponse(BaseModel):
 # ─── Project Outline Routes ───
 
 @router.get("/outline", response_model=ProjectOutlineResponse | None)
-async def get_project_outline(project_id: int, db: Session = Depends(get_db)):
+async def get_project_outline(project_id: str, db: Session = Depends(get_db)):
     """获取项目大纲（可能为空）"""
     outline = db.query(ProjectOutline).filter(ProjectOutline.project_id == project_id).first()
     return outline
@@ -135,7 +135,7 @@ async def get_project_outline(project_id: int, db: Session = Depends(get_db)):
 
 @router.post("/outline", response_model=ProjectOutlineResponse)
 async def create_or_update_project_outline(
-    project_id: int, data: ProjectOutlineCreate, db: Session = Depends(get_db)
+    project_id: str, data: ProjectOutlineCreate, db: Session = Depends(get_db)
 ):
     """创建或更新项目大纲（upsert）"""
     project = db.query(Project).filter(Project.id == project_id).first()
@@ -166,7 +166,7 @@ async def create_or_update_project_outline(
 
 @router.put("/outline", response_model=ProjectOutlineResponse)
 async def update_project_outline(
-    project_id: int, data: ProjectOutlineUpdate, db: Session = Depends(get_db)
+    project_id: str, data: ProjectOutlineUpdate, db: Session = Depends(get_db)
 ):
     """部分更新项目大纲"""
     outline = db.query(ProjectOutline).filter(ProjectOutline.project_id == project_id).first()
@@ -181,7 +181,7 @@ async def update_project_outline(
 
 
 @router.delete("/outline")
-async def delete_project_outline(project_id: int, db: Session = Depends(get_db)):
+async def delete_project_outline(project_id: str, db: Session = Depends(get_db)):
     outline = db.query(ProjectOutline).filter(ProjectOutline.project_id == project_id).first()
     if not outline:
         raise HTTPException(status_code=404, detail="Outline not found")
@@ -193,7 +193,7 @@ async def delete_project_outline(project_id: int, db: Session = Depends(get_db))
 # ─── Chapter Outline Routes ───
 
 @router.get("/chapters/{chapter_id}/outline", response_model=ChapterOutlineResponse | None)
-async def get_chapter_outline(project_id: int, chapter_id: int, db: Session = Depends(get_db)):
+async def get_chapter_outline(project_id: str, chapter_id: int, db: Session = Depends(get_db)):
     """获取章节细纲"""
     # 隔离验证
     chapter = db.query(Chapter).filter(
@@ -207,7 +207,7 @@ async def get_chapter_outline(project_id: int, chapter_id: int, db: Session = De
 
 @router.post("/chapters/{chapter_id}/outline", response_model=ChapterOutlineResponse)
 async def create_or_update_chapter_outline(
-    project_id: int, chapter_id: int, data: ChapterOutlineCreate, db: Session = Depends(get_db)
+    project_id: str, chapter_id: int, data: ChapterOutlineCreate, db: Session = Depends(get_db)
 ):
     """创建或更新章节细纲（upsert）"""
     chapter = db.query(Chapter).filter(Chapter.id == chapter_id, Chapter.project_id == project_id).first()
@@ -251,7 +251,7 @@ async def create_or_update_chapter_outline(
 
 @router.put("/chapters/{chapter_id}/outline", response_model=ChapterOutlineResponse)
 async def update_chapter_outline(
-    project_id: int, chapter_id: int, data: ChapterOutlineUpdate, db: Session = Depends(get_db)
+    project_id: str, chapter_id: int, data: ChapterOutlineUpdate, db: Session = Depends(get_db)
 ):
     """部分更新章节细纲"""
     # 隔离验证
@@ -272,7 +272,7 @@ async def update_chapter_outline(
 
 
 @router.delete("/chapters/{chapter_id}/outline")
-async def delete_chapter_outline(project_id: int, chapter_id: int, db: Session = Depends(get_db)):
+async def delete_chapter_outline(project_id: str, chapter_id: int, db: Session = Depends(get_db)):
     # 隔离验证
     chapter = db.query(Chapter).filter(
         Chapter.id == chapter_id, Chapter.project_id == project_id
@@ -290,7 +290,7 @@ async def delete_chapter_outline(project_id: int, chapter_id: int, db: Session =
 # ─── 批量获取章节细纲 ───
 
 @router.get("/chapter-outlines", response_model=list[ChapterOutlineResponse])
-async def list_chapter_outlines(project_id: int, db: Session = Depends(get_db)):
+async def list_chapter_outlines(project_id: str, db: Session = Depends(get_db)):
     """获取项目下所有章节的细纲"""
     chapters = db.query(Chapter).filter(Chapter.project_id == project_id).order_by(Chapter.order).all()
     outlines = []

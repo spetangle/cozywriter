@@ -10,7 +10,7 @@ class WorldEntry(Base):
     __tablename__ = "world_entries"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(String(32), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     category = Column(String(50), nullable=False)
     title = Column(String(200), nullable=False)
     content = Column(Text, default="")

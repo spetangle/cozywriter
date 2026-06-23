@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/export", tags=["导出"])
 
 
 class ExportRequest(BaseModel):
-    project_id: int
+    project_id: str
     chapter_ids: list[int]
     rechapter: bool = False
     words_per_chapter: int = 3000  # 重新分章时每章字数

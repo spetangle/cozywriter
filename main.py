@@ -13,6 +13,7 @@ from api.routes import (
     worldbuilding, outline, generate, theme, review,
     consistency, outline_detail, tasks, inspirations,
     creative_questionnaire, workflow, genres, providers,
+    plot_points,
 )
 from api.routes.chapters import pipeline_router
 from api.routes.batch_generate import router as batch_generate_router
@@ -147,6 +148,7 @@ app.include_router(pipeline_router)            # 章节生成 9 步流水线
 app.include_router(batch_generate_router)      # 批量章节生成
 app.include_router(export.router)              # 导出正文
 app.include_router(providers.router)           # 服务商 CRUD
+app.include_router(plot_points.router)         # 剧情追踪
 
 # 旧版灵感 API 兼容路由：/api/projects/{pid}/inspirations → 转发到 /api/inspirations
 # （保留项目内旧版右侧面板可用）
