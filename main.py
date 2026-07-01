@@ -238,6 +238,13 @@ if web_static.exists():
     app.mount("/static", StaticFiles(directory="web/static"), name="static")
 
 
+# favicon.ico 路由
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """返回网站图标"""
+    return FileResponse("web/static/images/favicon.ico", media_type="image/vnd.microsoft.icon")
+
+
 if __name__ == "__main__":
     import uvicorn
     # access_log=False 关闭 uvicorn 默认 access log（HTTP 请求走 main.py 里的 middleware，

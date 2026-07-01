@@ -6,6 +6,10 @@
   box-sizing: border-box;
 }
 
+.hidden {
+  display: none !important;
+}
+
 :root {
   --primary: #6366f1;
   --primary-hover: #4f46e5;
@@ -1507,6 +1511,284 @@ button {
   cursor: pointer;
 }
 .q-card:hover { border-color: var(--primary); }
+
+/* ─── Step Questionnaire Panel ─── */
+.step-questionnaire-page { padding: 24px; }
+.step-q-container { max-width: 700px; margin: 0 auto; }
+.step-q-progress {
+  margin-bottom: 32px;
+  text-align: center;
+}
+.step-q-progress-steps {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+}
+.step-q-progress-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  z-index: 1;
+}
+.step-q-progress-number {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 3px solid var(--border);
+  background: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-muted);
+  transition: all 0.3s ease;
+}
+.step-q-progress-step.completed .step-q-progress-number {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: white;
+}
+.step-q-progress-step.active .step-q-progress-number {
+  border-color: var(--primary);
+  background: white;
+  color: var(--primary);
+  transform: scale(1.1);
+}
+.step-q-progress-label {
+  font-size: 11px;
+  color: var(--primary);
+  margin-top: 4px;
+  opacity: 0.8;
+}
+.step-q-progress-line {
+  flex: 1;
+  min-width: 20px;
+  max-width: 60px;
+  height: 3px;
+  background: var(--border);
+  margin: 0 4px;
+  transition: all 0.3s ease;
+}
+.step-q-progress-line.completed {
+  background: var(--primary);
+}
+.step-q-progress-text {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 12px;
+}
+.step-q-content { text-align: center; }
+.step-q-question {
+  margin-bottom: 32px;
+  text-align: left;
+}
+.step-q-question-number {
+  display: inline-block;
+  background: var(--primary);
+  color: white;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  text-align: center;
+  line-height: 28px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-right: 12px;
+}
+.step-q-question h3 {
+  display: inline;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+.step-q-options {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  text-align: left;
+  margin-bottom: 32px;
+}
+.step-q-option {
+  padding: 16px 20px;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.step-q-option:hover {
+  border-color: var(--primary);
+  background: #f0f5ff;
+}
+.step-q-option.selected {
+  border-color: var(--primary);
+  background: #e0e7ff;
+}
+.step-q-option-label {
+  display: block;
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.step-q-option-desc {
+  display: block;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.step-q-custom {
+  text-align: left;
+  margin-bottom: 24px;
+  padding: 20px;
+  background: #f8fafc;
+  border-radius: 10px;
+}
+.step-q-custom label {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.step-q-custom input,
+.step-q-custom textarea {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+  resize: vertical;
+  font-family: inherit;
+}
+.step-q-custom input:focus,
+.step-q-custom textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+.step-q-custom .btn-primary {
+  margin-top: 12px;
+}
+.step-q-required-hint {
+  text-align: left;
+  margin-bottom: 16px;
+  font-size: 14px;
+  color: #ef4444;
+}
+.step-q-required-star {
+  display: inline-block;
+  color: #ef4444;
+  margin-right: 4px;
+}
+.step-q-text-input {
+  text-align: center;
+  margin-top: 24px;
+}
+.step-q-text-input input {
+  width: 100%;
+  max-width: 500px;
+  padding: 16px 20px;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  font-size: 16px;
+  font-family: inherit;
+  margin-bottom: 16px;
+}
+.step-q-text-input input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+.step-q-llm-options {
+  text-align: center;
+  margin-bottom: 24px;
+}
+.step-q-llm-btn {
+  background: linear-gradient(135deg, #8b5cf6, #a78bfa);
+  border-color: #8b5cf6;
+  color: white;
+  transition: all 0.2s;
+}
+.step-q-llm-btn:hover {
+  background: linear-gradient(135deg, #7c3aed, #9333ea);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+}
+.step-q-llm-loading {
+  text-align: center;
+  padding: 20px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+.step-q-loading-spinner {
+  display: inline-block;
+  animation: spin 1s linear infinite;
+  margin-right: 8px;
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.step-q-nav {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+.step-q-nav-btn {
+  padding: 12px 24px;
+  font-size: 15px;
+  font-weight: 600;
+  border-radius: 12px;
+  min-width: 120px;
+}
+.step-q-next-btn {
+  padding: 12px 32px;
+  font-size: 16px;
+}
+.step-q-skip {
+  text-align: center;
+  margin-top: 8px;
+}
+.step-q-ai-btn {
+  background: linear-gradient(135deg, #8b5cf6, #ec4899) !important;
+  border-color: transparent !important;
+  color: white !important;
+  padding: 12px 32px;
+  font-size: 15px;
+}
+.step-q-ai-btn:hover {
+  background: linear-gradient(135deg, #7c3aed, #db2777) !important;
+}
+.step-q-done {
+  text-align: center;
+  padding: 60px 0;
+}
+.step-q-done-icon {
+  font-size: 64px;
+  margin-bottom: 16px;
+}
+.step-q-done h3 {
+  font-size: 24px;
+  margin-bottom: 12px;
+}
+.step-q-done p {
+  color: var(--text-muted);
+  margin-bottom: 24px;
+}
+.step-q-done ul {
+  text-align: left;
+  max-width: 400px;
+  margin: 0 auto 24px;
+  padding-left: 20px;
+}
+.step-q-done li {
+  margin-bottom: 8px;
+  color: var(--text-muted);
+}
+.step-q-done .btn-secondary {
+  margin-left: 12px;
+}
 .q-card.done { opacity: 0.7; }
 .q-title { font-weight: 600; margin-bottom: 4px; }
 .q-meta { display: flex; gap: 12px; font-size: 12px; color: var(--text-muted); }

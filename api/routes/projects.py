@@ -333,6 +333,103 @@ async def get_bootstrap_status(project_id: str, db: Session = Depends(get_db)):
     }
 
 
+@router.post("/{project_id}/regenerate-settings")
+async def regenerate_settings(project_id: str, db: Session = Depends(get_db)):
+    """重新生成全部设定文档，逻辑与问卷创建后生成设定一致"""
+    logger.info(f"[项目设置] 开始重新生成全部设定，项目ID: {project_id}")
+    
+    from storage.models import Project, Theme, Character, WorldEntry
+    from llm.workflow import plan_bootstrap_stages
+    from api.tasks import submit_llm_task
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        logger.error(f"[项目设置] 重新生成失败：项目不存在，ID: {project_id}")
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    user_filled = {}
+
+    themes = db.query(Theme).filter(Theme.project_id == project_id).all()
+    for t in themes:
+        if t.theme_type == "core_theme":
+            user_filled["theme"] = t.title
+        elif t.theme_type == "core_hook":
+            user_filled["core_hook"] = t.description
+        elif t.theme_type == "tone":
+            user_filled["tone"] = t.description
+
+    characters = db.query(Character).filter(Character.project_id == project_id).all()
+    for c in characters:
+        if c.role == "主角":
+            user_filled["protagonist"] = c.description
+        elif c.role == "反派":
+            user_filled["antagonist"] = c.description
+
+    world_entries = db.query(WorldEntry).filter(WorldEntry.project_id == project_id).all()
+    for w in world_entries:
+        if w.category == "世界观":
+            user_filled["world_setting"] = w.content
+        elif w.category == "社会结构":
+            user_filled["society_structure"] = w.content
+
+    user_filled = {k: v for k, v in user_filled.items() if v}
+    
+    logger.info(f"[项目设置] 用户已填写的信息: {user_filled}")
+
+    genre_str = project.genre
+    if genre_str:
+        genre_str = genre_str.split("/")[0].strip()
+
+    stages = plan_bootstrap_stages(
+        required={
+            "title": project.title,
+            "chapter_word_count": project.target_word_count,
+            "genre": genre_str,
+            "description": project.description or "",
+        },
+        user_filled=user_filled,
+    )
+
+    run = WorkflowRun(
+        project_id=project.id,
+        name="bootstrap",
+        stages=stages,
+        status="pending",
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    logger.info(f"[项目设置] 创建 WorkflowRun，ID: {run.id}")
+
+    user_input = {
+        "title": project.title,
+        "chapter_word_count": project.target_word_count,
+        "genre": genre_str,
+        "description": project.description or "",
+        "_project_id": project.id,
+        "auto_commit": True,
+        **user_filled,
+    }
+    
+    submit_llm_task(
+        task_type="bootstrap",
+        llm_call_fn=_run_bootstrap_task,
+        project_id=project.id,
+        description=f"重新生成设定 [{project.title}]",
+        run_id=run.id,
+        user_input=user_input,
+    )
+    
+    logger.info(f"[项目设置] bootstrap 工作流已提交执行，项目ID: {project.id}, run_id: {run.id}")
+
+    return {
+        "status": "ok",
+        "project_id": project.id,
+        "run_id": run.id,
+        "message": "重新生成设定已启动，将在后台执行",
+    }
+
+
 # ─── Helpers ───
 
 def _check_required(data: ProjectCreate) -> list[str]:

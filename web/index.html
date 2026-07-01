@@ -4,8 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CozyWriter - 小说编写助手</title>
+  <script src="/static/js/app.js?v=41"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-  <link rel="stylesheet" href="/static/css/style.css?v=8">
+  <link rel="stylesheet" href="/static/css/style.css?v=11">
 
 <style>
 /* === 流水线进度面板 === */
@@ -254,12 +255,12 @@
           <main class="editor-area">
 
             <!-- 无项目时 -->
-            <template x-if="!currentProject">
+            <template x-if="!currentProject && activePanel !== 'step-questionnaire'">
               <div class="welcome-screen">
                 <h2>欢迎使用 CozyWriter</h2>
                 <div class="welcome-actions">
                   <button class="btn-primary" @click="openCreateProjectModal()">创建小说</button>
-                  <button class="btn-secondary" @click="startQuestionnaire()">🎯 从创意问卷开始</button>
+                  <button class="btn-secondary" @click="startStepQuestionnaire()">🎯 从创意问卷开始</button>
                   <template x-if="savedQuestionnaires.length > 0">
                     <button class="btn-secondary" @click="activePanel = 'questionnaire'">📋 继续问卷</button>
                   </template>
@@ -1733,6 +1734,179 @@
               </div>
             </template>
 
+            <!-- ═══ 分步创意问卷面板 ═══ -->
+            <template x-if="activePanel === 'step-questionnaire'">
+              <div class="panel-page step-questionnaire-page">
+                <div class="panel-page-header">
+                  <h2>🎯 创意问卷</h2>
+                  <button class="btn-secondary btn-small" @click="exitStepQuestionnaire()">✕ 退出</button>
+                </div>
+                
+                <div class="step-q-container">
+                  <!-- 分段进度条 -->
+                  <div class="step-q-progress">
+                    <div class="step-q-progress-steps">
+                      <template x-for="i in stepQuestionnaire.totalSteps" :key="i">
+                        <div 
+                          class="step-q-progress-step" 
+                          :class="{ 
+                            completed: i <= stepQuestionnaire.currentStep, 
+                            active: i === stepQuestionnaire.currentStep + 1 
+                          }"
+                        >
+                          <span class="step-q-progress-number" x-text="i"></span>
+                          <span class="step-q-progress-label" x-text="i <= stepQuestionnaire.currentStep ? '完成' : ''"></span>
+                        </div>
+                        <div 
+                          class="step-q-progress-line" 
+                          :class="{ completed: i < stepQuestionnaire.currentStep }"
+                          x-show="i < stepQuestionnaire.totalSteps"
+                        ></div>
+                      </template>
+                    </div>
+                    <div class="step-q-progress-text" x-text="`第 ${stepQuestionnaire.currentStep + 1} / ${stepQuestionnaire.totalSteps} 步`"></div>
+                  </div>
+
+                  <!-- 必填提示 -->
+                  <div class="step-q-required-hint" x-show="stepQuestionnaire.currentQuestion && stepQuestionnaire.currentQuestion.required">
+                    <span class="step-q-required-star">*</span> 必填项
+                  </div>
+
+                  <!-- 问卷进行中 -->
+                  <template x-if="!stepQuestionnaire.isCompleted && stepQuestionnaire.currentQuestion">
+                    <div class="step-q-content">
+                      <div class="step-q-question">
+                        <span class="step-q-question-number" x-text="`Q${stepQuestionnaire.currentStep + 1}`"></span>
+                        <h3 x-text="stepQuestionnaire.currentQuestion.question"></h3>
+                      </div>
+
+                      <!-- 纯文本输入类型（如小说名） -->
+                      <template x-if="stepQuestionnaire.currentQuestion.type === 'text_input'">
+                        <div class="step-q-text-input">
+                          <input 
+                            type="text" 
+                            x-model="stepQuestionnaire.customAnswer" 
+                            :placeholder="stepQuestionnaire.currentQuestion.custom_input?.placeholder || '请输入答案'"
+                            @keyup.enter="submitStepAnswer(stepQuestionnaire.customAnswer, true)"
+                          />
+                          <button 
+                            class="btn-primary" 
+                            @click="submitStepAnswer(stepQuestionnaire.customAnswer, true)"
+                            :disabled="!stepQuestionnaire.customAnswer || !stepQuestionnaire.customAnswer.trim()"
+                          >
+                            确认
+                          </button>
+                        </div>
+                      </template>
+
+                      <!-- 选项选择类型 -->
+                      <div x-show="stepQuestionnaire.currentQuestion.type === 'step_choice'" class="step-q-choice-container">
+                        <!-- 选项列表 -->
+                        <div class="step-q-options">
+                          <template x-for="opt in (stepQuestionnaire.currentQuestion.options || [])" :key="opt.value">
+                            <div 
+                              class="step-q-option" 
+                              :class="{ selected: stepQuestionnaire.answers[stepQuestionnaire.currentQuestion.id] === opt.value }"
+                              @click="selectOption(opt.value, false); stepQuestionnaire.lastFocus = 'option'"
+                            >
+                              <span class="step-q-option-label" x-text="opt.label"></span>
+                              <span class="step-q-option-desc" x-text="opt.description"></span>
+                            </div>
+                          </template>
+                        </div>
+
+                        <!-- LLM生成选项按钮 -->
+                        <div class="step-q-llm-options" x-show="stepQuestionnaire.currentQuestion.llm_enabled && !stepQuestionnaire.isGeneratingOptions">
+                          <button 
+                            class="btn-secondary btn-small step-q-llm-btn" 
+                            @click="generateLlmOptions()"
+                            :disabled="stepQuestionnaire.isGeneratingOptions"
+                          >
+                            ✨ 让 AI 生成更贴合的选项
+                          </button>
+                        </div>
+
+                        <!-- LLM生成中 -->
+                        <div class="step-q-llm-loading" x-show="stepQuestionnaire.isGeneratingOptions">
+                          <span class="step-q-loading-spinner">⏳</span>
+                          AI 正在根据您的设定生成选项...
+                        </div>
+
+                        <!-- 自定义输入 -->
+                        <div class="step-q-custom" x-show="stepQuestionnaire.currentQuestion && stepQuestionnaire.currentQuestion.custom_input">
+                          <label>自定义答案</label>
+                          <textarea 
+                            x-show="stepQuestionnaire.currentQuestion.custom_input.type === 'textarea'"
+                            x-model="stepQuestionnaire.customAnswer" 
+                            :placeholder="stepQuestionnaire.currentQuestion.custom_input.placeholder"
+                            rows="4"
+                            @focus="stepQuestionnaire.lastFocus = 'custom'"
+                          ></textarea>
+                          <input 
+                            x-show="stepQuestionnaire.currentQuestion.custom_input.type !== 'textarea'"
+                            type="text" 
+                            x-model="stepQuestionnaire.customAnswer" 
+                            :placeholder="stepQuestionnaire.currentQuestion.custom_input.placeholder"
+                            @focus="stepQuestionnaire.lastFocus = 'custom'"
+                          />
+                        </div>
+                      </div>
+
+                      <!-- 导航按钮区域 -->
+                      <div class="step-q-nav">
+                        <!-- 后退按钮 -->
+                        <button 
+                          class="btn-secondary step-q-nav-btn" 
+                          @click="prevStep()"
+                          :disabled="stepQuestionnaire.currentStep <= 0 || stepQuestionnaire.isAiCompleting"
+                        >
+                          ← 返回上一步
+                        </button>
+
+                        <!-- 下一项按钮 -->
+                        <button 
+                          class="btn-primary step-q-nav-btn step-q-next-btn" 
+                          @click="nextStep()"
+                          :disabled="stepQuestionnaire.isNavigating || stepQuestionnaire.isAiCompleting"
+                        >
+                          <span x-show="stepQuestionnaire.isNavigating">⏳ 正在处理...</span>
+                          <span x-show="!stepQuestionnaire.isNavigating">下一项 →</span>
+                        </button>
+
+                        <!-- AI一键补全按钮 -->
+                        <button 
+                          class="btn-primary step-q-nav-btn step-q-ai-btn" 
+                          @click="skipToAi()"
+                          :disabled="stepQuestionnaire.isAiCompleting"
+                        >
+                          <span x-show="stepQuestionnaire.isAiCompleting">⏳ AI 正在补全...</span>
+                          <span x-show="!stepQuestionnaire.isAiCompleting">✨ AI 一键补全</span>
+                        </button>
+                      </div>
+                    </div>
+                  </template>
+
+                  <!-- 问卷完成 -->
+                  <template x-if="stepQuestionnaire.isCompleted">
+                    <div class="step-q-done">
+                      <div class="step-q-done-icon">🎉</div>
+                      <h3>问卷填写完毕！</h3>
+                      <p x-if="Object.keys(stepQuestionnaire.aiCompletedAnswers).length > 0">
+                        AI 已为您补全了以下设定：
+                        <ul>
+                          <template x-for="(value, key) in stepQuestionnaire.aiCompletedAnswers" :key="key">
+                            <li><strong x-text="key"></strong>: <span x-text="value"></span></li>
+                          </template>
+                        </ul>
+                      </p>
+                      <p>点击下方按钮，根据问卷创建小说项目</p>
+                      <button class="btn-primary" @click="buildProjectFromStepQuestionnaire()">🎯 创建小说项目</button>
+                      <button class="btn-secondary" @click="exitStepQuestionnaire()">返回首页</button>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </template>
 
           </main>
         </div>
@@ -1866,6 +2040,8 @@
         </template>
       </div>
     </template>
+
+
 
     <!-- ═══ AI 生成弹窗 ═══ -->
     <template x-if="showGenerateModal">
@@ -2454,6 +2630,10 @@
             <button class="btn-primary" @click="saveProjectSettings()">保存</button>
             <template x-if="currentProject">
               <button class="btn-danger" @click="deleteCurrentProject()">🗑️ 删除项目</button>
+              <button class="btn-primary" @click="regenerateSettings()" :disabled="isRegeneratingSettings">
+                <span x-show="isRegeneratingSettings">⏳ 正在重新生成...</span>
+                <span x-show="!isRegeneratingSettings">🔄 重新生成全部设定</span>
+              </button>
             </template>
           </div>
         </div>
@@ -3295,7 +3475,11 @@
 
   </div>
 
-  <script src="/static/js/app.js?v=9"></script>
+  <script>
+    document.addEventListener('alpine:init', () => {
+      window.Alpine.data('cozywriterApp', window.app);
+    });
+  </script>
 </body>
 </html>
 

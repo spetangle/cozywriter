@@ -169,7 +169,13 @@ async def get_latest_run(project_id: str, db: Session = Depends(get_db)):
         .first()
     )
     if not run:
-        raise HTTPException(status_code=404, detail="No run found for this project")
+        return {
+            "run_id": None,
+            "status": "none",
+            "name": "",
+            "stages": [],
+            "stage_results": {},
+        }
     return {
         "run_id": run.id,
         "status": run.status,
@@ -202,8 +208,98 @@ async def get_bootstrap_data(project_id: str, db: Session = Depends(get_db)):
         .order_by(WorkflowRun.created_at.desc())
         .first()
     )
+    
     if not run:
-        raise HTTPException(status_code=404, detail="No run found for this project")
+        from storage.models import Project, Theme, Character, WorldEntry
+        
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        
+        themes = db.query(Theme).filter(Theme.project_id == project_id).all()
+        characters = db.query(Character).filter(Character.project_id == project_id).all()
+        world_entries = db.query(WorldEntry).filter(WorldEntry.project_id == project_id).all()
+        
+        world_by_category: dict[str, list] = {}
+        for entry in world_entries:
+            cat = entry.category or "其他"
+            world_by_category.setdefault(cat, []).append({
+                "category": entry.category,
+                "title": entry.title,
+                "content": entry.content,
+                "tags": [],
+            })
+        
+        protagonist = {}
+        for c in characters:
+            if c.role == "主角":
+                protagonist = {
+                    "name": c.name,
+                    "role": c.role,
+                    "description": c.description,
+                }
+        
+        theme_text = ""
+        tone = ""
+        for t in themes:
+            if t.theme_type == "core_theme":
+                theme_text = t.title
+                if t.description:
+                    tone = t.description.replace("基调：", "")
+        
+        return {
+            "project_id": project_id,
+            "run_id": None,
+            "run_status": "none",
+            "run_created_at": None,
+            "run_updated_at": None,
+            "project_meta": {
+                "title": project.title or "",
+                "description": project.description or "",
+                "chapter_word_count": project.target_word_count or 0,
+                "genre": project.genre or "",
+                "theme_input": theme_text,
+                "tone": tone,
+                "style_input": project.writing_style or "",
+                "pacing": "",
+                "premise": "",
+                "protagonist_input": "",
+                "antagonist_input": "",
+                "supporting_input": "",
+                "notes": "",
+            },
+            "base": {
+                "total_chapters": project.total_chapters or 0,
+                "est_total_words": (project.total_chapters or 0) * (project.target_word_count or 0),
+                "ai_removal": "",
+                "rationale": "",
+            },
+            "theme": {
+                "theme": theme_text,
+                "tone": tone,
+            },
+            "style": {
+                "style": project.writing_style or "",
+                "pacing": "",
+            },
+            "world": {
+                "entries_by_category": world_by_category,
+                "entry_count": len(world_entries),
+            },
+            "characters": {
+                "protagonist": protagonist,
+                "antagonist": {},
+                "supporting": [],
+                "relations": [],
+            },
+            "arcs": [],
+            "outline": {},
+            "foreshadowings": {
+                "by_period": {"短周期": [], "中周期": [], "长周期": [], "未分类": []},
+                "total": 0,
+            },
+            "chapter_outlines": [],
+        }
 
     sr = dict(run.stage_results or {})
 

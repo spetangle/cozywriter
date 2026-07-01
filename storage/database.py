@@ -40,6 +40,14 @@ def init_db():
             logger.info(f"[DB fix_pk] 修复 PRIMARY KEY: {fix_result['tables_fixed']}")
     except Exception as e:
         logger.warning(f"[DB fix_pk] 修复失败: {e}")
+    # 添加问卷新字段（分步问卷功能）
+    try:
+        from storage.migrations.add_questionnaire_columns import add_questionnaire_columns
+        q_result = add_questionnaire_columns(engine)
+        if q_result.get("success"):
+            logger.info(f"[DB migrate] 问卷新字段添加成功")
+    except Exception as e:
+        logger.warning(f"[DB migrate] 添加问卷字段失败: {e}")
 
 
 def get_db() -> Session:

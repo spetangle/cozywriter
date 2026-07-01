@@ -12,6 +12,7 @@ function app() {
 
     showSettings: false,
     showProjectSettings: false,
+    isRegeneratingSettings: false,
     settings: { defaultProvider: 'anthropic' },
 
     // 服务商管理
@@ -203,6 +204,21 @@ function app() {
     qStep: 0,
     qAnswers: {},
     qQuestions: [],
+    
+    // 分步问卷模式
+    stepQuestionnaire: {
+        active: false,
+        questionnaireId: null,
+        currentStep: 0,
+        totalSteps: 0,
+        currentQuestion: null,
+        answers: {},
+        customAnswer: '',
+        isCompleted: false,
+        aiCompletedAnswers: {},
+        isAiCompleting: false,
+        isGeneratingOptions: false,
+    },
 
     // 大纲/细纲
     // 注意：移除"剧情线/结构/章节细纲"三个标签页后，projectOutline、plotlineForm、
@@ -2496,6 +2512,27 @@ function app() {
       } catch (e) { console.error(e); }
     },
 
+    async regenerateSettings() {
+      if (!this.currentProject || this.isRegeneratingSettings) return;
+      
+      if (!confirm('确定要重新生成全部设定吗？这将覆盖现有的设定文档。')) return;
+      
+      this.isRegeneratingSettings = true;
+      try {
+        const res = await fetch(`/api/projects/${this.currentProject.id}/regenerate-settings`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        alert('重新生成已启动，设定文档将在后台生成。');
+        this.showProjectSettings = false;
+      } catch (e) { 
+        alert('重新生成失败: ' + e.message); 
+      } finally {
+        this.isRegeneratingSettings = false;
+      }
+    },
+
     // ─── 章节 ───
     async loadChapters(projectId) {
       try {
@@ -4614,15 +4651,310 @@ function app() {
     startQuestionnaire() {
       this.loadQuestionnaires().then(() => this.createNewQuestionnaire());
     },
+
+    // ─── 分步问卷模式 ───
+    async startStepQuestionnaire() {
+      try {
+        const res = await fetch('/api/questionnaires', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: '新问卷' }),
+        });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+        }
+        const q = await res.json();
+        console.log('[问卷] 创建成功:', q);
+        
+        this.currentProject = null;
+        this.currentChapter = null;
+        
+        this.stepQuestionnaire.active = true;
+        this.stepQuestionnaire.questionnaireId = q.id;
+        this.stepQuestionnaire.currentStep = 0;
+        this.stepQuestionnaire.totalSteps = 0;
+        this.stepQuestionnaire.currentQuestion = null;
+        this.stepQuestionnaire.answers = {};
+        this.stepQuestionnaire.customAnswer = '';
+        this.stepQuestionnaire.isCompleted = false;
+        this.stepQuestionnaire.aiCompletedAnswers = {};
+        this.stepQuestionnaire.isAiCompleting = false;
+        this.stepQuestionnaire.isGeneratingOptions = false;
+        this.stepQuestionnaire.isNavigating = false;
+        this.stepQuestionnaire.lastSelectedAnswer = null;
+        this.stepQuestionnaire.lastFocus = null;
+        
+        await this.loadCurrentStep();
+        console.log('[问卷] 加载步骤完成:', JSON.stringify(this.stepQuestionnaire));
+        
+        this.activePanel = 'step-questionnaire';
+        console.log('[问卷] 面板已切换:', this.activePanel);
+      } catch (e) { 
+        console.error('[问卷] 创建失败:', e);
+        alert('创建问卷失败: ' + e.message); 
+      }
+    },
+
+    async loadCurrentStep() {
+      try {
+        const res = await fetch(`/api/questionnaires/${this.stepQuestionnaire.questionnaireId}/current-step`);
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+        }
+        const data = await res.json();
+        
+        this.stepQuestionnaire.currentStep = data.current_step;
+        this.stepQuestionnaire.totalSteps = data.total_steps;
+        this.stepQuestionnaire.answers = data.answers || {};
+        this.stepQuestionnaire.isCompleted = data.is_completed;
+        this.stepQuestionnaire.customAnswer = '';
+        
+        const questionData = data.question ? JSON.parse(JSON.stringify(data.question)) : null;
+        
+        if (this.$set) {
+          this.$set(this.stepQuestionnaire, 'currentQuestion', questionData);
+        } else {
+          this.stepQuestionnaire.currentQuestion = questionData;
+        }
+      } catch (e) { 
+        console.error('[问卷] 加载步骤失败:', e); 
+      }
+    },
+
+    selectOption(answer, isCustom = false) {
+      if (!this.stepQuestionnaire.currentQuestion) return;
+      
+      const questionId = this.stepQuestionnaire.currentQuestion.id;
+      
+      if (this.$set) {
+        this.$set(this.stepQuestionnaire.answers, questionId, answer);
+      } else {
+        this.stepQuestionnaire.answers[questionId] = answer;
+      }
+      
+      this.stepQuestionnaire.lastSelectedAnswer = { answer, isCustom };
+    },
+
+    async nextStep() {
+      if (!this.stepQuestionnaire.currentQuestion) return;
+      
+      const questionId = this.stepQuestionnaire.currentQuestion.id;
+      let answer = this.stepQuestionnaire.answers[questionId];
+      let isCustom = false;
+      
+      const hasCustomAnswer = this.stepQuestionnaire.customAnswer && this.stepQuestionnaire.customAnswer.trim();
+      if (this.stepQuestionnaire.lastFocus === 'custom' && hasCustomAnswer) {
+        answer = this.stepQuestionnaire.customAnswer.trim();
+        isCustom = true;
+      }
+      
+      if (!answer && this.stepQuestionnaire.currentQuestion.required) {
+        alert('请先选择或输入答案');
+        return;
+      }
+      
+      this.stepQuestionnaire.isNavigating = true;
+      
+      try {
+        const res = await fetch(`/api/questionnaires/${this.stepQuestionnaire.questionnaireId}/answer-step`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            question_id: questionId,
+            answer: answer || '',
+            is_custom: isCustom,
+          }),
+        });
+        const data = await res.json();
+        this.stepQuestionnaire.currentStep = data.current_step;
+        this.stepQuestionnaire.totalSteps = data.total_steps;
+        this.stepQuestionnaire.answers = data.answers || {};
+        this.stepQuestionnaire.isCompleted = data.is_completed;
+        
+        const questionData = data.question ? JSON.parse(JSON.stringify(data.question)) : null;
+        
+        if (this.$set) {
+          this.$set(this.stepQuestionnaire, 'currentQuestion', questionData);
+        } else {
+          this.stepQuestionnaire.currentQuestion = questionData;
+        }
+        
+        this.stepQuestionnaire.customAnswer = '';
+        this.stepQuestionnaire.lastSelectedAnswer = null;
+        this.stepQuestionnaire.lastFocus = null;
+        
+
+      } catch (e) { 
+        alert('提交答案失败: ' + e.message); 
+      } finally {
+        this.stepQuestionnaire.isNavigating = false;
+      }
+    },
+
+    async submitStepAnswer(answer, isCustom = false) {
+      this.selectOption(answer, isCustom);
+      await this.nextStep();
+    },
+
+    async prevStep() {
+      if (this.stepQuestionnaire.currentStep <= 0) return;
+      
+      try {
+        const res = await fetch(`/api/questionnaires/${this.stepQuestionnaire.questionnaireId}/prev-step`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+        }
+        const data = await res.json();
+        
+        this.stepQuestionnaire.currentStep = data.current_step;
+        this.stepQuestionnaire.totalSteps = data.total_steps;
+        this.stepQuestionnaire.answers = data.answers || {};
+        this.stepQuestionnaire.isCompleted = data.is_completed;
+        this.stepQuestionnaire.customAnswer = '';
+        
+        const questionData = data.question ? JSON.parse(JSON.stringify(data.question)) : null;
+        
+        if (this.$set) {
+          this.$set(this.stepQuestionnaire, 'currentQuestion', questionData);
+        } else {
+          this.stepQuestionnaire.currentQuestion = questionData;
+        }
+        
+        console.log('[问卷] 后退成功:', data.current_step);
+      } catch (e) { 
+        console.error('[问卷] 后退失败:', e); 
+        alert('后退失败: ' + e.message); 
+      }
+    },
+
+    async skipToAi() {
+      if (this.stepQuestionnaire.isAiCompleting) return;
+      
+      if (!confirm('确定让 AI 补全剩余设定吗？补全后将直接跳转到书名选择。')) return;
+      
+      this.stepQuestionnaire.isAiCompleting = true;
+      try {
+        const res = await fetch(`/api/questionnaires/${this.stepQuestionnaire.questionnaireId}/skip-to-ai`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        this.stepQuestionnaire.aiCompletedAnswers = data.ai_answers || {};
+        this.stepQuestionnaire.isAiCompleting = false;
+        
+        await this.loadCurrentStep();
+      } catch (e) { 
+        alert('AI 补全失败: ' + e.message); 
+        this.stepQuestionnaire.isAiCompleting = false;
+      }
+    },
+
+    async generateLlmOptions() {
+      console.log('[问卷] 尝试生成LLM选项:', {
+        hasCurrentQuestion: !!this.stepQuestionnaire.currentQuestion,
+        isGeneratingOptions: this.stepQuestionnaire.isGeneratingOptions,
+        questionnaireId: this.stepQuestionnaire.questionnaireId,
+      });
+      if (!this.stepQuestionnaire.currentQuestion) {
+        console.log('[问卷] generateLlmOptions: currentQuestion为空，跳过');
+        return;
+      }
+      if (this.stepQuestionnaire.isGeneratingOptions) {
+        console.log('[问卷] generateLlmOptions: 正在生成中，跳过');
+        return;
+      }
+      
+      this.stepQuestionnaire.isGeneratingOptions = true;
+      
+      try {
+        const res = await fetch(`/api/questionnaires/${this.stepQuestionnaire.questionnaireId}/generate-llm-options`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+        }
+        
+        const data = await res.json();
+        
+        if (data.llm_options && data.llm_options.length > 0) {
+          console.log('[问卷] 更新选项:', data.llm_options);
+          const newOptions = [...data.llm_options];
+          if (this.$set && this.stepQuestionnaire.currentQuestion) {
+            this.$set(this.stepQuestionnaire.currentQuestion, 'options', newOptions);
+          } else if (this.stepQuestionnaire.currentQuestion) {
+            this.stepQuestionnaire.currentQuestion.options = newOptions;
+          }
+        }
+        
+        this.stepQuestionnaire.isGeneratingOptions = false;
+      } catch (e) { 
+        alert('AI 生成选项失败: ' + e.message); 
+        this.stepQuestionnaire.isGeneratingOptions = false;
+      }
+    },
+
+    async buildProjectFromStepQuestionnaire() {
+      try {
+        const res = await fetch(`/api/questionnaires/${this.stepQuestionnaire.questionnaireId}/build-project`, { 
+          method: 'POST' 
+        });
+        const data = await res.json();
+        
+        this.stepQuestionnaire.isGeneratingSetting = true;
+        this.stepQuestionnaire.generatingProjectId = data.project_id;
+        this.stepQuestionnaire.generatingRunId = data.run_id;
+        
+        await this.loadProjects();
+        const p = this.projects.find(proj => proj.id === data.project_id);
+        if (p) await this.openProject(p);
+        
+        this.activePanel = 'writing';
+        
+        this.stepQuestionnaire = {
+          active: false,
+          questionnaireId: null,
+          currentStep: 0,
+          totalSteps: 0,
+          currentQuestion: null,
+          answers: {},
+          isCompleted: false,
+          aiCompletedAnswers: {},
+          isAiCompleting: false,
+          isGeneratingSetting: false,
+          generatingProjectId: null,
+          generatingRunId: null,
+        };
+      } catch (e) { alert('创建项目失败: ' + e.message); }
+    },
+
+    exitStepQuestionnaire() {
+      if (!confirm('确定退出问卷吗？已填写的内容将被保存。')) return;
+      this.stepQuestionnaire = {
+        active: false,
+        questionnaireId: null,
+        currentStep: 0,
+        totalSteps: 0,
+        currentQuestion: null,
+        answers: {},
+        isCompleted: false,
+        aiCompletedAnswers: {},
+        isAiCompleting: false,
+      };
+      this.activePanel = 'writing';
+    },
   };
 
 }
 
-// Alpine.data() 注册（比 x-data="app()" 字符串求值更可靠）
-if (window.Alpine) {
-  window.Alpine.data('cozywriterApp', app);
-} else {
-  document.addEventListener('alpine:init', () => {
-    window.Alpine.data('cozywriterApp', app);
-  });
+function cozywriterApp() {
+  if (window.Alpine && window.Alpine.reactive) {
+    return window.Alpine.reactive(app());
+  }
+  return app();
 }
+window.cozywriterApp = cozywriterApp;
