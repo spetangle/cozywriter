@@ -373,18 +373,30 @@ async def get_bootstrap_data(project_id: str, db: Session = Depends(get_db)):
 
     # ── 项目大纲（stage_4a 架构 + stage_4a_chapter_outlines 拆分后）──
     outline_data = _data("stage_4a_outline") or {}
-    # 兼容：之前没有 chapter_outlines 字段（早期版本）
-    chapter_outlines = outline_data.get("chapter_outlines", []) if isinstance(outline_data, dict) else []
-    # 新版：拆出后 chapter_outlines 走 stage_4a_chapter_outlines,且落地到 ProjectOutline.chapter_outlines 列
-    extra_data = _data("stage_4a_chapter_outlines") or {}
-    if extra_data.get("chapter_outlines"):
-        chapter_outlines = list(extra_data["chapter_outlines"])
-    # 如果 run.stage_results 缺(已 committed 跑过),从 ProjectOutline 表读
+    # 新版：优先从 ProjectOutline 表读数据（扩写大纲后数据会写入这里）
+    from storage.models import ProjectOutline as _PO
+    po_row = db.query(_PO).filter(_PO.project_id == project_id).first()
+    
+    # 从 ProjectOutline 表读取扩写后的架构数据
+    if po_row:
+        if po_row.volumes:
+            outline_data["volumes"] = list(po_row.volumes)
+        if po_row.plot_lines:
+            outline_data["plot_lines"] = list(po_row.plot_lines)
+        if po_row.structure:
+            outline_data["structure"] = dict(po_row.structure)
+    
+    chapter_outlines = []
+    if po_row and po_row.chapter_outlines:
+        chapter_outlines = list(po_row.chapter_outlines)
+    # 兼容：如果 ProjectOutline 没有，从 stage_results 读
     if not chapter_outlines:
-        from storage.models import ProjectOutline as _PO
-        po_row = db.query(_PO).filter(_PO.project_id == project_id).first()
-        if po_row and po_row.chapter_outlines:
-            chapter_outlines = list(po_row.chapter_outlines)
+        # 兼容：之前没有 chapter_outlines 字段（早期版本）
+        chapter_outlines = outline_data.get("chapter_outlines", []) if isinstance(outline_data, dict) else []
+        # 新版：拆出后 chapter_outlines 走 stage_4a_chapter_outlines
+        extra_data = _data("stage_4a_chapter_outlines") or {}
+        if extra_data.get("chapter_outlines"):
+            chapter_outlines = list(extra_data["chapter_outlines"])
     # 确保 outline 字段也带 chapter_outlines（前端用 bootstrapData.outline.chapter_outlines 访问）
     if isinstance(outline_data, dict):
         outline_data.setdefault("chapter_outlines", chapter_outlines)
@@ -480,11 +492,11 @@ async def rerun_stage(run_id: int, req: RerunRequest, db: Session = Depends(get_
         _release_run_lock(run_id)
         raise HTTPException(status_code=404, detail="Run not found")
 
-    if run.status == "committed":
+    if run.status == "failed":
         _release_run_lock(run_id)
         raise HTTPException(
             status_code=400,
-            detail="已 commit 的 run 不能 rerun stage，请新建项目或清除 commit 状态",
+            detail="失败的 run 不能 rerun stage，请新建项目",
         )
 
     logger.info(f"[Workflow] rerun (async) run={run_id} stage={req.stage_id}")
@@ -568,11 +580,11 @@ async def rerun_all_stages(run_id: int, db: Session = Depends(get_db), force_all
         _release_run_lock(run_id)
         raise HTTPException(status_code=404, detail="Run not found")
 
-    if run.status == "committed":
+    if run.status == "failed":
         _release_run_lock(run_id)
         raise HTTPException(
             status_code=400,
-            detail="已 commit 的 run 不能 rerun-all",
+            detail="失败的 run 不能 rerun-all，请新建项目",
         )
 
     logger.info(f"[Workflow] rerun-all (async) run={run_id} force_all={force_all}")

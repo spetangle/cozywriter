@@ -36,7 +36,7 @@ class CreativeQuestionnaire(Base):
     # AI 补全的答案（用户选择跳过问卷时使用）
     ai_completed_answers = Column(JSON, default=dict)
     # 基于此问卷创建的项目 ID（创建后填入）
-    created_project_id = Column(Integer, nullable=True)
+    created_project_id = Column(String(32), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -48,15 +48,11 @@ STEP_QUESTIONS = [
         "step": 0,
         "id": "genre",
         "question": "小说的题材是什么？",
-        "type": "step_choice",
-        "options": [
-            {"value": "玄幻", "label": "玄幻", "description": "修炼升级、仙侠世界、法术神通"},
-            {"value": "都市", "label": "都市", "description": "现代都市、都市异能、都市生活"},
-            {"value": "科幻", "label": "科幻", "description": "未来科技、星际探索、人工智能"},
-        ],
+        "type": "step_multiselect_tags",
+        "source": "api/genres",
         "custom_input": {
             "type": "text",
-            "placeholder": "其他题材（如：武侠、历史、悬疑...）",
+            "placeholder": "自定义题材标签（回车添加）",
         },
         "required": True,
         "next_step": 1,
@@ -190,17 +186,19 @@ STEP_QUESTIONS = [
     },
     {
         "step": 8,
-        "id": "target_length",
-        "question": "预计写多长？",
+        "id": "chapter_word_count",
+        "question": "每章目标字数？",
         "type": "step_choice",
         "options": [
-            {"value": "短篇（3-10万字）", "label": "短篇", "description": "精悍紧凑，适合快速完本"},
-            {"value": "中篇（10-30万字）", "label": "中篇", "description": "有足够空间展开故事"},
-            {"value": "长篇（30-100万字）", "label": "长篇", "description": "宏大叙事，适合连载"},
+            {"value": "2000", "label": "2000字", "description": "精简紧凑，适合快节奏故事"},
+            {"value": "3000", "label": "3000字", "description": "适中篇幅，兼顾节奏与细节"},
+            {"value": "5000", "label": "5000字", "description": "详尽描写，适合铺垫展开"},
+            {"value": "8000", "label": "8000字", "description": "大幅章节，适合深度叙事"},
+            {"value": "10000", "label": "10000字", "description": "超长章节，适合大场面"},
         ],
         "custom_input": {
             "type": "text",
-            "placeholder": "自定义字数目标",
+            "placeholder": "自定义字数（1000的整数倍）",
         },
         "required": True,
         "next_step": 9,
@@ -208,6 +206,25 @@ STEP_QUESTIONS = [
     },
     {
         "step": 9,
+        "id": "total_chapters",
+        "question": "预计写多少章？",
+        "type": "step_choice",
+        "options": [
+            {"value": "30", "label": "30章", "description": "短篇故事，快速完本"},
+            {"value": "50", "label": "50章", "description": "中篇故事，有足够展开空间"},
+            {"value": "100", "label": "100章", "description": "长篇故事，宏大叙事"},
+            {"value": "150", "label": "150章", "description": "超长篇故事，适合连载"},
+        ],
+        "custom_input": {
+            "type": "text",
+            "placeholder": "自定义章节数",
+        },
+        "required": True,
+        "next_step": 10,
+        "llm_enabled": False,
+    },
+    {
+        "step": 10,
         "id": "style",
         "question": "文笔风格偏好？",
         "type": "step_choice",
@@ -221,11 +238,11 @@ STEP_QUESTIONS = [
             "placeholder": "其他风格（如：幽默、诗意...）",
         },
         "required": True,
-        "next_step": 10,
+        "next_step": 11,
         "llm_enabled": True,
     },
     {
-        "step": 10,
+        "step": 11,
         "id": "pacing",
         "question": "故事节奏偏好？",
         "type": "step_choice",
@@ -239,11 +256,11 @@ STEP_QUESTIONS = [
             "placeholder": "其他节奏偏好",
         },
         "required": False,
-        "next_step": 11,
+        "next_step": 12,
         "llm_enabled": True,
     },
     {
-        "step": 11,
+        "step": 12,
         "id": "novel_title",
         "question": "小说的名称是什么？",
         "type": "step_choice",
@@ -255,8 +272,17 @@ STEP_QUESTIONS = [
             "placeholder": "输入自定义小说名称",
         },
         "required": True,
-        "next_step": -1,
+        "next_step": 13,
         "llm_enabled": True,
+    },
+    {
+        "step": 13,
+        "id": "summary",
+        "question": "问卷信息汇总",
+        "type": "step_summary",
+        "required": False,
+        "next_step": -1,
+        "llm_enabled": False,
     },
 ]
 

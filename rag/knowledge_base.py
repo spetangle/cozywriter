@@ -39,7 +39,7 @@ class KnowledgeBase:
             metadatas=[{
                 "name": character.name,
                 "role": character.role,
-                "project_id": int(character.project_id or 0),
+                "project_id": character.project_id or "",
             }],
         )
         return doc_id
@@ -99,7 +99,7 @@ class KnowledgeBase:
             metadatas=[{
                 "title": chapter.title,
                 "order": int(chapter.order or 0),
-                "project_id": int(chapter.project_id or 0),
+                "project_id": chapter.project_id or "",
             }],
         )
         return doc_id

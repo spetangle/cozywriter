@@ -1,5 +1,6 @@
 """创意问卷 API"""
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from storage.database import get_db
@@ -28,14 +29,15 @@ class QuestionnaireResponse(BaseModel):
     id: int
     title: str
     novel_title: str | None = None
-    answers: dict
-    llm_suggestions: dict = {}
-    questionnaire_type: str
-    status: str
-    current_step: int
-    created_project_id: str | None
-    created_at: object
-    updated_at: object
+    answers: dict | None = None
+    llm_suggestions: dict | None = None
+    questionnaire_type: str | None = None
+    status: str | None = None
+    current_step: int | None = None
+    created_project_id: str | None = None
+    ai_completed_answers: dict | None = None
+    created_at: object | None = None
+    updated_at: object | None = None
 
     class Config:
         from_attributes = True
@@ -92,11 +94,28 @@ async def get_step_questions():
     return {"questions": STEP_QUESTIONS, "total_steps": TOTAL_STEPS}
 
 
-@router.get("", response_model=list[QuestionnaireResponse])
-async def list_questionnaires(db: Session = Depends(get_db)):
+@router.get("")
+def list_questionnaires(db: Session = Depends(get_db)):
     """获取所有问卷"""
     qs = db.query(CreativeQuestionnaire).order_by(CreativeQuestionnaire.updated_at.desc()).all()
-    return qs
+    result = []
+    for q in qs:
+        item = {
+            "id": q.id,
+            "title": q.title,
+            "novel_title": q.novel_title,
+            "answers": q.answers if q.answers else {},
+            "llm_suggestions": q.llm_suggestions if q.llm_suggestions else {},
+            "questionnaire_type": q.questionnaire_type,
+            "status": q.status,
+            "current_step": q.current_step,
+            "created_project_id": q.created_project_id,
+            "ai_completed_answers": q.ai_completed_answers if q.ai_completed_answers else {},
+            "created_at": q.created_at.isoformat() if q.created_at else None,
+            "updated_at": q.updated_at.isoformat() if q.updated_at else None,
+        }
+        result.append(item)
+    return JSONResponse(content=result)
 
 
 @router.post("", response_model=QuestionnaireResponse)
@@ -145,6 +164,21 @@ async def delete_questionnaire(q_id: int, db: Session = Depends(get_db)):
     db.delete(q)
     db.commit()
     return {"status": "ok"}
+
+
+class BatchDeleteRequest(BaseModel):
+    ids: list[int]
+
+
+@router.post("/batch/delete")
+async def batch_delete_questionnaires(data: BatchDeleteRequest, db: Session = Depends(get_db)):
+    """批量删除问卷"""
+    if not data.ids:
+        return {"status": "ok", "deleted_count": 0}
+    
+    count = db.query(CreativeQuestionnaire).filter(CreativeQuestionnaire.id.in_(data.ids)).delete(synchronize_session=False)
+    db.commit()
+    return {"status": "ok", "deleted_count": count}
 
 
 # ─── 分步问卷流程 ───
@@ -300,7 +334,6 @@ async def answer_step(q_id: int, data: StepAnswer, db: Session = Depends(get_db)
         q.current_step = question["next_step"]
     else:
         q.current_step = current_step + 1
-        q.status = "completed"
 
     db.commit()
     db.refresh(q)
@@ -398,7 +431,7 @@ async def build_project_from_questionnaire(q_id: int, db: Session = Depends(get_
     将问卷答案中的信息自动填入项目设置：
     - 小说名称 → Project.title
     - 类型/基调/风格 → Project.writing_style
-    - 总字数目标根据 target_length 估算
+    - 每章字数 × 总章节数 → 总字数目标
     - 核心主题 → Theme
     - 主角/反派设定 → Character
     - 世界观/社会结构 → WorldEntry
@@ -423,15 +456,10 @@ async def build_project_from_questionnaire(q_id: int, db: Session = Depends(get_
     logger.info(f"[问卷] AI补全答案: {ai_a}")
     logger.info(f"[问卷] 合并后答案: {all_answers}")
 
-    length_map = {
-        "短篇（3-10万字）": 50000,
-        "中篇（10-30万字）": 200000,
-        "长篇（30-100万字）": 600000,
-        "超长篇（100万字以上）": 1200000,
-    }
-    est_total = length_map.get(all_answers.get("target_length", ""), 300000)
-    est_chapter = est_total // 30
-    logger.info(f"[问卷] 篇幅估算：目标字数={est_total}, 单章目标={est_chapter}")
+    chapter_word_count = int(all_answers.get("chapter_word_count", 3000))
+    total_chapters = int(all_answers.get("total_chapters", 30))
+    est_total = chapter_word_count * total_chapters
+    logger.info(f"[问卷] 篇幅估算：每章{chapter_word_count}字 × {total_chapters}章 = 总字数{est_total}")
 
     style_map = {
         "优美": "优美", "平实": "平实", "诗意": "诗意",
@@ -444,10 +472,10 @@ async def build_project_from_questionnaire(q_id: int, db: Session = Depends(get_
         title=project_title,
         description=all_answers.get("summary", "") or all_answers.get("world_setting", "") or all_answers.get("premise", ""),
         writing_style=style_map.get(all_answers.get("style", ""), "平实"),
-        target_word_count=est_chapter,
-        word_count_min=int(est_chapter * 0.7),
-        word_count_max=int(est_chapter * 1.3),
-        total_chapters=30,
+        target_word_count=chapter_word_count,
+        word_count_min=int(chapter_word_count * 0.7),
+        word_count_max=int(chapter_word_count * 1.3),
+        total_chapters=total_chapters,
         genre=all_answers.get("genre", ""),
     )
     db.add(project)
@@ -536,7 +564,8 @@ async def build_project_from_questionnaire(q_id: int, db: Session = Depends(get_
     
     user_filled = {
         "tone": all_answers.get("tone", ""),
-        "target_length": all_answers.get("target_length", ""),
+        "chapter_word_count": all_answers.get("chapter_word_count", ""),
+        "total_chapters": all_answers.get("total_chapters", ""),
         "protagonist": all_answers.get("protagonist", ""),
         "antagonist": all_answers.get("antagonist", ""),
         "world_setting": all_answers.get("world_setting", ""),
@@ -554,7 +583,7 @@ async def build_project_from_questionnaire(q_id: int, db: Session = Depends(get_
     stages = plan_bootstrap_stages(
         required={
             "title": project_title,
-            "chapter_word_count": est_chapter,
+            "chapter_word_count": chapter_word_count,
             "genre": genre_str,
             "description": project.description,
         },
@@ -577,7 +606,7 @@ async def build_project_from_questionnaire(q_id: int, db: Session = Depends(get_
     
     user_input = {
         "title": project_title,
-        "chapter_word_count": est_chapter,
+        "chapter_word_count": chapter_word_count,
         "genre": genre_str,
         "description": project.description,
         "_project_id": project.id,
@@ -612,7 +641,8 @@ def _get_default_answers(missing_fields: list) -> dict:
         "genre": "玄幻",
         "theme": "成长与自我发现",
         "tone": "热血",
-        "target_length": "中篇（10-30万字）",
+        "chapter_word_count": "3000",
+        "total_chapters": "50",
         "protagonist": "一个平凡的少年，意外获得神秘力量，踏上冒险之旅，逐渐成长为英雄。他性格坚韧，重情重义，在面对困难时从不退缩。",
         "premise": "在一个充满魔法和奇幻生物的世界，古老的预言正在苏醒。不同种族之间的矛盾日益加剧，而主角的命运将决定整个世界的走向。",
         "style": "优美",
@@ -779,17 +809,18 @@ def _complete_with_ai(answers: dict, db, skip_novel_title: bool = False) -> dict
 需要补全的字段（除小说名外）：{other_fields}
 
 请根据以下规则补全：
-1. genre（题材）：从 玄幻/都市/科幻/武侠/仙侠/历史/悬疑/现实主义/奇幻 中选择
+1. genre（题材）：从 玄幻/都市/科幻/武侠/仙侠/历史/悬疑/现实主义/奇幻 中选择，可多选，用逗号分隔（如：玄幻,仙侠）
 2. core_hook（核心看点）：小说最吸引人的核心亮点
 3. theme（主题）：一句话核心主题，如 救赎、成长、复仇等
 4. tone（基调）：从 热血/深沉/轻松/黑暗/治愈/史诗/悬疑紧张/浪漫/幽默/冷峻 中选择
-5. target_length（篇幅）：从 短篇（3-10万字）/中篇（10-30万字）/长篇（30-100万字）/超长篇（100万字以上）中选择
-6. protagonist（主角）：描述主角的性格、目标、背景（3-5句话）
-7. antagonist（反派）：描述反派的动机、背景和与主角的矛盾（2-3句话）
-8. world_setting（世界观）：描述故事发生的世界、时代、社会规则（3-5句话）
-9. society_structure（社会结构）：描述社会的组织形式、权力结构、价值观（2-3句话）
-10. style（风格）：从 优美/平实/诗意/幽默/冷峻 中选择
-11. pacing（节奏）：从 快节奏/中等节奏/慢热型/起伏型 中选择
+5. chapter_word_count（每章字数）：从 2000/3000/5000/8000/10000 中选择一个数字
+6. total_chapters（总章节数）：从 30/50/100/150 中选择一个数字
+7. protagonist（主角）：描述主角的性格、目标、背景（3-5句话）
+8. antagonist（反派）：描述反派的动机、背景和与主角的矛盾（2-3句话）
+9. world_setting（世界观）：描述故事发生的世界、时代、社会规则（3-5句话）
+10. society_structure（社会结构）：描述社会的组织形式、权力结构、价值观（2-3句话）
+11. style（风格）：从 优美/平实/诗意/幽默/冷峻 中选择
+12. pacing（节奏）：从 快节奏/中等节奏/慢热型/起伏型 中选择
 
 请输出 JSON 格式，只包含需要补全的字段，不要包含 novel_title。
 """
@@ -903,17 +934,18 @@ def _complete_with_ai(answers: dict, db, skip_novel_title: bool = False) -> dict
 需要补全的字段：{missing_fields}
 
 请根据以下规则补全：
-1. genre（题材）：从 玄幻/都市/科幻/武侠/仙侠/历史/悬疑/现实主义/奇幻 中选择
+1. genre（题材）：从 玄幻/都市/科幻/武侠/仙侠/历史/悬疑/现实主义/奇幻 中选择，可多选，用逗号分隔（如：玄幻,仙侠）
 2. core_hook（核心看点）：小说最吸引人的核心亮点
 3. theme（主题）：一句话核心主题，如 救赎、成长、复仇等
 4. tone（基调）：从 热血/深沉/轻松/黑暗/治愈/史诗/悬疑紧张/浪漫/幽默/冷峻 中选择
-5. target_length（篇幅）：从 短篇（3-10万字）/中篇（10-30万字）/长篇（30-100万字）/超长篇（100万字以上）中选择
-6. protagonist（主角）：描述主角的性格、目标、背景（3-5句话）
-7. antagonist（反派）：描述反派的动机、背景和与主角的矛盾（2-3句话）
-8. world_setting（世界观）：描述故事发生的世界、时代、社会规则（3-5句话）
-9. society_structure（社会结构）：描述社会的组织形式、权力结构、价值观（2-3句话）
-10. style（风格）：从 优美/平实/诗意/幽默/冷峻 中选择
-11. pacing（节奏）：从 快节奏/中等节奏/慢热型/起伏型 中选择
+5. chapter_word_count（每章字数）：从 2000/3000/5000/8000/10000 中选择一个数字
+6. total_chapters（总章节数）：从 30/50/100/150 中选择一个数字
+7. protagonist（主角）：描述主角的性格、目标、背景（3-5句话）
+8. antagonist（反派）：描述反派的动机、背景和与主角的矛盾（2-3句话）
+9. world_setting（世界观）：描述故事发生的世界、时代、社会规则（3-5句话）
+10. society_structure（社会结构）：描述社会的组织形式、权力结构、价值观（2-3句话）
+11. style（风格）：从 优美/平实/诗意/幽默/冷峻 中选择
+12. pacing（节奏）：从 快节奏/中等节奏/慢热型/起伏型 中选择
 
 请输出 JSON 格式，只包含需要补全的字段。
 """

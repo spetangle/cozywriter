@@ -204,6 +204,9 @@ function app() {
     qStep: 0,
     qAnswers: {},
     qQuestions: [],
+    welcomeTab: 'projects',
+    selectedQuestionnaireIds: [],
+    selectAllQuestionnaires: false,
     
     // 分步问卷模式
     stepQuestionnaire: {
@@ -218,6 +221,77 @@ function app() {
         aiCompletedAnswers: {},
         isAiCompleting: false,
         isGeneratingOptions: false,
+        hasUnsavedChanges: false,
+        selectedGenreTags: [],
+        customGenreInput: '',
+    },
+
+    initGenreTags() {
+      const input = document.getElementById('customGenreInput');
+      const btn = document.getElementById('addCustomGenreBtn');
+      if (input) {
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            this.handleCustomGenreSubmit();
+          }
+        });
+      }
+      if (btn) {
+        btn.addEventListener('click', () => {
+          this.handleCustomGenreSubmit();
+        });
+      }
+    },
+
+    renderGenreTagsUI() {
+      const container = document.getElementById('genreTagsContainer');
+      if (!container) return;
+      
+      container.innerHTML = '';
+      const tags = this.stepQuestionnaire.selectedGenreTags || [];
+      
+      for (const g of this.genreList) {
+        const btn = document.createElement('button');
+        btn.className = 'genre-tag-option' + (tags.includes(g.name) ? ' selected' : '');
+        btn.textContent = g.name;
+        btn.addEventListener('click', () => {
+          this.handleGenreTagClick(g.name);
+        });
+        container.appendChild(btn);
+      }
+    },
+
+    handleGenreTagClick(name) {
+      const tags = this.stepQuestionnaire.selectedGenreTags || [];
+      const idx = tags.indexOf(name);
+      let newTags;
+      if (idx >= 0) {
+        newTags = tags.filter(t => t !== name);
+      } else {
+        newTags = [...tags, name];
+      }
+      this.stepQuestionnaire.selectedGenreTags = newTags;
+      this.renderGenreTagsUI();
+    },
+
+    async handleCustomGenreSubmit() {
+      const input = document.getElementById('customGenreInput');
+      if (!input) return;
+      const name = input.value.trim();
+      if (!name) return;
+      
+      const g = await this.addCustomGenre(name);
+      if (g) {
+        const tags = this.stepQuestionnaire.selectedGenreTags || [];
+        if (!tags.includes(g.name)) {
+          this.stepQuestionnaire.selectedGenreTags = [...tags, g.name];
+        }
+        input.value = '';
+        this.renderGenreTagsUI();
+      } else {
+        alert('题材已存在或添加失败');
+      }
     },
 
     // 大纲/细纲
@@ -270,6 +344,32 @@ function app() {
     chapterContentSnapshot: '',      // 进入章节时的内容快照（用于 diff）
     previewChapter: null,
     previewReview: null,
+
+    // 文本替换
+    showTextReplaceModal: false,
+    replaceFind: '',
+    replaceReplace: '',
+    replaceResults: [],
+
+    // 替换角色
+    showReplaceCharacterModal: false,
+    replaceCharacterId: '',
+    replaceMode: 'generate',
+    replaceWithCharacterId: '',
+    replaceCharacterReferences: {
+      character_name: '',
+      chapters: [],
+      plot_points: [],
+      foreshadows: [],
+      total_count: 0,
+    },
+    replacingCharacter: false,
+
+    // 删除角色
+    showDeleteCharacterModal: false,
+    deleteCharacterId: '',
+    deleteCharacterCanDelete: false,
+    deleteCharacterChecking: false,
 
     // AI 生成
     showGenerateModal: false,
@@ -933,6 +1033,131 @@ function app() {
         const res = await fetch('/api/projects');
         this.projects = await res.json();
       } catch (e) { console.error(e); }
+      await this.loadSavedQuestionnaires();
+    },
+
+    async loadSavedQuestionnaires() {
+      try {
+        const res = await fetch('/api/questionnaires');
+        const all = await res.json();
+        this.savedQuestionnaires = all
+          .filter(q => q.status !== 'completed' && !q.created_project_id)
+          .sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
+        console.log('[创意池] 数据加载完成:', JSON.stringify(this.savedQuestionnaires, null, 2));
+        console.log('[创意池] 总数:', this.savedQuestionnaires.length);
+      } catch (e) { 
+        console.error('加载创意池失败:', e); 
+        this.savedQuestionnaires = [];
+        console.log('[创意池] 加载失败，数组为空');
+      }
+    },
+
+    switchToCreativePool() {
+      this.welcomeTab = 'creative-pool';
+      console.log('[创意池] 切换到创意池标签页');
+      console.log('[创意池] savedQuestionnaires:', this.savedQuestionnaires);
+      console.log('[创意池] 长度:', this.savedQuestionnaires.length);
+    },
+
+    async resumeQuestionnaire(questionnaireId) {
+      try {
+        const res = await fetch(`/api/questionnaires/${questionnaireId}/current-step`);
+        const data = await res.json();
+        
+        this.stepQuestionnaire = {
+          active: true,
+          questionnaireId: questionnaireId,
+          currentStep: data.current_step,
+          totalSteps: data.total_steps,
+          currentQuestion: data.question,
+          answers: data.answers || {},
+          isCompleted: false,
+          aiCompletedAnswers: {},
+          isAiCompleting: false,
+          isNavigating: false,
+          isGeneratingOptions: false,
+          customAnswer: '',
+          lastSelectedAnswer: null,
+          lastFocus: '',
+          hasUnsavedChanges: false,
+        };
+        this.activePanel = 'step-questionnaire';
+      } catch (e) { 
+        alert('恢复问卷失败: ' + e.message); 
+      }
+    },
+
+    async deleteQuestionnaire(questionnaireId) {
+      if (!confirm('确定删除这个创意吗？删除后无法恢复。')) return;
+      
+      try {
+        const res = await fetch(`/api/questionnaires/${questionnaireId}`, {
+          method: 'DELETE',
+        });
+        if (res.ok) {
+          await this.loadSavedQuestionnaires();
+        } else {
+          alert('删除失败');
+        }
+      } catch (e) { 
+        alert('删除失败: ' + e.message); 
+      }
+    },
+
+    toggleQuestionnaireSelection(id) {
+      const idx = this.selectedQuestionnaireIds.indexOf(id);
+      if (idx > -1) {
+        this.selectedQuestionnaireIds.splice(idx, 1);
+      } else {
+        this.selectedQuestionnaireIds.push(id);
+      }
+      this.updateSelectAllState();
+    },
+
+    toggleSelectAllQuestionnaires() {
+      if (this.selectAllQuestionnaires) {
+        this.selectedQuestionnaireIds = this.savedQuestionnaires.map(q => q.id);
+      } else {
+        this.selectedQuestionnaireIds = [];
+      }
+    },
+
+    updateSelectAllState() {
+      this.selectAllQuestionnaires = this.savedQuestionnaires.length > 0 && 
+        this.selectedQuestionnaireIds.length === this.savedQuestionnaires.length;
+    },
+
+    clearSelectedQuestionnaires() {
+      this.selectedQuestionnaireIds = [];
+      this.selectAllQuestionnaires = false;
+    },
+
+    formatDateTime(dt) {
+      if (!dt) return '';
+      const date = new Date(dt);
+      const pad = (n) => n.toString().padStart(2, '0');
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    },
+
+    async batchDeleteQuestionnaires() {
+      const count = this.selectedQuestionnaireIds.length;
+      if (!confirm(`确定删除选中的 ${count} 个创意吗？删除后无法恢复。`)) return;
+      
+      try {
+        const res = await fetch('/api/questionnaires/batch/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: this.selectedQuestionnaireIds }),
+        });
+        if (res.ok) {
+          await this.loadSavedQuestionnaires();
+          this.clearSelectedQuestionnaires();
+        } else {
+          alert('批量删除失败');
+        }
+      } catch (e) {
+        alert('批量删除失败: ' + e.message);
+      }
     },
 
     async createProject() {
@@ -4446,6 +4671,372 @@ function app() {
       this.exportSaveIndividual = false;
       this.showExportModal = true;
     },
+
+    openTextReplaceModal() {
+      this.replaceFind = '';
+      this.replaceReplace = '';
+      this.replaceResults = [];
+      this.showTextReplaceModal = true;
+    },
+    
+    findReplaceOccurrences() {
+      const find = this.replaceFind.trim();
+      if (!find) return;
+      
+      this.replaceResults = [];
+      for (const ch of this.chapters) {
+        if (!ch.content) continue;
+        const content = ch.content;
+        const regex = new RegExp(find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+        let match;
+        while ((match = regex.exec(content)) !== null) {
+          const before = content.substring(Math.max(0, match.index - 30), match.index);
+          const after = content.substring(match.index + match[0].length, match.index + match[0].length + 30);
+          this.replaceResults.push({
+            chapter_id: ch.id,
+            chapter_order: ch.order,
+            location: '章节正文',
+            match: match[0],
+            before: before || '',
+            after: after || '',
+          });
+        }
+      }
+    },
+    
+    async replaceAllOccurrences() {
+      const find = this.replaceFind.trim();
+      const replace = this.replaceReplace;
+      if (!find || !this.currentProject) return;
+      
+      try {
+        let totalReplaced = 0;
+        
+        for (const ch of this.chapters) {
+          if (!ch.content) continue;
+          const newContent = ch.content.split(find).join(replace);
+          if (newContent !== ch.content) {
+            const res = await fetch(`/api/chapters/${ch.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ content: newContent }),
+            });
+            if (!res.ok) {
+              throw new Error(`更新章节 ${ch.order + 1} 失败`);
+            }
+            totalReplaced += (ch.content.split(find).length - 1);
+          }
+        }
+        
+        const ppRes = await fetch(`/api/projects/${this.currentProject.id}/plot-points`);
+        const plotPoints = ppRes.ok ? await ppRes.json() : [];
+        for (const pp of plotPoints) {
+          let updated = false;
+          let newTitle = pp.title;
+          let newDesc = pp.description;
+          
+          if (pp.title && pp.title.includes(find)) {
+            newTitle = pp.title.split(find).join(replace);
+            updated = true;
+          }
+          if (pp.description && pp.description.includes(find)) {
+            newDesc = pp.description.split(find).join(replace);
+            updated = true;
+          }
+          
+          if (updated) {
+            const res = await fetch(`/api/projects/${this.currentProject.id}/plot-points/${pp.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ title: newTitle, description: newDesc }),
+            });
+            if (!res.ok) {
+              throw new Error('更新剧情点失败');
+            }
+            if (newTitle !== pp.title) totalReplaced++;
+            if (newDesc !== pp.description) totalReplaced++;
+          }
+        }
+        
+        const fsRes = await fetch(`/api/projects/${this.currentProject.id}/foreshadowings`);
+        const foreshadowings = fsRes.ok ? await fsRes.json() : [];
+        for (const fs of foreshadowings) {
+          let updated = false;
+          let newTitle = fs.title;
+          let newContent = fs.content;
+          let newConn = fs.connection_to_mainline;
+          
+          if (fs.title && fs.title.includes(find)) {
+            newTitle = fs.title.split(find).join(replace);
+            updated = true;
+          }
+          if (fs.content && fs.content.includes(find)) {
+            newContent = fs.content.split(find).join(replace);
+            updated = true;
+          }
+          if (fs.connection_to_mainline && fs.connection_to_mainline.includes(find)) {
+            newConn = fs.connection_to_mainline.split(find).join(replace);
+            updated = true;
+          }
+          
+          if (updated) {
+            const body = { title: newTitle, content: newContent };
+            if (fs.connection_to_mainline) {
+              body.connection_to_mainline = newConn;
+            }
+            const res = await fetch(`/api/projects/${this.currentProject.id}/foreshadowings/${fs.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            if (!res.ok) {
+              throw new Error('更新伏笔失败');
+            }
+            if (newTitle !== fs.title) totalReplaced++;
+            if (newContent !== fs.content) totalReplaced++;
+          }
+        }
+        
+        alert(`已成功替换 ${totalReplaced} 处匹配`);
+        this.showTextReplaceModal = false;
+        await this.openProject(this.currentProject);
+      } catch (e) {
+        console.error('[文本替换] 替换失败:', e);
+        alert('替换失败: ' + e.message);
+      }
+    },
+    
+    openDeleteCharacterModal() {
+      this.deleteCharacterId = '';
+      this.deleteCharacterCanDelete = false;
+      this.deleteCharacterChecking = false;
+      this.showDeleteCharacterModal = true;
+    },
+    
+    async checkDeleteCharacter() {
+      if (!this.deleteCharacterId || !this.currentProject) {
+        this.deleteCharacterCanDelete = false;
+        return;
+      }
+      
+      this.deleteCharacterChecking = true;
+      
+      try {
+        const res = await fetch(`/api/projects/${this.currentProject.id}/characters/${this.deleteCharacterId}/references`);
+        if (res.ok) {
+          const refs = await res.json();
+          this.deleteCharacterCanDelete = refs.total_count === 0;
+        } else {
+          this.deleteCharacterCanDelete = false;
+        }
+      } catch (e) {
+        console.error('[删除角色] 检查失败:', e);
+        this.deleteCharacterCanDelete = false;
+      } finally {
+        this.deleteCharacterChecking = false;
+      }
+    },
+    
+    async confirmDeleteCharacter() {
+      if (!this.deleteCharacterId || !this.currentProject || !this.deleteCharacterCanDelete) return;
+      
+      const char = this.characters.find(c => c.id == this.deleteCharacterId);
+      if (!char) return;
+      
+      if (!confirm(`确定删除角色「${char.name}」吗？此操作无法撤销。`)) return;
+      
+      try {
+        const res = await fetch(`/api/projects/${this.currentProject.id}/characters/${this.deleteCharacterId}`, {
+          method: 'DELETE',
+        });
+        
+        if (res.ok) {
+          alert('角色删除成功');
+          this.showDeleteCharacterModal = false;
+          await this.openProject(this.currentProject);
+        } else {
+          const data = await res.json();
+          alert('删除失败: ' + (data.detail || '未知错误'));
+        }
+      } catch (e) {
+        console.error('[删除角色] 删除失败:', e);
+        alert('删除失败: ' + e.message);
+      }
+    },
+    
+    openReplaceCharacterModal() {
+      this.replaceCharacterId = '';
+      this.replaceMode = 'generate';
+      this.replaceWithCharacterId = '';
+      this.replaceCharacterReferences = {
+        character_name: '',
+        chapters: [],
+        plot_points: [],
+        foreshadows: [],
+        total_count: 0,
+      };
+      this.replacingCharacter = false;
+      this.showReplaceCharacterModal = true;
+    },
+    
+    canStartReplace() {
+      if (!this.replaceCharacterId) return false;
+      if (this.replaceMode === 'generate') return true;
+      if (this.replaceMode === 'existing') return !!this.replaceWithCharacterId;
+      return false;
+    },
+    
+    async loadCharacterReferences() {
+      if (!this.replaceCharacterId || !this.currentProject) return;
+      
+      try {
+        const res = await fetch(`/api/projects/${this.currentProject.id}/characters/${this.replaceCharacterId}/references`);
+        if (res.ok) {
+          this.replaceCharacterReferences = await res.json();
+        } else {
+          this.replaceCharacterReferences = {
+            character_name: '',
+            chapters: [],
+            plot_points: [],
+            foreshadows: [],
+            total_count: 0,
+          };
+        }
+      } catch (e) {
+        console.error('[替换角色] 加载关联信息失败:', e);
+      }
+    },
+    
+    async startReplaceCharacter() {
+      if (!this.replaceCharacterId || !this.currentProject) return;
+      
+      const char = this.mergedCharacters().find(c => 
+        (c._source === 'manual' ? c.id : ('ai-' + c.name)) == this.replaceCharacterId
+      );
+      if (!char) return;
+      
+      const refs = this.replaceCharacterReferences;
+      let confirmMsg = `确定替换角色「${char.name}」吗？\n\n`;
+      
+      if (this.replaceMode === 'existing') {
+        const targetChar = this.mergedCharacters().find(c => 
+          (c._source === 'manual' ? c.id : ('ai-' + c.name)) == this.replaceWithCharacterId
+        );
+        if (!targetChar) return;
+        confirmMsg += `将使用角色「${targetChar.name}」进行替换。\n`;
+      } else {
+        confirmMsg += `将生成新角色进行替换。\n`;
+      }
+      
+      if (refs.total_count > 0) {
+        confirmMsg += `\n该角色在以下位置出现:\n`;
+        if (refs.chapters.length > 0) {
+          confirmMsg += `- 章节: ${refs.chapters.length} 处\n`;
+        }
+        if (refs.plot_points.length > 0) {
+          confirmMsg += `- 剧情点: ${refs.plot_points.length} 处\n`;
+        }
+        if (refs.foreshadows.length > 0) {
+          confirmMsg += `- 伏笔: ${refs.foreshadows.length} 处\n`;
+        }
+        confirmMsg += `\n替换后将替换所有关联内容中的角色名。`;
+      } else {
+        confirmMsg += `\n未找到该角色的关联信息。`;
+      }
+      
+      if (!confirm(confirmMsg)) return;
+      
+      this.replacingCharacter = true;
+      
+      try {
+        if (this.replaceMode === 'generate') {
+          const res = await fetch(`/api/workflow/project/${this.currentProject.id}/latest`);
+          if (!res.ok) {
+            throw new Error('未找到 bootstrap 运行记录');
+          }
+          const runData = await res.json();
+          const runId = runData.run_id;
+          
+          let stageId = '';
+          if (char.role === '主角') {
+            stageId = 'stage_3a_protagonist';
+          } else if (char.role === '反派') {
+            stageId = 'stage_3b_antagonist';
+          } else {
+            stageId = 'stage_3c_supporting';
+          }
+          
+          const rerunRes = await fetch(`/api/workflow/run/${runId}/rerun`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ stage_id: stageId }),
+          });
+          const data = await rerunRes.json();
+          
+          if (data.status !== 'submitted') {
+            throw new Error('重跑失败: ' + (data.error || JSON.stringify(data)));
+          }
+          
+          const task = await this._pollTask(data.task_id);
+          if (task.status !== 'completed') {
+            throw new Error('生成新角色失败');
+          }
+          
+          await fetch(`/api/workflow/run/${runId}/commit`, { method: 'POST' });
+          
+          await this._refreshBootstrapData();
+          await this.openProject(this.currentProject);
+          
+          const newChar = this.characters.find(c => c.role === char.role && c.id !== char.id);
+          if (newChar && newChar.name !== char.name) {
+            this.replaceFind = char.name;
+            this.replaceReplace = newChar.name;
+            await this.replaceAllOccurrences();
+          }
+        } else {
+          const targetChar = this.mergedCharacters().find(c => 
+            (c._source === 'manual' ? c.id : ('ai-' + c.name)) == this.replaceWithCharacterId
+          );
+          if (!targetChar) {
+            throw new Error('未找到目标角色');
+          }
+          
+          let deleteMsg = '';
+          if (char._source === 'manual') {
+            deleteMsg = '\n2. 删除原角色「' + char.name + '」';
+          }
+          
+          if (!confirm(`确定将角色「${char.name}」替换为「${targetChar.name}」吗？\n\n此操作将：\n1. 在所有章节、剧情点、伏笔中替换角色名${deleteMsg}\n\n此操作无法撤销。`)) {
+            this.replacingCharacter = false;
+            return;
+          }
+          
+          this.replaceFind = char.name;
+          this.replaceReplace = targetChar.name;
+          await this.replaceAllOccurrences();
+          
+          if (char._source === 'manual') {
+            const delRes = await fetch(`/api/projects/${this.currentProject.id}/characters/${char.id}`, {
+              method: 'DELETE',
+            });
+            if (!delRes.ok) {
+              const delData = await delRes.json();
+              throw new Error('删除原角色失败: ' + (delData.detail || '未知错误'));
+            }
+          }
+          
+          await this.openProject(this.currentProject);
+        }
+        
+        this.showReplaceCharacterModal = false;
+        alert('角色替换完成');
+      } catch (e) {
+        console.error('[替换角色] 失败:', e);
+        alert('替换失败: ' + e.message);
+      } finally {
+        this.replacingCharacter = false;
+      }
+    },
     
     toggleExportChapter(chapterId) {
       const idx = this.exportChapterIds.indexOf(chapterId);
@@ -4655,6 +5246,10 @@ function app() {
     // ─── 分步问卷模式 ───
     async startStepQuestionnaire() {
       try {
+        if (!this.genreList || this.genreList.length === 0) {
+          await this.loadGenres();
+        }
+        
         const res = await fetch('/api/questionnaires', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -4683,15 +5278,132 @@ function app() {
         this.stepQuestionnaire.isNavigating = false;
         this.stepQuestionnaire.lastSelectedAnswer = null;
         this.stepQuestionnaire.lastFocus = null;
+        this.stepQuestionnaire.hasUnsavedChanges = false;
+        this.stepQuestionnaire.selectedGenreTags = [];
+        this.stepQuestionnaire.customGenreInput = '';
         
         await this.loadCurrentStep();
         console.log('[问卷] 加载步骤完成:', JSON.stringify(this.stepQuestionnaire));
         
         this.activePanel = 'step-questionnaire';
         console.log('[问卷] 面板已切换:', this.activePanel);
+        
+        setTimeout(() => {
+          this.initGenreTags();
+          this.renderGenreTagsUI();
+        }, 100);
       } catch (e) { 
         console.error('[问卷] 创建失败:', e);
         alert('创建问卷失败: ' + e.message); 
+      }
+    },
+
+    async startStepQuestionnaireFromInspiration(insp) {
+      try {
+        if (!this.genreList || this.genreList.length === 0) {
+          await this.loadGenres();
+        }
+        
+        const initialAnswers = {};
+        if (insp.tags && insp.tags.length > 0) {
+          initialAnswers.genre = insp.tags.join(',');
+        }
+        if (insp.content) {
+          initialAnswers.core_hook = insp.content.substring(0, 200);
+        }
+        
+        const res = await fetch('/api/questionnaires', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            title: insp.title || '灵感衍生问卷',
+            answers: initialAnswers,
+          }),
+        });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+        }
+        const q = await res.json();
+        console.log('[问卷] 从灵感创建成功:', q);
+        
+        this.showInspirationHub = false;
+        this.currentProject = null;
+        this.currentChapter = null;
+        
+        this.stepQuestionnaire.active = true;
+        this.stepQuestionnaire.questionnaireId = q.id;
+        this.stepQuestionnaire.currentStep = 0;
+        this.stepQuestionnaire.totalSteps = 0;
+        this.stepQuestionnaire.currentQuestion = null;
+        this.stepQuestionnaire.answers = {};
+        this.stepQuestionnaire.customAnswer = '';
+        this.stepQuestionnaire.isCompleted = false;
+        this.stepQuestionnaire.aiCompletedAnswers = {};
+        this.stepQuestionnaire.isAiCompleting = false;
+        this.stepQuestionnaire.isGeneratingOptions = false;
+        this.stepQuestionnaire.isNavigating = false;
+        this.stepQuestionnaire.lastSelectedAnswer = null;
+        this.stepQuestionnaire.lastFocus = null;
+        this.stepQuestionnaire.hasUnsavedChanges = false;
+        this.stepQuestionnaire.selectedGenreTags = [];
+        this.stepQuestionnaire.customGenreInput = '';
+        
+        await this.loadCurrentStep();
+        console.log('[问卷] 加载步骤完成:', JSON.stringify(this.stepQuestionnaire));
+        
+        this.activePanel = 'step-questionnaire';
+        console.log('[问卷] 面板已切换:', this.activePanel);
+        
+        setTimeout(() => {
+          this.initGenreTags();
+          this.renderGenreTagsUI();
+        }, 100);
+      } catch (e) { 
+        console.error('[问卷] 从灵感创建失败:', e);
+        alert('创建问卷失败: ' + e.message); 
+      }
+    },
+
+    async continueQuestionnaire(q) {
+      try {
+        if (!this.genreList || this.genreList.length === 0) {
+          await this.loadGenres();
+        }
+        
+        this.currentProject = null;
+        this.currentChapter = null;
+        
+        this.stepQuestionnaire.active = true;
+        this.stepQuestionnaire.questionnaireId = q.id;
+        this.stepQuestionnaire.currentStep = 0;
+        this.stepQuestionnaire.totalSteps = 0;
+        this.stepQuestionnaire.currentQuestion = null;
+        this.stepQuestionnaire.answers = {};
+        this.stepQuestionnaire.customAnswer = '';
+        this.stepQuestionnaire.isCompleted = false;
+        this.stepQuestionnaire.aiCompletedAnswers = {};
+        this.stepQuestionnaire.isAiCompleting = false;
+        this.stepQuestionnaire.isGeneratingOptions = false;
+        this.stepQuestionnaire.isNavigating = false;
+        this.stepQuestionnaire.lastSelectedAnswer = null;
+        this.stepQuestionnaire.lastFocus = null;
+        this.stepQuestionnaire.hasUnsavedChanges = false;
+        this.stepQuestionnaire.selectedGenreTags = [];
+        this.stepQuestionnaire.customGenreInput = '';
+        
+        await this.loadCurrentStep();
+        console.log('[问卷] 继续问卷完成:', JSON.stringify(this.stepQuestionnaire));
+        
+        this.activePanel = 'step-questionnaire';
+        console.log('[问卷] 面板已切换:', this.activePanel);
+        
+        setTimeout(() => {
+          this.initGenreTags();
+          this.renderGenreTagsUI();
+        }, 100);
+      } catch (e) { 
+        console.error('[问卷] 继续问卷失败:', e);
+        alert('继续问卷失败: ' + e.message); 
       }
     },
 
@@ -4710,6 +5422,13 @@ function app() {
         this.stepQuestionnaire.customAnswer = '';
         
         const questionData = data.question ? JSON.parse(JSON.stringify(data.question)) : null;
+        
+        if (questionData && questionData.type === 'step_multiselect_tags') {
+          const existingGenre = this.stepQuestionnaire.answers['genre'] || '';
+          this.stepQuestionnaire.selectedGenreTags = existingGenre ? existingGenre.split(',').filter(t => t.trim()) : [];
+        } else {
+          this.stepQuestionnaire.selectedGenreTags = [];
+        }
         
         if (this.$set) {
           this.$set(this.stepQuestionnaire, 'currentQuestion', questionData);
@@ -4733,19 +5452,34 @@ function app() {
       }
       
       this.stepQuestionnaire.lastSelectedAnswer = { answer, isCustom };
+      this.stepQuestionnaire.hasUnsavedChanges = true;
+    },
+
+    markUnsaved() {
+      this.stepQuestionnaire.hasUnsavedChanges = true;
     },
 
     async nextStep() {
       if (!this.stepQuestionnaire.currentQuestion) return;
       
+      if (this.stepQuestionnaire.currentQuestion.type === 'step_summary') {
+        return;
+      }
+      
       const questionId = this.stepQuestionnaire.currentQuestion.id;
       let answer = this.stepQuestionnaire.answers[questionId];
       let isCustom = false;
       
-      const hasCustomAnswer = this.stepQuestionnaire.customAnswer && this.stepQuestionnaire.customAnswer.trim();
-      if (this.stepQuestionnaire.lastFocus === 'custom' && hasCustomAnswer) {
-        answer = this.stepQuestionnaire.customAnswer.trim();
-        isCustom = true;
+      if (this.stepQuestionnaire.currentQuestion.type === 'step_multiselect_tags') {
+        answer = this.stepQuestionnaire.selectedGenreTags.join(',');
+        this.stepQuestionnaire.selectedGenreTags = [];
+        this.stepQuestionnaire.customGenreInput = '';
+      } else {
+        const hasCustomAnswer = this.stepQuestionnaire.customAnswer && this.stepQuestionnaire.customAnswer.trim();
+        if (this.stepQuestionnaire.lastFocus === 'custom' && hasCustomAnswer) {
+          answer = this.stepQuestionnaire.customAnswer.trim();
+          isCustom = true;
+        }
       }
       
       if (!answer && this.stepQuestionnaire.currentQuestion.required) {
@@ -4782,6 +5516,7 @@ function app() {
         this.stepQuestionnaire.customAnswer = '';
         this.stepQuestionnaire.lastSelectedAnswer = null;
         this.stepQuestionnaire.lastFocus = null;
+        this.stepQuestionnaire.hasUnsavedChanges = false;
         
 
       } catch (e) { 
@@ -4932,8 +5667,64 @@ function app() {
       } catch (e) { alert('创建项目失败: ' + e.message); }
     },
 
-    exitStepQuestionnaire() {
-      if (!confirm('确定退出问卷吗？已填写的内容将被保存。')) return;
+    async saveStepQuestionnaire() {
+      if (!this.stepQuestionnaire.questionnaireId) return;
+      
+      try {
+        const questionId = this.stepQuestionnaire.currentQuestion?.id;
+        let answer = this.stepQuestionnaire.lastSelectedAnswer;
+        
+        if (questionId && !answer && this.stepQuestionnaire.lastFocus === 'custom') {
+          const customValue = this.stepQuestionnaire.customAnswer?.trim();
+          if (customValue) {
+            answer = customValue;
+          }
+        }
+        
+        if (questionId && answer) {
+          await fetch(`/api/questionnaires/${this.stepQuestionnaire.questionnaireId}/answer-step`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              question_id: questionId,
+              answer: answer,
+              current_step: this.stepQuestionnaire.currentStep,
+            }),
+          });
+        }
+        
+        await fetch(`/api/questionnaires/${this.stepQuestionnaire.questionnaireId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            current_step: this.stepQuestionnaire.currentStep,
+          }),
+        });
+        
+        this.stepQuestionnaire.hasUnsavedChanges = false;
+        alert('问卷进度已保存');
+      } catch (e) {
+        console.error('保存问卷进度失败:', e);
+        alert('保存失败: ' + e.message);
+      }
+    },
+
+    async exitStepQuestionnaire() {
+      if (this.stepQuestionnaire.hasUnsavedChanges) {
+        const choice = confirm('当前有未保存的问卷进度，是否保存后退出？\n\n点击「确定」：保存并退出\n点击「取消」：不保存，直接退出');
+        if (choice) {
+          await this.saveStepQuestionnaire();
+        } else if (this.stepQuestionnaire.questionnaireId) {
+          try {
+            await fetch(`/api/questionnaires/${this.stepQuestionnaire.questionnaireId}`, {
+              method: 'DELETE',
+            });
+          } catch (e) {
+            console.error('删除未保存问卷失败:', e);
+          }
+        }
+      }
+      
       this.stepQuestionnaire = {
         active: false,
         questionnaireId: null,
@@ -4941,11 +5732,15 @@ function app() {
         totalSteps: 0,
         currentQuestion: null,
         answers: {},
+        customAnswer: '',
         isCompleted: false,
         aiCompletedAnswers: {},
         isAiCompleting: false,
+        isGeneratingOptions: false,
+        hasUnsavedChanges: false,
       };
       this.activePanel = 'writing';
+      await this.loadSavedQuestionnaires();
     },
   };
 

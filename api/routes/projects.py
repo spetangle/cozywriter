@@ -6,6 +6,7 @@ from storage.database import get_db
 from storage.models import Project
 from storage.models.workflow import WorkflowRun
 from datetime import datetime
+from logger import logger
 
 
 router = APIRouter(prefix="/api/projects", tags=["项目"])

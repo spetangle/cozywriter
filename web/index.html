@@ -4,9 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CozyWriter - 小说编写助手</title>
-  <script src="/static/js/app.js?v=41"></script>
+  <script src="/static/js/app.js?v=43"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-  <link rel="stylesheet" href="/static/css/style.css?v=11">
+  <link rel="stylesheet" href="/static/css/style.css?v=12">
 
 <style>
 /* === 流水线进度面板 === */
@@ -230,6 +230,7 @@
                 <!-- 一致性检查已自动化、评审是单章节功能,菜单移除;功能保留在背景自动跑 -->
                 <button @click="activePanel = 'plot-tracker'; _saveLastView()" :class="{ active: activePanel === 'plot-tracker' }">📊 剧情追踪</button>
                 <button @click="activePanel = 'inspirations'; _saveLastView()" :class="{ active: activePanel === 'inspirations' }">💡 灵感</button>
+                <button @click="openTextReplaceModal()">🔄 替换</button>
                 <button @click="openExportModal()">📤 导出</button>
               </div>
             </div>
@@ -261,30 +262,95 @@
                 <div class="welcome-actions">
                   <button class="btn-primary" @click="openCreateProjectModal()">创建小说</button>
                   <button class="btn-secondary" @click="startStepQuestionnaire()">🎯 从创意问卷开始</button>
-                  <template x-if="savedQuestionnaires.length > 0">
-                    <button class="btn-secondary" @click="activePanel = 'questionnaire'">📋 继续问卷</button>
-                  </template>
                 </div>
-                <template x-if="projects.length > 0">
-                  <div class="project-list">
-                    <h3>已有项目</h3>
-                    <template x-for="p in projects" :key="p.id">
-                      <div class="project-card" @click="openProject(p)">
-                        <div class="project-card-header">
-                          <h4 x-text="p.title"></h4>
-                          <span class="project-genre-tag" x-show="p.genre" x-text="p.genre"></span>
+
+                <div class="welcome-tabs">
+                  <button 
+                    class="welcome-tab" 
+                    :class="{ active: welcomeTab === 'projects' }"
+                    @click="welcomeTab = 'projects'"
+                  >
+                    📚 项目 <span class="tab-count" x-show="projects.length" x-text="projects.length"></span>
+                  </button>
+                  <button 
+                    class="welcome-tab" 
+                    :class="{ active: welcomeTab === 'creative-pool' }"
+                    @click="switchToCreativePool()"
+                  >
+                    🎯 创意池 <span class="tab-count" x-show="savedQuestionnaires.length" x-text="savedQuestionnaires.length"></span>
+                  </button>
+                </div>
+
+                <div class="welcome-tab-content">
+                  <div x-show="welcomeTab === 'projects'">
+                    <div x-show="projects.length > 0" class="project-list">
+                      <template x-for="p in projects" :key="p.id">
+                        <div class="project-card" @click="openProject(p)">
+                          <div class="project-card-header">
+                            <h4 x-text="p.title"></h4>
+                            <span class="project-genre-tag" x-show="p.genre" x-text="p.genre"></span>
+                          </div>
+                          <p class="project-card-desc" x-text="p.description || '暂无描述'"></p>
+                          <div class="project-meta">
+                            <span x-show="p.genre" style="display: none;">📚 <span x-text="p.genre" style="display: none;"></span></span>
+                            <span>📖 <span x-text="`${p.chapter_count || 0} / ${p.total_chapters || '?'} 章`"></span></span>
+                            <span>📝 <span x-text="`每章 ${(p.target_word_count || 0)} 字`"></span></span>
+                            <span>📅 <span x-text="(p.created_at || '').slice(0,10)"></span></span>
+                          </div>
                         </div>
-                        <p class="project-card-desc" x-text="p.description || '暂无描述'"></p>
-                        <div class="project-meta">
-                          <span x-show="p.genre" style="display: none;">📚 <span x-text="p.genre" style="display: none;"></span></span>
-                          <span>📖 <span x-text="`${p.chapter_count || 0} / ${p.total_chapters || '?'} 章`"></span></span>
-                          <span>📝 <span x-text="`每章 ${(p.target_word_count || 0)} 字`"></span></span>
-                          <span>📅 <span x-text="(p.created_at || '').slice(0,10)"></span></span>
-                      </div>
-                      </div>
-                    </template>
+                      </template>
+                    </div>
+                    <div x-show="projects.length === 0" class="empty-state">
+                      <p>暂无项目，点击上方「创建小说」开始创作</p>
+                    </div>
                   </div>
-                </template>
+
+                  <div x-show="welcomeTab === 'creative-pool'">
+                    <div x-show="selectedQuestionnaireIds.length > 0" class="creative-pool-batch-bar">
+                      <span>已选择 <span x-text="selectedQuestionnaireIds.length"></span> 项</span>
+                      <div class="batch-actions">
+                        <button class="btn-secondary btn-small" @click="clearSelectedQuestionnaires()">取消选择</button>
+                        <button class="btn-danger btn-small" @click="batchDeleteQuestionnaires()">🗑️ 批量删除</button>
+                      </div>
+                    </div>
+                    <div x-show="savedQuestionnaires.length > 0" class="creative-pool-header">
+                      <label class="select-all-checkbox">
+                        <input type="checkbox" x-model="selectAllQuestionnaires" @change="toggleSelectAllQuestionnaires()" />
+                        全选
+                      </label>
+                      <span class="creative-pool-count" x-text="`共 ${savedQuestionnaires.length} 项`"></span>
+                    </div>
+                    <div x-show="savedQuestionnaires.length > 0" class="creative-pool-scroll">
+                      <template x-for="q in savedQuestionnaires" :key="q.id">
+                        <div class="creative-pool-item" :class="{ selected: selectedQuestionnaireIds.includes(q.id) }">
+                          <input type="checkbox" 
+                                 class="creative-pool-checkbox"
+                                 :checked="selectedQuestionnaireIds.includes(q.id)"
+                                 @change="toggleQuestionnaireSelection(q.id)" />
+                          <div class="creative-pool-info">
+                            <div class="creative-pool-title-row">
+                              <h4 x-text="q.title || '未命名创意'"></h4>
+                              <span class="project-genre-tag" x-show="q.answers?.genre" x-text="q.answers.genre"></span>
+                            </div>
+                            <p class="creative-pool-desc" x-text="q.answers?.theme || q.answers?.core_hook || '暂无描述'"></p>
+                            <div class="creative-pool-meta">
+                              <span>📊 <span x-text="`第 ${q.current_step + 1} / 11 步`"></span></span>
+                              <span>📝 <span x-text="`已回答 ${Object.keys(q.answers || {}).length} 题`"></span></span>
+                              <span>📅 <span x-text="formatDateTime(q.updated_at)"></span></span>
+                            </div>
+                          </div>
+                          <div class="creative-pool-actions">
+                            <button class="btn-primary btn-small" @click="continueQuestionnaire(q)">📝 继续问卷</button>
+                            <button class="btn-danger btn-small" @click="deleteQuestionnaire(q.id)">🗑️ 删除</button>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                    <div x-show="savedQuestionnaires.length === 0" class="empty-state">
+                      <p>暂无创意草稿，点击上方「从创意问卷开始」创建</p>
+                    </div>
+                  </div>
+                </div>
               </div>
             </template>
 
@@ -790,23 +856,14 @@
                   <div class="panel-section">
                     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                       <button class="btn-primary" @click="showCharacterForm = true">➕ 添加角色</button>
-                      <button class="btn-secondary" @click="rerunBootstrapStageFromPanel('stage_3a_protagonist')"
-                              :disabled="!currentProject || rerunStageBusy['stage_3a_protagonist']"
-                              :title="rerunStageBtnTitle('stage_3a_protagonist')">
-                        <span x-show="!rerunStageBusy['stage_3a_protagonist']">🔄 重新生成主角</span>
-                        <span x-show="rerunStageBusy['stage_3a_protagonist']">⏳ 生成中...</span>
+                      <button class="btn-secondary" @click="openReplaceCharacterModal()"
+                              :disabled="!currentProject || characters.length === 0">
+                        🔄 替换角色
                       </button>
-                      <button class="btn-secondary" @click="rerunBootstrapStageFromPanel('stage_3b_antagonist')"
-                              :disabled="!currentProject || rerunStageBusy['stage_3b_antagonist']"
-                              :title="rerunStageBtnTitle('stage_3b_antagonist')">
-                        <span x-show="!rerunStageBusy['stage_3b_antagonist']">🔄 重新生成反派</span>
-                        <span x-show="rerunStageBusy['stage_3b_antagonist']">⏳ 生成中...</span>
-                      </button>
-                      <button class="btn-secondary" @click="rerunBootstrapStageFromPanel('stage_3c_supporting')"
-                              :disabled="!currentProject || rerunStageBusy['stage_3c_supporting']"
-                              :title="rerunStageBtnTitle('stage_3c_supporting')">
-                        <span x-show="!rerunStageBusy['stage_3c_supporting']">🔄 重新生成配角</span>
-                        <span x-show="rerunStageBusy['stage_3c_supporting']">⏳ 生成中...</span>
+                      <button class="btn-secondary" @click="openDeleteCharacterModal()"
+                              :disabled="!currentProject || characters.length === 0"
+                              style="color:#dc2626">
+                        🗑️ 删除角色
                       </button>
                     </div>
 
@@ -820,6 +877,7 @@
                         <div class="character-card-full" :class="{ 'ai-character-card': c._source === 'ai' }">
                           <div class="char-header">
                             <span class="char-name" x-text="c.name || '未命名'"></span>
+                            <span style="font-size:11px;color:var(--text-muted);margin-left:4px" x-text="c._source === 'manual' ? ('ID:' + c.id) : ''"></span>
                             <span class="char-role-badge" x-text="c.role || '配角'"></span>
                             <!-- AI 角标：仅在 AI 生成角色时显示 -->
                             <span x-show="c._source === 'ai'"
@@ -1739,7 +1797,10 @@
               <div class="panel-page step-questionnaire-page">
                 <div class="panel-page-header">
                   <h2>🎯 创意问卷</h2>
-                  <button class="btn-secondary btn-small" @click="exitStepQuestionnaire()">✕ 退出</button>
+                  <div class="step-q-header-actions">
+                    <button class="btn-secondary" @click="saveStepQuestionnaire()">💾 保存问卷进度</button>
+                    <button class="btn-danger step-q-exit-btn" @click="exitStepQuestionnaire()">✕ 退出问卷</button>
+                  </div>
                 </div>
                 
                 <div class="step-q-container">
@@ -1747,33 +1808,126 @@
                   <div class="step-q-progress">
                     <div class="step-q-progress-steps">
                       <template x-for="i in stepQuestionnaire.totalSteps" :key="i">
-                        <div 
-                          class="step-q-progress-step" 
-                          :class="{ 
-                            completed: i <= stepQuestionnaire.currentStep, 
-                            active: i === stepQuestionnaire.currentStep + 1 
-                          }"
-                        >
-                          <span class="step-q-progress-number" x-text="i"></span>
-                          <span class="step-q-progress-label" x-text="i <= stepQuestionnaire.currentStep ? '完成' : ''"></span>
+                        <div class="step-q-progress-item">
+                          <div 
+                            class="step-q-progress-step" 
+                            :class="{ 
+                              completed: i <= stepQuestionnaire.currentStep, 
+                              active: i === stepQuestionnaire.currentStep + 1 
+                            }"
+                          >
+                            <span class="step-q-progress-number" x-text="i"></span>
+                            <span class="step-q-progress-label" x-text="i <= stepQuestionnaire.currentStep ? '🌼' : '🌱'"></span>
+                          </div>
+                          <div 
+                            class="step-q-progress-line" 
+                            :class="{ completed: i < stepQuestionnaire.currentStep }"
+                            x-show="i < stepQuestionnaire.totalSteps"
+                          ></div>
                         </div>
-                        <div 
-                          class="step-q-progress-line" 
-                          :class="{ completed: i < stepQuestionnaire.currentStep }"
-                          x-show="i < stepQuestionnaire.totalSteps"
-                        ></div>
                       </template>
                     </div>
                     <div class="step-q-progress-text" x-text="`第 ${stepQuestionnaire.currentStep + 1} / ${stepQuestionnaire.totalSteps} 步`"></div>
                   </div>
 
                   <!-- 必填提示 -->
-                  <div class="step-q-required-hint" x-show="stepQuestionnaire.currentQuestion && stepQuestionnaire.currentQuestion.required">
+                  <div class="step-q-required-hint" x-show="stepQuestionnaire.currentQuestion && stepQuestionnaire.currentQuestion.required && stepQuestionnaire.currentQuestion.type !== 'step_summary'">
                     <span class="step-q-required-star">*</span> 必填项
                   </div>
 
+                  <!-- 汇总步骤 -->
+                  <template x-if="stepQuestionnaire.currentQuestion && stepQuestionnaire.currentQuestion.type === 'step_summary'">
+                    <div class="step-q-summary">
+                      <div class="step-q-summary-header">
+                        <div class="step-q-summary-icon">📋</div>
+                        <h3>问卷信息汇总</h3>
+                        <p>请确认以下设定，确认无误后点击"创建小说项目"</p>
+                      </div>
+                      <div class="step-q-summary-content">
+                        <div class="step-q-summary-section">
+                          <h4>📖 基本信息</h4>
+                          <div class="step-q-summary-item">
+                            <span class="step-q-summary-label">小说名称</span>
+                            <span class="step-q-summary-value" x-text="stepQuestionnaire.answers['novel_title'] || '未命名'"></span>
+                          </div>
+                          <div class="step-q-summary-item">
+                            <span class="step-q-summary-label">题材</span>
+                            <span class="step-q-summary-value" x-text="stepQuestionnaire.answers['genre'] || '未选择'"></span>
+                          </div>
+                          <div class="step-q-summary-item">
+                            <span class="step-q-summary-label">核心主题</span>
+                            <span class="step-q-summary-value" x-text="stepQuestionnaire.answers['theme'] || '未选择'"></span>
+                          </div>
+                          <div class="step-q-summary-item">
+                            <span class="step-q-summary-label">核心看点</span>
+                            <span class="step-q-summary-value" x-text="stepQuestionnaire.answers['core_hook'] || '未选择'"></span>
+                          </div>
+                        </div>
+                        <div class="step-q-summary-section">
+                          <h4>🎭 人物设定</h4>
+                          <div class="step-q-summary-item">
+                            <span class="step-q-summary-label">主角</span>
+                            <span class="step-q-summary-value" x-text="stepQuestionnaire.answers['protagonist'] || '未设定'"></span>
+                          </div>
+                          <div class="step-q-summary-item">
+                            <span class="step-q-summary-label">反派</span>
+                            <span class="step-q-summary-value" x-text="stepQuestionnaire.answers['antagonist'] || '未设定'"></span>
+                          </div>
+                        </div>
+                        <div class="step-q-summary-section">
+                          <h4>🌍 世界设定</h4>
+                          <div class="step-q-summary-item">
+                            <span class="step-q-summary-label">世界观</span>
+                            <span class="step-q-summary-value" x-text="stepQuestionnaire.answers['world_setting'] || '未设定'"></span>
+                          </div>
+                          <div class="step-q-summary-item">
+                            <span class="step-q-summary-label">社会结构</span>
+                            <span class="step-q-summary-value" x-text="stepQuestionnaire.answers['society_structure'] || '未设定'"></span>
+                          </div>
+                        </div>
+                        <div class="step-q-summary-section">
+                          <h4>✍️ 写作风格</h4>
+                          <div class="step-q-summary-item">
+                            <span class="step-q-summary-label">基调</span>
+                            <span class="step-q-summary-value" x-text="stepQuestionnaire.answers['tone'] || '未选择'"></span>
+                          </div>
+                          <div class="step-q-summary-item">
+                            <span class="step-q-summary-label">每章字数</span>
+                            <span class="step-q-summary-value" x-text="stepQuestionnaire.answers['chapter_word_count'] ? stepQuestionnaire.answers['chapter_word_count'] + '字' : '未选择'"></span>
+                          </div>
+                          <div class="step-q-summary-item">
+                            <span class="step-q-summary-label">总章节数</span>
+                            <span class="step-q-summary-value" x-text="stepQuestionnaire.answers['total_chapters'] ? stepQuestionnaire.answers['total_chapters'] + '章' : '未选择'"></span>
+                          </div>
+                          <div class="step-q-summary-item">
+                            <span class="step-q-summary-label">文笔风格</span>
+                            <span class="step-q-summary-value" x-text="stepQuestionnaire.answers['style'] || '未选择'"></span>
+                          </div>
+                          <div class="step-q-summary-item">
+                            <span class="step-q-summary-label">节奏偏好</span>
+                            <span class="step-q-summary-value" x-text="stepQuestionnaire.answers['pacing'] || '未选择'"></span>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="step-q-nav">
+                        <button 
+                          class="btn-secondary step-q-nav-btn" 
+                          @click="prevStep()"
+                        >
+                          ← 返回修改
+                        </button>
+                        <button 
+                          class="btn-primary step-q-nav-btn" 
+                          @click="buildProjectFromStepQuestionnaire()"
+                        >
+                          🎯 创建小说项目
+                        </button>
+                      </div>
+                    </div>
+                  </template>
+
                   <!-- 问卷进行中 -->
-                  <template x-if="!stepQuestionnaire.isCompleted && stepQuestionnaire.currentQuestion">
+                  <template x-if="!stepQuestionnaire.isCompleted && stepQuestionnaire.currentQuestion && stepQuestionnaire.currentQuestion.type !== 'step_summary'">
                     <div class="step-q-content">
                       <div class="step-q-question">
                         <span class="step-q-question-number" x-text="`Q${stepQuestionnaire.currentStep + 1}`"></span>
@@ -1798,6 +1952,16 @@
                           </button>
                         </div>
                       </template>
+
+                      <!-- 多选标签类型（题材） -->
+                      <div x-show="stepQuestionnaire.currentQuestion.type === 'step_multiselect_tags'" class="step-q-choice-container">
+                        <div id="genreTagsContainer" class="genre-tags-grid"></div>
+                        <div class="genre-custom-row">
+                          <input type="text" id="customGenreInput"
+                                 placeholder="自定义新题材后回车" style="max-width: 300px; height: 32px; margin: 20px; border-radius: 8px;">
+                          <button class="btn-small" id="addCustomGenreBtn" style="height: 32px; max-width: 32px; margin-top: 20px;">+</button>
+                        </div>
+                      </div>
 
                       <!-- 选项选择类型 -->
                       <div x-show="stepQuestionnaire.currentQuestion.type === 'step_choice'" class="step-q-choice-container">
@@ -2164,6 +2328,178 @@
             <div style="display:flex;justify-content:flex-end;gap:8px">
               <button class="btn-secondary" @click="showExportModal = false">取消</button>
               <button class="btn-primary" @click="doExport()">📥 导出下载</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ═══ 替换角色浮层 ═══ -->
+    <template x-if="showReplaceCharacterModal">
+      <div class="modal-overlay" @click.self="showReplaceCharacterModal = false">
+        <div class="modal" style="max-width:720px">
+          <header class="pipeline-header">
+            <h3>🔄 替换角色</h3>
+            <button class="modal-close-x" @click="showReplaceCharacterModal = false">×</button>
+          </header>
+          <div style="padding:20px">
+            <div style="margin-bottom:16px">
+              <label style="display:block;font-weight:600;margin-bottom:8px">选择要替换的角色</label>
+              <select x-model="replaceCharacterId" @change="loadCharacterReferences()" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px">
+                <option value="">请选择角色</option>
+                <template x-for="char in mergedCharacters()" :key="char._source + '-' + (char.id || char.name)">
+                  <option :value="char._source === 'manual' ? char.id : ('ai-' + char.name)" x-text="char.name + ' (' + char.role + ') ' + (char._source === 'manual' ? ('ID:' + char.id) : 'AI')"></option>
+                </template>
+              </select>
+            </div>
+            
+            <template x-if="replaceCharacterReferences.total_count > 0">
+              <div style="margin-bottom:16px;padding:12px;background:#fef3c7;border-radius:6px">
+                <div style="font-weight:600;margin-bottom:8px" x-text="`「${replaceCharacterReferences.character_name}」的关联信息`"></div>
+                <div x-show="replaceCharacterReferences.chapters.length > 0" style="margin-bottom:8px">
+                  <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px" x-text="`章节（${replaceCharacterReferences.chapters.length}处）`"></div>
+                  <div style="font-size:12px" x-text="replaceCharacterReferences.chapters.map(c => `${c.order + 1}. ${c.title}`).join(', ')"></div>
+                </div>
+                <div x-show="replaceCharacterReferences.plot_points.length > 0" style="margin-bottom:8px">
+                  <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px" x-text="`剧情点（${replaceCharacterReferences.plot_points.length}处）`"></div>
+                  <div style="font-size:12px" x-text="replaceCharacterReferences.plot_points.map(p => p.title).join(', ')"></div>
+                </div>
+                <div x-show="replaceCharacterReferences.foreshadows.length > 0">
+                  <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px" x-text="`伏笔（${replaceCharacterReferences.foreshadows.length}处）`"></div>
+                  <div style="font-size:12px" x-text="replaceCharacterReferences.foreshadows.map(f => f.title).join(', ')"></div>
+                </div>
+              </div>
+            </template>
+            
+            <div x-show="replaceCharacterReferences.total_count === 0 && replaceCharacterId" style="text-align:center;padding:20px;color:var(--text-muted)">
+              未找到该角色的关联信息
+            </div>
+            
+            <template x-if="replaceCharacterId">
+              <div style="margin-bottom:16px;padding:12px;background:#e0f2fe;border-radius:6px">
+                <div style="font-weight:600;margin-bottom:8px">选择替换方式</div>
+                <label style="display:block;margin-bottom:8px;cursor:pointer">
+                  <input type="radio" x-model="replaceMode" value="generate" checked style="margin-right:8px">
+                  🤖 生成新角色
+                </label>
+                <label style="display:block;margin-bottom:8px;cursor:pointer">
+                  <input type="radio" x-model="replaceMode" value="existing" style="margin-right:8px">
+                  👤 使用已有角色替换
+                </label>
+                
+                <template x-if="replaceMode === 'existing'">
+                  <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+                    <label style="display:block;font-weight:600;margin-bottom:8px">选择目标角色</label>
+                    <select x-model="replaceWithCharacterId" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px">
+                      <option value="">请选择目标角色</option>
+                      <template x-for="char in mergedCharacters().filter(c => (c._source === 'manual' ? c.id : ('ai-' + c.name)) != replaceCharacterId)" :key="char._source + '-' + (char.id || char.name)">
+                        <option :value="char._source === 'manual' ? char.id : ('ai-' + char.name)" x-text="char.name + ' (' + char.role + ') ' + (char._source === 'manual' ? ('ID:' + char.id) : 'AI')"></option>
+                      </template>
+                    </select>
+                  </div>
+                </template>
+              </div>
+            </template>
+            
+            <div style="display:flex;gap:8px">
+              <button class="btn-primary" @click="startReplaceCharacter()" :disabled="!canStartReplace()" x-show="!replacingCharacter">开始替换</button>
+              <span x-show="replacingCharacter" style="line-height:28px;color:var(--text-muted)">⏳ 处理中...</span>
+              <button class="btn-secondary" @click="showReplaceCharacterModal = false">取消</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ═══ 文本替换浮层 ═══ -->
+    <!-- ═══ 删除角色浮层 ═══ -->
+    <template x-if="showDeleteCharacterModal">
+      <div class="modal-overlay" @click.self="showDeleteCharacterModal = false">
+        <div class="modal" style="max-width:600px">
+          <header class="pipeline-header">
+            <h3>🗑️ 删除角色</h3>
+            <button class="modal-close-x" @click="showDeleteCharacterModal = false">×</button>
+          </header>
+          <div style="padding:20px">
+            <div style="margin-bottom:16px">
+              <label style="display:block;font-weight:600;margin-bottom:8px">选择要删除的角色</label>
+              <select x-model="deleteCharacterId" @change="checkDeleteCharacter()" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px">
+                <option value="">请选择角色</option>
+                <template x-for="char in characters" :key="char.id">
+                  <option :value="char.id" x-text="char.name + ' (' + char.role + ') ID:' + char.id"></option>
+                </template>
+              </select>
+            </div>
+            
+            <template x-if="deleteCharacterId && !deleteCharacterChecking">
+              <template x-if="deleteCharacterCanDelete">
+                <div style="margin-bottom:16px;padding:12px;background:#dcfce7;border-radius:6px;text-align:center">
+                  ✅ 该角色无剧情关联，可以删除
+                </div>
+              </template>
+              <template x-else>
+                <div style="margin-bottom:16px;padding:12px;background:#fee2e2;border-radius:6px">
+                  <div style="font-weight:600;margin-bottom:8px">❌ 该角色在剧情中存在关联，无法直接删除</div>
+                  <div style="font-size:12px;color:var(--text-muted)">
+                    请先使用「替换角色」功能清理该角色的关联内容，然后再尝试删除。
+                  </div>
+                </div>
+              </template>
+            </template>
+            
+            <div x-show="deleteCharacterChecking" style="text-align:center;padding:20px;color:var(--text-muted)">
+              ⏳ 查询中...
+            </div>
+            
+            <div style="display:flex;gap:8px">
+              <button class="btn-primary" @click="confirmDeleteCharacter()" 
+                      :disabled="!deleteCharacterId || !deleteCharacterCanDelete" 
+                      style="color:white;background:#dc2626;border-color:#dc2626">
+                确认删除
+              </button>
+              <button class="btn-secondary" @click="showDeleteCharacterModal = false">取消</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <template x-if="showTextReplaceModal">
+      <div class="modal-overlay" @click.self="showTextReplaceModal = false">
+        <div class="modal" style="max-width:720px">
+          <header class="pipeline-header">
+            <h3>🔄 文本替换</h3>
+            <button class="modal-close-x" @click="showTextReplaceModal = false">×</button>
+          </header>
+          <div style="padding:20px">
+            <div style="margin-bottom:16px">
+              <label style="display:block;font-weight:600;margin-bottom:8px">查找内容</label>
+              <input type="text" x-model="replaceFind" placeholder="输入要查找的文本" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px">
+            </div>
+            <div style="margin-bottom:16px">
+              <label style="display:block;font-weight:600;margin-bottom:8px">替换内容</label>
+              <input type="text" x-model="replaceReplace" placeholder="输入替换后的文本" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px">
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:16px">
+              <button class="btn-primary" @click="findReplaceOccurrences()" :disabled="!replaceFind.trim()">🔍 查找</button>
+              <button class="btn-secondary" @click="replaceAllOccurrences()" :disabled="!replaceFind.trim() || replaceResults.length === 0" style="color:#dc2626">✅ 全部替换</button>
+              <button class="btn-secondary" @click="showTextReplaceModal = false">取消</button>
+            </div>
+            <div x-show="replaceResults.length > 0" style="max-height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:12px">
+              <div style="font-weight:600;margin-bottom:8px" x-text="`找到 ${replaceResults.length} 处匹配`"></div>
+              <template x-for="(res, idx) in replaceResults" :key="idx">
+                <div style="padding:8px;border-bottom:1px solid var(--border);margin-bottom:4px">
+                  <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px" x-text="`${res.location}（第 ${res.chapter_order + 1} 章）`"></div>
+                  <div style="font-size:13px">
+                    <span x-text="res.before"></span>
+                    <span style="background:#fef08a;font-weight:600" x-text="res.match"></span>
+                    <span x-text="res.after"></span>
+                  </div>
+                </div>
+              </template>
+            </div>
+            <div x-show="replaceResults.length === 0 && replaceFind.trim()" style="text-align:center;padding:20px;color:var(--text-muted)">
+              未找到匹配内容
             </div>
           </div>
         </div>
@@ -2586,55 +2922,54 @@
     <!-- ═══ 项目设置弹窗 ═══ -->
     <template x-if="showProjectSettings">
       <div class="modal-overlay" @click.self="showProjectSettings = false">
-        <div class="modal modal-wide">
+        <div class="modal modal-wide modal-scrollable">
           <h3>⚙️ 项目设置</h3>
-          <template x-if="currentProject">
-            <div class="settings-form">
-              <div class="setting-row">
-                <label>写作风格</label>
-                <select x-model="currentProject.writing_style">
-                  <option value="优美">优美</option>
-                  <option value="幽默">幽默</option>
-                  <option value="冷峻">冷峻</option>
-                  <option value="平实">平实</option>
-                  <option value="诗意">诗意</option>
-                </select>
-              </div>
-              <div class="setting-row">
-                <label>去 AI 味</label>
-                <div class="toggle-row">
-                  <label class="toggle-switch">
-                    <input type="checkbox" :checked="currentProject.ai味去除程度 > 0" @change="currentProject.ai味去除程度 = $event.target.checked ? 8 : 0">
-                    <span class="toggle-slider"></span>
-                  </label>
-                  <span x-text="currentProject.ai味去除程度 > 0 ? '已开启（自动去除AI痕迹）' : '已关闭'"></span>
+          <div class="modal-content">
+            <template x-if="currentProject">
+              <div class="settings-form">
+                <div class="setting-row">
+                  <label>写作风格</label>
+                  <select x-model="currentProject.writing_style">
+                    <option value="优美">优美</option>
+                    <option value="幽默">幽默</option>
+                    <option value="冷峻">冷峻</option>
+                    <option value="平实">平实</option>
+                    <option value="诗意">诗意</option>
+                  </select>
                 </div>
-                <p class="hint">开启后，生成内容会自动去除AI写作痕迹</p>
+                <div class="setting-row">
+                  <label>去 AI 味</label>
+                  <div class="toggle-row">
+                    <label class="toggle-switch">
+                      <input type="checkbox" :checked="currentProject.ai味去除程度 > 0" @change="currentProject.ai味去除程度 = $event.target.checked ? 8 : 0">
+                      <span class="toggle-slider"></span>
+                    </label>
+                    <span x-text="currentProject.ai味去除程度 > 0 ? '已开启（自动去除AI痕迹）' : '已关闭'"></span>
+                  </div>
+                  <p class="hint">开启后，生成内容会自动去除AI写作痕迹</p>
+                </div>
+                <div class="setting-row-row">
+                  <div class="setting-row">
+                    <label>每章目标字数</label>
+                    <input type="number" x-model="currentProject.target_word_count" style="width: 100px;">
+                  </div>
+                  <div class="setting-row">
+                    <label>字数下限</label>
+                    <input type="number" x-model="currentProject.word_count_min" style="width: 100px;">
+                  </div>
+                  <div class="setting-row">
+                    <label>字数上限</label>
+                    <input type="number" x-model="currentProject.word_count_max" style="width: 100px;">
+                  </div>
+                </div>
               </div>
-              <div class="setting-row">
-                <label>每章目标字数</label>
-                <input type="number" x-model="currentProject.target_word_count">
-              </div>
-              <div class="setting-row">
-                <label>字数下限</label>
-                <input type="number" x-model="currentProject.word_count_min">
-              </div>
-              <div class="setting-row">
-                <label>字数上限</label>
-                <input type="number" x-model="currentProject.word_count_max">
-              </div>
-            </div>
-          </template>
-          <div class="modal-actions">
+            </template>
+          </div>
+          <div class="modal-footer">
             <button class="btn-secondary" @click="showProjectSettings = false">取消</button>
             <button class="btn-primary" @click="saveProjectSettings()">保存</button>
-            <template x-if="currentProject">
-              <button class="btn-danger" @click="deleteCurrentProject()">🗑️ 删除项目</button>
-              <button class="btn-primary" @click="regenerateSettings()" :disabled="isRegeneratingSettings">
-                <span x-show="isRegeneratingSettings">⏳ 正在重新生成...</span>
-                <span x-show="!isRegeneratingSettings">🔄 重新生成全部设定</span>
-              </button>
-            </template>
+            <button class="btn-danger" @click="deleteCurrentProject()" x-show="currentProject">🗑️ 删除项目</button>
+            <button class="btn-primary" @click="regenerateSettings()" :disabled="isRegeneratingSettings" x-show="currentProject" x-text="isRegeneratingSettings ? '⏳ 正在重新生成...' : '🔄 重新生成全部设定'"></button>
           </div>
         </div>
       </div>
@@ -2936,7 +3271,7 @@
                     <select @change="addGenreToNewProject($event)">
                       <option value="">+ 添加题材...</option>
                       <template x-for="g in genreList" :key="g.id">
-                        <option :value="g.name" x-text="g.name + (g.is_system ? '' : ' (自定义)')"></option>
+                        <option :value="g.name" x-text="g.name"></option>
                       </template>
                     </select>
                     <!-- 用户自添加 -->
@@ -3559,7 +3894,8 @@
                 </div>
                 <div class="insp-actions">
                   <button class="btn-small" @click="openInspirationEditor(insp)">✏️ 编辑</button>
-                  <button class="btn-small btn-primary" @click="openCreateProjectFromInspiration(insp)">📖 创建小说</button>
+                  <button class="btn-small btn-primary" @click="startStepQuestionnaireFromInspiration(insp)">📝 继续问卷</button>
+                  <button class="btn-small" @click="openCreateProjectFromInspiration(insp)">📖 创建小说</button>
                   <button class="btn-small" @click="openFuseInspiration(insp)">🔀 融合</button>
                   <button class="btn-small btn-danger" @click="deleteInspirationById(insp.id)">🗑</button>
                 </div>

@@ -148,7 +148,7 @@ STAGE_PROMPTS = {
             "4. 推荐 ai_removal 数值（1-10）\n"
         ),
         "json_schema": {
-            "total_chapters": 30,
+            "total_chapters": "（必须等于硬约束中的 total_chapters）",
             "est_total_words": 90000,
             "ai_removal": 7,
             "rationale": "推导理由（1-2 句话）",
@@ -187,11 +187,12 @@ STAGE_PROMPTS = {
         "task": (
             "根据题材 + 主旨 + 世界观，设计主角。\n"
             "要求：\n"
-            "1. name：角色名（2-3 个汉字）\n"
+            "1. name：角色名，必须包含姓氏和名字（2-4 个汉字，如：张明、李婉儿），禁止只有名字没有姓氏\n"
             "2. role：固定为 '主角'\n"
             "3. profile 字段：age（数字）, gender（男/女/其他）, identity（身份 1 句）,"
             "personality（性格 2-3 个关键词）, goal（核心目标 1 句）, weakness（弱点 1 句）,"
-            "ability（能力/资源 1 句）, catchphrase（口头禅 1 句，可空）, background（背景 1-2 句）\n"
+            "ability（能力/资源 1 句）, catchphrase（口头禅 1 句，可空）, background（背景 1-2 句）,"
+            "code_name（代号/昵称，可空，如：'暗夜'、'小羽'）\n"
             "4. description：补充描述（3-5 句）\n"
         ),
         "json_schema": {
@@ -207,6 +208,7 @@ STAGE_PROMPTS = {
                 "ability": "...",
                 "catchphrase": "...",
                 "background": "...",
+                "code_name": "...",
             },
             "description": "...",
         },
@@ -699,6 +701,10 @@ def run_bootstrap_sync(run_id: int, user_input: dict, db=None) -> dict:
                     "data": result,
                     "completed_at": time.time(),
                 }
+
+                if stage_id == "stage_1_base" and "total_chapters" in locked:
+                    stage_results[stage_id]["data"]["total_chapters"] = locked["total_chapters"]
+
                 completed_set.add(stage_id)
                 llm_logs.append({
                     "stage": stage_id,
@@ -953,15 +959,18 @@ def _continue_chapter_outlines_if_needed(
             missing_nums = list(range(1, total + 1))
         else:
             max_existing = max(existing_nums)
-            # 决定起始章: 用户传入的 starting_chapter > max_existing ?
-            #   是 → 从用户指定的 starting_chapter 开始(扩写范围更大)
-            #   否 → 从 max_existing+1 开始(老章完全不动,只 append)
-            actual_start = starting_chapter if (starting_chapter and starting_chapter > max_existing) else (max_existing + 1)
-            if starting_chapter and starting_chapter <= max_existing:
-                logger.info(
-                    f"[continue] starting_chapter={starting_chapter} <= existing_max={max_existing},"
-                    f"改用 max_existing+1={max_existing+1}"
-                )
+            # 决定起始章: 用户传入的 starting_chapter 优先(用于重新构思模式)
+            #   starting_chapter > 0 → 从用户指定的 starting_chapter 开始(重新构思模式)
+            #   否则 → 从 max_existing+1 开始(老章完全不动,只 append)
+            if starting_chapter and starting_chapter > 0:
+                actual_start = starting_chapter
+                if starting_chapter <= max_existing:
+                    logger.info(
+                        f"[continue] 重新构思模式: starting_chapter={starting_chapter} <= existing_max={max_existing},"
+                        f"LLM 将重新生成第 {starting_chapter}-{total} 章"
+                    )
+            else:
+                actual_start = max_existing + 1
             missing_nums = list(range(actual_start, total + 1))
     else:
         # auto 模式:覆盖 1~total
@@ -987,10 +996,16 @@ def _continue_chapter_outlines_if_needed(
     )
 
     # 续写时把上下文压成简短摘要(避免 prompt 超长)
+    # 合并已有架构和新扩写的架构,让 LLM 在续写时能参考新架构
+    merged_volumes = list(first_result.get("volumes", [])) + list(first_result.get("_extend_volumes", []))
+    merged_plot_lines = list(first_result.get("plot_lines", [])) + list(first_result.get("_extend_plot_lines", []))
+    struct = dict(first_result.get("structure", {}))
+    struct["acts"] = list(struct.get("acts", [])) + list(first_result.get("_extend_structure_acts", []))
+    
     context_summary = {
-        "volumes": first_result.get("volumes", []),
-        "plot_lines": [pl.get("title", "") for pl in first_result.get("plot_lines", [])],
-        "structure": first_result.get("structure", {}),
+        "volumes": merged_volumes,
+        "plot_lines": [pl.get("title", "") for pl in merged_plot_lines],
+        "structure": struct,
         "pacing_notes": first_result.get("pacing_notes", ""),
         "outline_text": (first_result.get("outline_text", "") or "")[:500],
         "existing_chapter_titles": [
@@ -1073,12 +1088,16 @@ def _continue_chapter_outlines_if_needed(
                 )
                 break
 
+            for c in new_outlines:
+                if "chapter" in c and "chapter_num" not in c:
+                    c["chapter_num"] = c["chapter"]
+
             # extend 模式 + 有 starting_chapter → 重新构思模式
             #    LLM 重新生成 [starting_chapter, target_total],会 OVERWRITE 已有大纲
             #    但 [1, starting_chapter-1] 范围的章节号不收
             # extend 模式 + 无 starting_chapter → append 模式(老章不收)
             if mode == "extend":
-                if starting_chapter and starting_chapter > 1:
+                if starting_chapter and starting_chapter > 0:
                     # 重新构思模式: 只收 >= starting_chapter 的(LLM 会重新生成这段)
                     new_outlines = [
                         c for c in new_outlines
@@ -1095,6 +1114,12 @@ def _continue_chapter_outlines_if_needed(
                             if int(c.get("chapter_num", 0)) > existing_max
                         ]
 
+            # 重新构思模式:先移除 >= starting_chapter 的旧章节,再追加新章节
+            if mode == "extend" and starting_chapter and starting_chapter > 0:
+                chapter_outlines = [
+                    c for c in chapter_outlines
+                    if int(c.get("chapter_num", 0)) < starting_chapter
+                ]
             chapter_outlines.extend(new_outlines)
             existing_nums = {int(c.get("chapter_num", 0)) for c in chapter_outlines if c.get("chapter_num")}
             missing_nums = sorted(set(range(1, total + 1)) - existing_nums)
@@ -1118,6 +1143,10 @@ def _continue_chapter_outlines_if_needed(
             break
 
     first_result["chapter_outlines"] = chapter_outlines
+    # 合并新扩写的架构数据到返回结果
+    first_result["volumes"] = merged_volumes
+    first_result["plot_lines"] = merged_plot_lines
+    first_result["structure"] = struct
     if len(chapter_outlines) < total:
         logger.warning(
             f"[stage_4a_outline] 续写后仍缺 {total - len(chapter_outlines)} 章"
@@ -2003,9 +2032,37 @@ def _stage_data(results: dict, stage_id: str) -> dict | str:
 def _extract_characters(data: dict, stage_id: str, role_default: str) -> list[dict]:
     """从 stage 数据中提取角色列表"""
     if stage_id == "stage_3c_supporting":
-        return data.get("supporting", [])
+        supporting = data.get("supporting", [])
+        if not isinstance(supporting, list):
+            return []
+        result = []
+        for item in supporting:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name", "").strip()
+            if not name or name == "未命名":
+                continue
+            profile = item.get("profile", {})
+            description = item.get("description", "")
+            if not isinstance(profile, dict):
+                profile = {}
+            if len(profile) == 0 and not description:
+                logger.warning(f"[Bootstrap] 跳过空白角色「{name}」：缺少 profile 和 description")
+                continue
+            result.append(item)
+        return result
     # 主角 / 反派是单 character
     if data.get("name") or data.get("profile"):
+        name = data.get("name", "").strip()
+        if name and (name == "未命名"):
+            return []
+        profile = data.get("profile", {})
+        description = data.get("description", "")
+        if not isinstance(profile, dict):
+            profile = {}
+        if name and len(profile) == 0 and not description:
+            logger.warning(f"[Bootstrap] 跳过空白角色「{name}」：缺少 profile 和 description")
+            return []
         return [data]
     return []
 
