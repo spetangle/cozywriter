@@ -110,13 +110,14 @@ STAGE_DEFS = {
     },
     "stage_4a_chapter_outlines": {
         # 拆分出来的"每章一句话"子阶段(原 stage_4a_outline 拆出来)
-        # 单独 max_tokens 16384,保证 100 章小说能完整输出(每章 1 句 = ~200 chars)
+        # 单独 max_tokens 32768,保证 100 章小说能完整输出(每章 1 句 = ~200 chars)
+        # 首次调用只生成前 100 章,剩余章节由 _continue_chapter_outlines_if_needed 自动补全
         "name": "章节一句话大纲",
         "description": "chapter_outlines[1..N] 每章 1 句话（不依赖架构阶段也能手动重跑）",
         "needs_llm": True,
         "depends_on": ["stage_4a_outline"],
         "outputs": ["chapter_outlines"],
-        "max_tokens": 16384,
+        "max_tokens": 32768,
         "temperature": 0.6,
     },
     "stage_4b_foreshadow": {
@@ -166,7 +167,7 @@ STAGE_PROMPTS = {
         "task": (
             "根据题材和基调推荐：\n"
             "1. style：文风（必须从 优美/平实/诗意/幽默/冷峻 中选一个）\n"
-            "2. pacing：节奏（必须从 快节奏/中等节奏/慢热型/起伏型 中选一个）\n"
+            "2. pacing：节奏（必须从 快节奏/中等节奏/慢热型/起伏型 中选一个，禁止使用英文）\n"
         ),
         "json_schema": {"style": "...", "pacing": "..."},
     },
@@ -188,6 +189,7 @@ STAGE_PROMPTS = {
             "根据题材 + 主旨 + 世界观，设计主角。\n"
             "要求：\n"
             "1. name：角色名，必须包含姓氏和名字（2-4 个汉字，如：张明、李婉儿），禁止只有名字没有姓氏\n"
+            "   ⚠️ 禁止使用英文加下划线格式（如：breakneck_glitch），必须使用中文名字\n"
             "2. role：固定为 '主角'\n"
             "3. profile 字段：age（数字）, gender（男/女/其他）, identity（身份 1 句）,"
             "personality（性格 2-3 个关键词）, goal（核心目标 1 句）, weakness（弱点 1 句）,"
@@ -218,6 +220,7 @@ STAGE_PROMPTS = {
             "根据题材 + 主旨 + 世界观 + 主角设定，设计反派。\n"
             "要求：\n"
             "1. name：角色名（2-3 个汉字）\n"
+            "   ⚠️ 禁止使用英文加下划线格式（如：breakneck_glitch），必须使用中文名字\n"
             "2. role：固定为 '反派'\n"
             "3. profile 字段：与主角一致\n"
             "4. description：补充描述（3-5 句，包含与主角的核心矛盾）\n"
@@ -243,6 +246,8 @@ STAGE_PROMPTS = {
         "task": (
             "根据主角与反派设定，设计 2-4 名重要配角，并建立 3-5 条关系。\n"
             "配角 role 必须是 '配角'。\n"
+            "⚠️ 所有角色名必须使用中文名字（2-4 个汉字，如：张明、李婉儿），\n"
+            "   禁止使用英文加下划线格式（如：breakneck_glitch）。\n"
             "关系字段：\n"
             "  from / to：角色名（必须在主角/反派/本步骤配角中）\n"
             "  type：关系类型（友情/爱情/亲情/师徒/敌对/竞争/合作/...）\n"
@@ -405,17 +410,21 @@ STAGE_PROMPTS = {
             "{body_status_hint}"  # 占位符:由调用方注入"已写正文 vs 仅大纲"状态
             "\n"
             "═══════════════════════════════════════════════════════════════\n"
-            "【每章节细纲 - 严格 1 章 1 句，必须覆盖 1~total_chapters 全部章节】\n"
+            "【每章节细纲 - 严格 1 章 1 句】\n"
             "═══════════════════════════════════════════════════════════════\n"
             "chapter_outlines：数组，每个元素对应一章，**禁止 1-N 章共用同一段描述**！\n"
+            "\n"
+            "【分批生成说明】\n"
+            "   为避免输出过长，本阶段首次调用只生成前 100 章（第 1 章到第 100 章）。\n"
+            "   剩余章节会在后续调用中自动补全。\n"
+            "   请确保前 100 章的情节设计完整且与整体架构保持一致。\n"
             "\n"
             "【硬性约束 - 必须严格遵守】\n"
             "   ⚠️ 绝对禁止把多章合并成一段情节描述。\n"
             "   ⚠️ 每一章必须有自己独立的核心事件；相邻章可以有关联但不能是同一件事。\n"
-            "   ⚠️ 数组长度必须 === total_chapters（少 1 章或多 1 章都会失败）。\n"
             "\n"
             "   每一章包含：\n"
-            "   - chapter_num：1..total_chapters（**严格按顺序连续**，不能漏）\n"
+            "   - chapter_num：1..100（**严格按顺序连续**，不能漏）\n"
             "   - volume_num：本章所属的卷号（1, 2, 3...，参考 stage_4a_outline 输出的 volumes）\n"
             "   - title：本章标题（4-15 字，与内容有关联，不要「第 N 章」这种纯序号，例如「初入诡秘都市」「玄机子的阴谋」）\n"
             "   - chapter_position：本章定位（开局/发展/高潮/回落/结局）\n"
@@ -689,10 +698,13 @@ def run_bootstrap_sync(run_id: int, user_input: dict, db=None) -> dict:
                 #     自动检测缺口并循环续写,直到覆盖 total_chapters。
                 #     创建 100+ 章项目必须走这里(单次只能输出 ~130 章)。
                 if stage_id == "stage_4a_chapter_outlines" and isinstance(result, dict):
+                    from storage.models.project import Project
+                    proj = db.query(Project).filter(Project.id == run.project_id).first()
+                    target_total = locked.get("total_chapters") or (proj.total_chapters if proj else 0)
                     wrapped = {"chapter_outlines": result.get("chapter_outlines", [])}
                     wrapped = _continue_chapter_outlines_if_needed(
                         wrapped, locked, user_filled, prev_outputs, db,
-                        target_total=locked.get("total_chapters") or 0,
+                        target_total=target_total,
                     )
                     result["chapter_outlines"] = wrapped.get("chapter_outlines", [])
 
@@ -805,7 +817,109 @@ def _run_single_stage(stage_id: str, locked: dict, user_filled: dict,
         task_type=stage_id,  # 入 log 时按 stage 分类（stage_1_base / stage_2a_theme / ...）
     )
 
-    return _parse_json(response)
+    result = _parse_json(response)
+
+    if stage_id in ("stage_3a_protagonist", "stage_3b_antagonist", "stage_3c_supporting"):
+        result = _validate_and_fix_character_names(
+            stage_id, result, locked, user_filled, prev_outputs, db, project_id
+        )
+
+    return result
+
+
+def _validate_and_fix_character_names(
+    stage_id: str,
+    result: dict,
+    locked: dict,
+    user_filled: dict,
+    prev_outputs: dict,
+    db,
+    project_id: int | None = None,
+) -> dict:
+    """检查角色名是否包含英文加下划线格式，如有则重新生成。
+    
+    检查规则：角色名不能包含下划线和英文组合（如 breakneck_glitch），
+    必须是纯中文名字（2-4 个汉字）。
+    """
+    import re
+    
+    underscore_pattern = re.compile(r'[a-zA-Z]+_[a-zA-Z]+')
+    
+    def has_invalid_name(name: str) -> bool:
+        if not name:
+            return False
+        return bool(underscore_pattern.search(name))
+    
+    invalid_names = []
+    
+    if stage_id == "stage_3a_protagonist":
+        name = result.get("name", "")
+        if has_invalid_name(name):
+            invalid_names.append(f"主角: {name}")
+    elif stage_id == "stage_3b_antagonist":
+        name = result.get("name", "")
+        if has_invalid_name(name):
+            invalid_names.append(f"反派: {name}")
+    elif stage_id == "stage_3c_supporting":
+        for char in result.get("supporting", []):
+            name = char.get("name", "")
+            if has_invalid_name(name):
+                invalid_names.append(f"配角: {name}")
+    
+    if not invalid_names:
+        return result
+    
+    logger.warning(
+        f"[Character name check] 发现无效角色名({stage_id}): {invalid_names},"
+        f"重新生成中..."
+    )
+    
+    defn = STAGE_DEFS[stage_id]
+    prompt_def = STAGE_PROMPTS[stage_id]
+    
+    task_description = prompt_def["task"]
+    if stage_id == "stage_4a_chapter_outlines" and db is not None:
+        pid = project_id
+        if not pid and isinstance(locked, dict):
+            pid = locked.get("project_id") or locked.get("_project_id")
+        if not pid and isinstance(prev_outputs, dict):
+            pid = prev_outputs.get("_project_id") or prev_outputs.get("project_id")
+        body_hint = _build_chapter_body_status_hint(pid, db) if pid else ""
+        task_description = task_description.replace("{body_status_hint}", body_hint)
+    else:
+        task_description = task_description.replace("{body_status_hint}", "")
+    
+    role = build_bootstrap_role(
+        task_description=task_description,
+        locked_inputs=locked,
+        prev_outputs=prev_outputs,
+        max_tokens=defn["max_tokens"],
+        temperature=defn["temperature"],
+    )
+    
+    system_prompt = role.system_prompt
+    user_prompt = (
+        f"请输出 JSON，schema 参考：\n{json.dumps(prompt_def['json_schema'], ensure_ascii=False, indent=2)}\n"
+        f"只输出 JSON，不要任何解释。\n\n"
+        f"⚠️ 注意：之前生成的角色名包含无效格式（英文加下划线），请重新生成，"
+        f"确保所有角色名都是纯中文名字（2-4 个汉字）。"
+    )
+    
+    llm = LLMFactory.create(db=db)
+    try:
+        response = llm.generate(
+            prompt=user_prompt,
+            system_prompt=system_prompt,
+            max_tokens=role.max_tokens,
+            temperature=role.temperature,
+            task_type=f"{stage_id}_refix",
+        )
+        fixed_result = _parse_json(response)
+        logger.info(f"[Character name check] 重新生成成功({stage_id})")
+        return fixed_result
+    except Exception as e:
+        logger.error(f"[Character name check] 重新生成失败({stage_id}): {e}")
+        return result
 
 
 def _build_chapter_body_status_hint(project_id: int, db) -> str:
@@ -1092,30 +1206,30 @@ def _continue_chapter_outlines_if_needed(
                 if "chapter" in c and "chapter_num" not in c:
                     c["chapter_num"] = c["chapter"]
 
-            # extend 模式 + 有 starting_chapter → 重新构思模式
+            # extend 模式 + starting_chapter → 重新构思模式
             #    LLM 重新生成 [starting_chapter, target_total],会 OVERWRITE 已有大纲
-            #    但 [1, starting_chapter-1] 范围的章节号不收
-            # extend 模式 + 无 starting_chapter → append 模式(老章不收)
-            if mode == "extend":
-                if starting_chapter and starting_chapter > 0:
-                    # 重新构思模式: 只收 >= starting_chapter 的(LLM 会重新生成这段)
+            #    只有 [1, starting_chapter-1] 范围的章节(已写正文)保持不变
+            if mode == "extend" and starting_chapter:
+                # 重新构思模式: 只收 >= starting_chapter 的(LLM 会重新生成这段)
+                new_outlines = [
+                    c for c in new_outlines
+                    if int(c.get("chapter_num", 0)) >= starting_chapter
+                ]
+            else:
+                # append 模式(无 starting_chapter): 只收 > existing_max 的
+                if chapter_outlines:
+                    existing_max = max(
+                        int(c.get("chapter_num", 0)) for c in chapter_outlines
+                    )
                     new_outlines = [
                         c for c in new_outlines
-                        if int(c.get("chapter_num", 0)) >= starting_chapter
+                        if int(c.get("chapter_num", 0)) > existing_max
                     ]
-                else:
-                    # append 模式: 只收 > existing_max 的
-                    if chapter_outlines:
-                        existing_max = max(
-                            int(c.get("chapter_num", 0)) for c in chapter_outlines
-                        )
-                        new_outlines = [
-                            c for c in new_outlines
-                            if int(c.get("chapter_num", 0)) > existing_max
-                        ]
 
             # 重新构思模式:先移除 >= starting_chapter 的旧章节,再追加新章节
-            if mode == "extend" and starting_chapter and starting_chapter > 0:
+            # starting_chapter = body_max + 1, 所有未写正文的章节都重新生成
+            # 只在第一轮执行删除操作,后续轮次保留已生成的章节
+            if mode == "extend" and starting_chapter and loop_idx == 0:
                 chapter_outlines = [
                     c for c in chapter_outlines
                     if int(c.get("chapter_num", 0)) < starting_chapter
@@ -1123,11 +1237,14 @@ def _continue_chapter_outlines_if_needed(
             chapter_outlines.extend(new_outlines)
             existing_nums = {int(c.get("chapter_num", 0)) for c in chapter_outlines if c.get("chapter_num")}
             missing_nums = sorted(set(range(1, total + 1)) - existing_nums)
-            if mode == "extend" and chapter_outlines:
-                # extend 模式:missing_nums 只在 starting_chapter 之上
-                existing_max = max(int(c.get("chapter_num", 0)) for c in chapter_outlines)
-                base = max(starting_chapter, existing_max + 1) if starting_chapter else (existing_max + 1)
-                missing_nums = [n for n in missing_nums if n >= base]
+            if mode == "extend":
+                # extend 模式:只保留 starting_chapter 到 target_total 之间的缺失章节
+                # 下一轮继续生成这些缺失章节
+                if starting_chapter:
+                    missing_nums = [n for n in missing_nums if n >= starting_chapter]
+                else:
+                    existing_max = max(int(c.get("chapter_num", 0)) for c in chapter_outlines)
+                    missing_nums = [n for n in missing_nums if n > existing_max]
             # 同步更新 context_summary 的最后 10 章(给下一轮用)
             context_summary["existing_chapter_titles"] = [
                 f"第{c.get('chapter_num')}章《{c.get('title', '?')}》: {c.get('key_content', '')}"
@@ -1476,16 +1593,13 @@ def extend_outline_chapters(
 
     # Step 2: 续写 chapter_outlines(沿用 _continue_chapter_outlines_if_needed)
     # 包装成 first_result 格式,让 _continue_* 能识别
-    # 如果是"重新构思模式"(有 starting_chapter),从 starting_chapter 之前的章节全部
-    # 移除(LLM 会重新生成这些 + 新增的),只保留 1 ~ starting_chapter-1 的"已写正文"
-    # 部分
-    if starting_chapter > 1:
-        kept_outlines_before = [
-            c for c in existing_chapter_outlines
-            if int(c.get("chapter_num", 0)) < starting_chapter
-        ]
-    else:
-        kept_outlines_before = list(existing_chapter_outlines)
+    # 重新构思模式:只保留已写正文的章节(1 ~ starting_chapter-1)
+    # 所有 >= starting_chapter 的章节(未写正文)都重新生成
+    # starting_chapter = body_max + 1
+    kept_outlines_before = [
+        c for c in existing_chapter_outlines
+        if int(c.get("chapter_num", 0)) < starting_chapter
+    ]
 
     first_result = {
         "volumes": list(proj.volumes or []),
@@ -1724,13 +1838,23 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
     results = run.stage_results or {}
 
     try:
+        # ── 清理旧数据（重新生成时全量覆盖）──
+        # 这些表没有级联删除，需要手动清理
+        db.query(Theme).filter(Theme.project_id == project_id).delete()
+        db.query(WorldEntry).filter(WorldEntry.project_id == project_id).delete()
+        db.query(ProjectOutline).filter(ProjectOutline.project_id == project_id).delete()
+        db.query(Foreshadowing).filter(Foreshadowing.project_id == project_id).delete()
+
         # ── Stage 1: 更新 Project 基础参数 ──
         if results.get("stage_1_base", {}).get("status") == "ok":
             data = results["stage_1_base"]["data"]
             project = db.query(Project).filter(Project.id == project_id).first()
             if project:
                 if data.get("total_chapters"):
-                    project.total_chapters = int(data["total_chapters"])
+                    # 优先使用数据库中的值（用户可能通过扩写大纲修改过），stage_1_base 只作为初始值参考
+                    db_value = project.total_chapters or 0
+                    stage_value = int(data["total_chapters"])
+                    project.total_chapters = max(db_value, stage_value)
                 if data.get("ai_removal"):
                     project.ai味去除程度 = int(data["ai_removal"])
                 if data.get("est_total_words"):
@@ -1763,9 +1887,15 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
                     project.writing_style = data["style"]
                 if data.get("pacing"):
                     # 节奏存为附加 metadata（暂存到 description）
-                    tag = f"[节奏：{data['pacing']}]"
-                    if tag not in (project.description or ""):
-                        project.description = (project.description or "") + f"\n{tag}"
+                    # 验证节奏必须是中文选项，过滤英文或特殊字符
+                    valid_pacing_options = {"快节奏", "中等节奏", "慢热型", "起伏型"}
+                    pacing = data["pacing"]
+                    if pacing not in valid_pacing_options:
+                        logger.warning(f"[Bootstrap] 无效的节奏值 '{pacing}'，已忽略")
+                    else:
+                        tag = f"[节奏：{pacing}]"
+                        if tag not in (project.description or ""):
+                            project.description = (project.description or "") + f"\n{tag}"
 
         # ── Stage 2C: WorldEntry[] ──
         if results.get("stage_2c_world", {}).get("status") in ("ok", "user_filled"):
@@ -1805,6 +1935,13 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
         # 拆成 3A/3B/3C 三个 stage，导致同一个人被创建多次）
         from llm.chapter_pipeline import _find_existing_character
         char_map = {}  # name → id
+        
+        # 重新生成角色时，先删除同项目下所有旧角色（确保完全重新生成）
+        # 这是为了处理用户修改角色名称后重新生成的场景
+        existing_chars = db.query(Character).filter(Character.project_id == project_id).all()
+        for ec in existing_chars:
+            db.delete(ec)
+        db.flush()
         for stage_id, role_default, role_label_zh in [
             ("stage_3a_protagonist", "主角", "主角"),
             ("stage_3b_antagonist", "反派", "反派"),
@@ -1849,15 +1986,9 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
                 cname = c.get("name", "").strip()
                 if not cname or cname == "未命名":
                     continue
-                # 去重：同项目下已有同名的就跳过新建，复用旧 id
-                existing = _find_existing_character(db, project_id, cname)
-                if existing:
-                    logger.info(
-                        f"[Bootstrap] 跳过新角色「{cname}」：已存在（id={existing.id}, 当前名={existing.name}）"
-                    )
-                    if cname:
-                        char_map[cname] = existing.id
-                    continue
+                
+                from storage.models import Character
+                
                 char = Character(
                     project_id=project_id,
                     name=cname,
@@ -2365,13 +2496,17 @@ def rerun_stage(run_id: int, stage_id: str, db) -> dict:
         run.stage_results = stage_results
         db.commit()
 
+    from storage.models.project import Project
+    proj = db.query(Project).filter(Project.id == project_id).first()
+    
     locked = {
         "title": user_input.get("title", ""),
         "chapter_word_count": user_input.get("chapter_word_count", 0),
         "genre": user_input.get("genre", ""),
         "description": user_input.get("description", ""),
         # 续写机制需要：rerun 时也得把 total_chapters 透传下去
-        "total_chapters": int(user_input.get("total_chapters") or 0),
+        # 优先使用 Project 表中的 total_chapters（用户可能修改过）
+        "total_chapters": int(proj.total_chapters) if proj else int(user_input.get("total_chapters") or 0),
     }
     user_filled = {
         k: v for k, v in user_input.items()
@@ -2396,14 +2531,31 @@ def rerun_stage(run_id: int, stage_id: str, db) -> dict:
         # ── stage_4a_chapter_outlines 续生成：单独阶段也可能被截断
         #     (虽然 max_tokens=16384 通常够 100 章,但 LLM 偶尔输出 <N 章)
         if stage_id == "stage_4a_chapter_outlines" and isinstance(result, dict):
-            # 把 result 包成类似老 stage_4a_outline 的结构,让 _continue_chapter_outlines_if_needed 能读
+            from storage.models.project import Project
+            proj = db.query(Project).filter(Project.id == project_id).first()
+            target_total = locked.get("total_chapters") or (proj.total_chapters if proj else 0)
             wrapped = {"chapter_outlines": result.get("chapter_outlines", [])}
             wrapped = _continue_chapter_outlines_if_needed(
                 wrapped, locked, user_filled, prev_outputs, db,
+                target_total=target_total,
             )
             result["chapter_outlines"] = wrapped.get("chapter_outlines", [])
+            
+            # 同时更新 ProjectOutline 表（让 bootstrap-data API 能读到最新数据）
+            from storage.models import ProjectOutline
+            po_row = db.query(ProjectOutline).filter(ProjectOutline.project_id == project_id).first()
+            if po_row:
+                po_row.chapter_outlines = result["chapter_outlines"]
+            else:
+                po_row = ProjectOutline(
+                    project_id=project_id,
+                    chapter_outlines=result["chapter_outlines"],
+                )
+                db.add(po_row)
+        
         stage_results[stage_id] = {"status": "ok", "data": result, "completed_at": time.time()}
         run.stage_results = stage_results
+        run.status = "partial"
         db.commit()
         return {"status": "ok", "stage_result": stage_results[stage_id]}
     except Exception as e:
@@ -2471,13 +2623,17 @@ def rerun_all_failed_stages(run_id: int, db, only_failed: bool = True, force_all
             run.stage_results = stage_results
             db.commit()
 
+        from storage.models.project import Project
+        proj = db.query(Project).filter(Project.id == run.project_id).first()
+        
         locked = {
             "title": user_input.get("title", ""),
             "chapter_word_count": user_input.get("chapter_word_count", 0),
             "genre": user_input.get("genre", ""),
             "description": user_input.get("description", ""),
             # 续写机制需要：rerun 时也得把 total_chapters 透传下去
-            "total_chapters": int(user_input.get("total_chapters") or 0),
+            # 优先使用 Project 表中的 total_chapters（用户可能修改过）
+            "total_chapters": int(proj.total_chapters) if proj else int(user_input.get("total_chapters") or 0),
         }
         user_filled = {
             k: v for k, v in user_input.items()
@@ -2585,10 +2741,13 @@ def rerun_all_failed_stages(run_id: int, db, only_failed: bool = True, force_all
                 #     自动检测缺口并循环续写,直到覆盖 total_chapters
                 #     (100+ 章项目不调这里就只能输出 30-35 章)
                 if sid == "stage_4a_chapter_outlines" and isinstance(result, dict):
+                    from storage.models.project import Project
+                    proj = db.query(Project).filter(Project.id == run.project_id).first()
+                    target_total = locked.get("total_chapters") or (proj.total_chapters if proj else 0)
                     wrapped = {"chapter_outlines": result.get("chapter_outlines", [])}
                     wrapped = _continue_chapter_outlines_if_needed(
                         wrapped, locked, user_filled, prev_outputs, db,
-                        target_total=locked.get("total_chapters") or 0,
+                        target_total=target_total,
                     )
                     result["chapter_outlines"] = wrapped.get("chapter_outlines", [])
                 stage_results[sid] = {
@@ -2608,10 +2767,15 @@ def rerun_all_failed_stages(run_id: int, db, only_failed: bool = True, force_all
                 still_failed.append(sid)
 
         # 重新计算 run 总状态
-        has_failure = any(r.get("status") == "failed" for r in stage_results.values())
+        # 过滤掉 _meta 等非 stage 键（这些键没有 status 字段）
+        stage_values = [
+            r for r in stage_results.values()
+            if isinstance(r, dict) and r.get("status") is not None
+        ]
+        has_failure = any(r.get("status") == "failed" for r in stage_values)
         all_done = all(
             r.get("status") in ("ok", "user_filled", "skipped")
-            for r in stage_results.values()
+            for r in stage_values
         )
         if has_failure:
             run.status = "failed"

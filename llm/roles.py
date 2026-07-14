@@ -367,9 +367,20 @@ def build_bootstrap_role(task_description: str, locked_inputs: dict,
 def _format_locked(locked: dict) -> str:
     if not locked:
         return "（无）"
+    import re
+    underscore_pattern = re.compile(r'^[a-z_]+$')
+    
     lines = []
     for k, v in locked.items():
-        lines.append(f"- {k}: {v}")
+        if isinstance(v, str) and underscore_pattern.match(v):
+            if k in ("protagonist", "antagonist"):
+                lines.append(f"- {k}: 根据题材和世界观自由设计中文名字")
+            elif k == "theme":
+                lines.append(f"- {k}: 根据题材和核心看点自由设计主题")
+            else:
+                lines.append(f"- {k}: 根据题材和设定自由设计")
+        else:
+            lines.append(f"- {k}: {v}")
     return "\n".join(lines)
 
 

@@ -83,6 +83,7 @@ button {
 
 .topbar-left .logo { font-weight: bold; font-size: 18px; color: var(--primary); }
 .topbar-center .project-title { font-weight: 600; }
+.topbar-center .project-id-badge { font-size: 12px; color: var(--text-muted); margin-left: 6px; font-family: monospace; min-width: 30px; display: inline-block;}
 .topbar-right { display: flex; gap: 8px; }
 
 .content-area {
@@ -1966,6 +1967,9 @@ button {
   border-color: #8b5cf6;
   color: white;
   transition: all 0.2s;
+  height: 200%;
+  font-size: 16px;
+  padding: 12px;
 }
 .step-q-llm-btn:hover {
   background: linear-gradient(135deg, #7c3aed, #9333ea);
@@ -4183,4 +4187,364 @@ color: #92400e;
   gap: 8px;
   justify-content: flex-end;
   background: #fafbfc;
+}
+
+/* ═══ 全文评审面板 ═══ */
+.full-review-progress {
+  padding: 40px 20px;
+  text-align: center;
+}
+.full-review-progress .progress-bar {
+  height: 8px;
+  background: var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+.full-review-progress .progress-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 4px;
+  transition: width 0.3s;
+}
+.full-review-progress p {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.full-review-empty {
+  padding: 60px 20px;
+  text-align: center;
+  color: var(--text-muted);
+}
+.full-review-empty p {
+  margin-bottom: 8px;
+}
+.full-review-empty .hint {
+  font-size: 13px;
+  color: #94a3b8;
+}
+
+.full-review-result {
+  padding: 20px;
+}
+
+.review-overall-score {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 24px;
+  margin-bottom: 24px;
+}
+.overall-score-number {
+  font-size: 48px;
+  font-weight: 700;
+  line-height: 1;
+}
+.overall-score-number.score-excellent { color: #10b981; }
+.overall-score-number.score-good { color: #3b82f6; }
+.overall-score-number.score-average { color: #f59e0b; }
+.overall-score-number.score-poor { color: #ef4444; }
+.overall-score-label {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin-top: 8px;
+}
+
+.review-radar-chart {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 24px;
+}
+.review-radar-chart canvas {
+  max-width: 100%;
+}
+
+.review-dimension-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.dimension-card {
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: 1px solid transparent;
+}
+.dimension-card:hover {
+  border-color: var(--primary);
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.1);
+}
+.dimension-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.dimension-icon {
+  font-size: 18px;
+}
+.dimension-name {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.dimension-score {
+  font-size: 16px;
+  font-weight: 600;
+}
+.dimension-score.score-excellent { color: #10b981; }
+.dimension-score.score-good { color: #3b82f6; }
+.dimension-score.score-average { color: #f59e0b; }
+.dimension-score.score-poor { color: #ef4444; }
+.dimension-bar {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.dimension-bar .bar-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 2px;
+  transition: width 0.3s;
+}
+
+.review-details {
+  margin-bottom: 24px;
+}
+.review-detail-section {
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 16px 20px;
+}
+.review-detail-section h3 {
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rationale-text {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.review-critique {
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin-bottom: 24px;
+}
+.review-critique h3 {
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 12px;
+}
+.review-critique p {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.review-suggestions {
+  background: #fefce8;
+  border: 1px solid #fef08a;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin-bottom: 24px;
+}
+.review-suggestions h3 {
+  font-size: 14px;
+  color: #854d0e;
+  margin-bottom: 12px;
+}
+.review-suggestions ul {
+  padding-left: 20px;
+}
+.review-suggestions li {
+  font-size: 14px;
+  line-height: 1.7;
+  color: #713f12;
+  margin-bottom: 6px;
+}
+
+.review-meta {
+  display: flex;
+  gap: 24px;
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+
+.review-history {
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+.review-history h3 {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--bg);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.history-item:hover {
+  background: #f1f5f9;
+}
+.history-score {
+  font-size: 16px;
+  font-weight: 600;
+  width: 40px;
+  text-align: center;
+}
+.history-score.score-excellent { color: #10b981; }
+.history-score.score-good { color: #3b82f6; }
+.history-score.score-average { color: #f59e0b; }
+.history-score.score-poor { color: #ef4444; }
+.history-info {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text);
+}
+.history-time {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ═══ LLM 指纹信息面板 ═══ */
+.writing-fingerprint-panel {
+  padding: 20px;
+  max-height: calc(100vh - 180px);
+  overflow-y: auto;
+}
+.fingerprint-detail h3 {
+  font-size: 16px;
+  color: var(--text);
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fingerprint-call-card {
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+}
+.fingerprint-call-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.fingerprint-call-index {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--primary);
+  background: rgba(99, 102, 241, 0.1);
+  padding: 2px 10px;
+  border-radius: 4px;
+}
+.fingerprint-call-role {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+.fingerprint-call-provider {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 2px 8px;
+  background: #f1f5f9;
+  border-radius: 4px;
+}
+.fingerprint-call-model {
+  font-size: 12px;
+  color: #64748b;
+}
+.fingerprint-call-meta {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+}
+.fingerprint-call-meta code {
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  padding: 1px 6px;
+  background: #f8fafc;
+  border-radius: 3px;
+}
+.fingerprint-call-meta code.success { color: #10b981; }
+.fingerprint-call-meta code.error { color: #ef4444; }
+.fingerprint-section {
+  margin-bottom: 14px;
+}
+.fingerprint-section h4 {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.fingerprint-params {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.param-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.param-label {
+  color: var(--text-muted);
+}
+.param-value {
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  color: var(--primary);
+  font-weight: 500;
+}
+.fingerprint-prompt, .fingerprint-response {
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 12px 14px;
+  border-radius: 6px;
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+.fingerprint-response {
+  max-height: 600px;
 }

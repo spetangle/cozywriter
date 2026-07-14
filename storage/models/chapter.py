@@ -1,6 +1,6 @@
 """Chapter 相关模型"""
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 from storage.models.base import Base
 
@@ -17,6 +17,7 @@ class Chapter(Base):
     word_count = Column(Integer, default=0)
     synopsis = Column(Text, default="")
     event_signature = Column(Text, default="")  # LLM 抽取的 1-2 句事件签名（用于 RAG 去重检索）
+    fingerprint = Column(JSON, default=dict)  # 章节指纹：LLM 请求/返回信息、任务ID、超参数
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

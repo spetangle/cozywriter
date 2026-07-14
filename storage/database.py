@@ -48,6 +48,15 @@ def init_db():
             logger.info(f"[DB migrate] 问卷新字段添加成功")
     except Exception as e:
         logger.warning(f"[DB migrate] 添加问卷字段失败: {e}")
+    # 初始化 LLM 超参数配置
+    try:
+        from llm.hyperparam_service import HyperparamService
+        db = SessionLocal()
+        HyperparamService.initialize_defaults(db)
+        db.close()
+        logger.info("[DB init] LLM 超参数配置初始化完成")
+    except Exception as e:
+        logger.warning(f"[DB init] LLM 超参数配置初始化失败: {e}")
 
 
 def get_db() -> Session:

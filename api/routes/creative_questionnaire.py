@@ -473,8 +473,8 @@ async def build_project_from_questionnaire(q_id: int, db: Session = Depends(get_
         description=all_answers.get("summary", "") or all_answers.get("world_setting", "") or all_answers.get("premise", ""),
         writing_style=style_map.get(all_answers.get("style", ""), "平实"),
         target_word_count=chapter_word_count,
-        word_count_min=int(chapter_word_count * 0.7),
-        word_count_max=int(chapter_word_count * 1.3),
+        word_count_min=int(chapter_word_count * 0.9),
+        word_count_max=int(chapter_word_count * 1.1),
         total_chapters=total_chapters,
         genre=all_answers.get("genre", ""),
     )
@@ -711,9 +711,13 @@ def _generate_llm_options_for_question(question: dict, answers: dict, db) -> tup
 问题ID：{question_id}
 
 请为这个问题生成3个选项，每个选项包含：
-- value: 选项值（简短标识）
-- label: 选项标签（显示给用户的名称）
-- description: 选项描述（详细说明这个选项的含义）
+- value: 选项值（必须使用中文，2-6个汉字，如：平凡少年、宿敌、东方玄幻世界）
+- label: 选项标签（显示给用户的名称，与value一致）
+- description: 选项描述（详细说明这个选项的含义，30-50字）
+
+⚠️ 重要约束：
+- value 必须是纯中文，禁止使用英文加下划线格式（如：reclusive_artist）
+- value 必须是完整的概念描述，不是简单的关键词
 
 选项应该：
 1. 基于用户已填写的答案，保持一致性
@@ -724,9 +728,9 @@ def _generate_llm_options_for_question(question: dict, answers: dict, db) -> tup
 示例格式：
 {{
   "options": [
-    {{"value": "option1", "label": "选项1", "description": "选项1的详细描述"}},
-    {{"value": "option2", "label": "选项2", "description": "选项2的详细描述"}},
-    {{"value": "option3", "label": "选项3", "description": "选项3的详细描述"}}
+    {{"value": "隐居的艺术家", "label": "隐居的艺术家", "description": "一位才华横溢却选择远离尘嚣的艺术家，内心藏着不为人知的秘密"}},
+    {{"value": "内心的恶魔", "label": "内心的恶魔", "description": "主角内心深处的黑暗面，是他最大的敌人和挑战"}},
+    {{"value": "海边小镇", "label": "海边小镇", "description": "一个宁静的海滨小镇，隐藏着不为人知的秘密和古老的传说"}}
   ],
   "suggestions": {{}}
 }}
@@ -758,6 +762,9 @@ def _generate_llm_options_for_question(question: dict, answers: dict, db) -> tup
             result = json.loads(clean_response)
             options = result.get("options", question.get("options", []))
             suggestions = result.get("suggestions", {})
+            
+            options = _validate_and_fix_option_values(options)
+            
             logger.info(f"[问卷] LLM选项生成成功，选项数: {len(options)}")
             return options, suggestions
         except Exception as e:
@@ -766,6 +773,47 @@ def _generate_llm_options_for_question(question: dict, answers: dict, db) -> tup
     except Exception as e:
         logger.error(f"[问卷] LLM选项生成失败: {e}")
         return question.get("options", []), {}
+
+
+def _validate_and_fix_option_values(options: list) -> list:
+    """验证并修复LLM生成的选项值，确保value是中文格式"""
+    import re
+    
+    underscore_pattern = re.compile(r'[a-zA-Z]+_[a-zA-Z]+')
+    chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
+    
+    translation_map = {
+        "reclusive_artist": "隐居的艺术家",
+        "inner_demon": "内心的恶魔",
+        "coastal_town": "海边小镇",
+        "tourist_economy_hierarchy": "旅游经济等级",
+        "melancholic_healing": "忧郁治愈",
+        "literary_impressionistic": "文学印象派",
+        "mosaic_interweaving": "马赛克交织",
+        "redemption_through_love": "爱之救赎",
+        "ambition_romance": "野心与爱情",
+    }
+    
+    fixed_options = []
+    for opt in options:
+        value = opt.get("value", "")
+        label = opt.get("label", "")
+        description = opt.get("description", "")
+        
+        if underscore_pattern.search(value):
+            logger.warning(f"[问卷] 发现英文加下划线格式的选项值: {value}")
+            if value in translation_map:
+                opt["value"] = translation_map[value]
+            elif chinese_pattern.search(label):
+                opt["value"] = label
+            elif description and chinese_pattern.search(description):
+                opt["value"] = description[:6]
+            else:
+                opt["value"] = value.replace("_", " ")
+        
+        fixed_options.append(opt)
+    
+    return fixed_options
 
 
 def _complete_with_ai(answers: dict, db, skip_novel_title: bool = False) -> dict:
@@ -861,9 +909,11 @@ def _complete_with_ai(answers: dict, db, skip_novel_title: bool = False) -> dict
 请根据以上设定，生成一个合适的小说名称。
 
 要求：
-1. 名称要贴合小说的题材、主题和核心看点
-2. 名称要吸引人，有创意，适合作为小说标题
-3. 名称要简洁，一般不超过8个字
+1. 名称必须是中文，禁止使用英文或中英文混合
+2. 禁止使用下划线、连字符等分隔符
+3. 名称要贴合小说的题材、主题和核心看点
+4. 名称要吸引人，有创意，适合作为小说标题
+5. 名称要简洁，一般不超过8个字
 
 请直接输出小说名称，不要包含其他内容。
 """
@@ -880,13 +930,17 @@ def _complete_with_ai(answers: dict, db, skip_novel_title: bool = False) -> dict
                     task_type="questionnaire_generate_title",
                 )
                 title = title_response.strip().strip('"').strip("'")
+                # 验证标题必须是中文，过滤英文或特殊字符
+                if not title or '_' in title or not any('\u4e00' <= c <= '\u9fff' for c in title):
+                    logger.warning(f"[问卷] 无效的小说标题 '{title}'，使用默认标题")
+                    title = "未命名小说"
                 logger.info(f"[问卷] 小说名称生成成功: {title}")
                 result["novel_title"] = title
             except Exception as e:
                 logger.error(f"[问卷] 小说名称生成失败: {e}")
                 result["novel_title"] = "未命名小说"
             
-            return result
+                return result
         else:
             context_text = "\n".join([f"- {k}: {v}" for k, v in answers.items() if v])
             
@@ -899,9 +953,11 @@ def _complete_with_ai(answers: dict, db, skip_novel_title: bool = False) -> dict
 请根据以上设定，生成一个合适的小说名称。
 
 要求：
-1. 名称要贴合小说的题材、主题和核心看点
-2. 名称要吸引人，有创意，适合作为小说标题
-3. 名称要简洁，一般不超过8个字
+1. 名称必须是中文，禁止使用英文或中英文混合
+2. 禁止使用下划线、连字符等分隔符
+3. 名称要贴合小说的题材、主题和核心看点
+4. 名称要吸引人，有创意，适合作为小说标题
+5. 名称要简洁，一般不超过8个字
 
 请直接输出小说名称，不要包含其他内容。
 """
@@ -918,6 +974,10 @@ def _complete_with_ai(answers: dict, db, skip_novel_title: bool = False) -> dict
                     task_type="questionnaire_generate_title",
                 )
                 title = title_response.strip().strip('"').strip("'")
+                # 验证标题必须是中文，过滤英文或特殊字符
+                if not title or '_' in title or not any('\u4e00' <= c <= '\u9fff' for c in title):
+                    logger.warning(f"[问卷] 无效的小说标题 '{title}'，使用默认标题")
+                    title = "未命名小说"
                 logger.info(f"[问卷] 小说名称生成成功: {title}")
                 return {"novel_title": title}
             except Exception as e:

@@ -375,7 +375,9 @@ async def get_bootstrap_data(project_id: str, db: Session = Depends(get_db)):
     outline_data = _data("stage_4a_outline") or {}
     # 新版：优先从 ProjectOutline 表读数据（扩写大纲后数据会写入这里）
     from storage.models import ProjectOutline as _PO
+    from storage.models.project import Project
     po_row = db.query(_PO).filter(_PO.project_id == project_id).first()
+    proj = db.query(Project).filter(Project.id == project_id).first()
     
     # 从 ProjectOutline 表读取扩写后的架构数据
     if po_row:
@@ -438,7 +440,7 @@ async def get_bootstrap_data(project_id: str, db: Session = Depends(get_db)):
         "run_updated_at": run.updated_at,
         "project_meta": project_meta,
         "base": {
-            "total_chapters": base.get("total_chapters"),
+            "total_chapters": (proj.total_chapters if proj else 0) or base.get("total_chapters"),
             "est_total_words": base.get("est_total_words"),
             "ai_removal": base.get("ai_removal"),
             "rationale": base.get("rationale", ""),
@@ -580,11 +582,11 @@ async def rerun_all_stages(run_id: int, db: Session = Depends(get_db), force_all
         _release_run_lock(run_id)
         raise HTTPException(status_code=404, detail="Run not found")
 
-    if run.status == "failed":
+    if run.status not in ("completed", "partial", "failed", "cancelled"):
         _release_run_lock(run_id)
         raise HTTPException(
             status_code=400,
-            detail="失败的 run 不能 rerun-all，请新建项目",
+            detail=f"当前 run 状态为 {run.status}，无法重跑。请等待运行完成或取消后再试",
         )
 
     logger.info(f"[Workflow] rerun-all (async) run={run_id} force_all={force_all}")
@@ -663,19 +665,28 @@ async def commit_run(run_id: int, db: Session = Depends(get_db)):
     if run.status == "committed":
         return CommitResponse(status="already_committed")
 
-    if run.status not in ("completed", "partial"):
+    if run.status not in ("completed", "partial", "failed"):
         raise HTTPException(
             status_code=400,
             detail=f"Run status is '{run.status}', cannot commit. Please ensure all stages succeeded.",
         )
 
-    logger.info(f"[Workflow] commit run={run_id} project={run.project_id}")
-    result = commit_bootstrap(run.project_id, run_id, db)
-    return CommitResponse(
-        status=result.get("status", "failed"),
-        summary=result.get("summary", {}),
-        error=result.get("error"),
-    )
+    if not _acquire_run_lock(run_id):
+        raise HTTPException(
+            status_code=409,
+            detail="该 run 已有提交任务在执行中，请等待当前任务完成后再试",
+        )
+
+    try:
+        logger.info(f"[Workflow] commit run={run_id} project={run.project_id}")
+        result = commit_bootstrap(run.project_id, run_id, db)
+        return CommitResponse(
+            status=result.get("status", "failed"),
+            summary=result.get("summary", {}),
+            error=result.get("error"),
+        )
+    finally:
+        _release_run_lock(run_id)
 
 
 @router.post("/project/{project_id}/extend-outline")

@@ -13,8 +13,9 @@ from api.routes import (
     worldbuilding, outline, generate, theme, review,
     consistency, outline_detail, tasks, inspirations,
     creative_questionnaire, workflow, genres, providers,
-    plot_points,
+    plot_points, llm_hyperparams,
 )
+from api.routes import full_review
 from api.routes.chapters import pipeline_router
 from api.routes.batch_generate import router as batch_generate_router
 from api.routes import export
@@ -100,6 +101,18 @@ app = FastAPI(
 )
 
 
+# ─── CORS 中间件 ───
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 # ─── HTTP 请求日志中间件 ───
 # 记录每个请求：方法、路径、状态码、耗时，方便排查错误
 @app.middleware("http")
@@ -137,6 +150,7 @@ app.include_router(outline.router)
 app.include_router(generate.router)
 app.include_router(theme.router)             # 主题/伏笔/角色弧光/关系矩阵
 app.include_router(review.router)             # 评审打分 + 修订
+app.include_router(full_review.router)        # 全文评审
 app.include_router(consistency.router)         # 一致性检查
 app.include_router(outline_detail.router)       # 大纲 / 细纲
 app.include_router(tasks.router)               # 异步任务状态轮询
@@ -149,6 +163,7 @@ app.include_router(batch_generate_router)      # 批量章节生成
 app.include_router(export.router)              # 导出正文
 app.include_router(providers.router)           # 服务商 CRUD
 app.include_router(plot_points.router)         # 剧情追踪
+app.include_router(llm_hyperparams.router)     # LLM 超参数配置
 
 # 旧版灵感 API 兼容路由：/api/projects/{pid}/inspirations → 转发到 /api/inspirations
 # （保留项目内旧版右侧面板可用）

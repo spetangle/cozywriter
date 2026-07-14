@@ -193,6 +193,7 @@ def _async_batch_pipeline_task(
                     revision_threshold=req.revision_threshold,
                     progress_cb=_make_progress_cb(chapter_order),
                     guide=req.guide,
+                    task_id=task_id,
                 )
 
                 # 标记章节完成

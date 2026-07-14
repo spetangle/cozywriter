@@ -27,7 +27,7 @@ class Task:
     id: str
     task_type: str  # "generate" / "review" / "consistency"
     description: str
-    status: str = "pending"  # pending / running / completed / failed
+    status: str = "pending"  # pending / running / completed / failed / queued
     progress: int = 0  # 0-100
     result: Any = None
     error: str = ""
@@ -36,6 +36,10 @@ class Task:
     completed_at: Optional[float] = None
     project_id: int = 0  # 关联项目 ID（方便清理时反查）
     run_id: Optional[int] = None  # 关联的 WorkflowRun.id（用于取消时同步 DB）
+    # 队列任务需要的执行信息
+    fn: Optional[Callable] = None
+    args: tuple = ()
+    kwargs: dict = field(default_factory=dict)
 
     @property
     def duration_s(self) -> float:
@@ -64,8 +68,134 @@ class Task:
 _tasks: dict[str, Task] = {}
 _tasks_lock = threading.Lock()
 
+# 项目锁：同一项目同一时间只能有一个 running 任务
+# key: project_id, value: task_id
+_project_locks: dict[int, str] = {}
+_project_locks_lock = threading.Lock()
 
-def create_task(task_type: str, description: str, project_id: int = 0, run_id: int | None = None) -> Task:
+
+def has_running_task(project_id: int) -> bool:
+    """检查项目是否有正在运行的任务"""
+    with _project_locks_lock:
+        return project_id in _project_locks
+
+
+def acquire_project_lock(project_id: int, task_id: str) -> bool:
+    """尝试获取项目锁，成功返回 True，失败返回 False"""
+    with _project_locks_lock:
+        if project_id in _project_locks:
+            return False
+        _project_locks[project_id] = task_id
+        return True
+
+
+def release_project_lock(project_id: int, task_id: str) -> None:
+    """释放项目锁"""
+    with _project_locks_lock:
+        if _project_locks.get(project_id) == task_id:
+            del _project_locks[project_id]
+
+
+def _process_project_queue(project_id: int, completed_task_id: str = "") -> None:
+    """处理项目队列中的任务，启动下一个任务"""
+    # 先释放锁
+    release_project_lock(project_id, completed_task_id)
+    
+    # 查找队列中的任务（按创建时间排序）
+    with _tasks_lock:
+        queued_tasks = sorted(
+            [t for t in _tasks.values() if t.project_id == project_id and t.status == "queued"],
+            key=lambda t: t.created_at
+        )
+    
+    # 启动队列中的第一个任务
+    if queued_tasks:
+        next_task = queued_tasks[0]
+        logger.info(f"[Task {next_task.id}] 从队列启动，项目 {project_id}")
+        next_task.status = "pending"
+        # 获取执行信息
+        fn = next_task.fn
+        args = next_task.args
+        kwargs = next_task.kwargs
+        # 重新提交任务
+        _executor.submit(_run_task_from_queue, next_task, fn, args, kwargs)
+
+
+def _run_task_from_queue(task: Task, fn: Callable, args: tuple, kwargs: dict):
+    """从队列启动任务时的执行函数"""
+    if task.status == "cancelled":
+        logger.info(f"[Task {task.id}] 队列任务已取消，跳过")
+        return
+    
+    # 获取锁
+    if not acquire_project_lock(task.project_id, task.id):
+        logger.info(f"[Task {task.id}] 无法获取项目锁，重新进入队列")
+        task.status = "queued"
+        return
+    
+    # 直接执行任务（不再调用 run_task_async，避免重复提交）
+    task_id = task.id
+    
+    # 根据任务类型选择超时时间
+    timeout_seconds = 3600.0 if task.task_type in ("batch_pipeline", "batch_generate") else 600.0
+    
+    def _run():
+        if task.status == "cancelled":
+            logger.info(f"[Task {task_id}] 已标记取消，跳过启动")
+            return
+        
+        task.status = "running"
+        task.started_at = time.time()
+        task.progress = 10
+        logger.info(
+            f"[Task {task_id}] START ({fn.__name__}) type={task.task_type} "
+            f"timeout={int(timeout_seconds)}s project={task.project_id} run={task.run_id}"
+        )
+        
+        timeout_holder = {"hit": False}
+        timer = None
+        try:
+            def _on_timeout():
+                timeout_holder["hit"] = True
+            timer = threading.Timer(timeout_seconds, _on_timeout)
+            timer.daemon = True
+            timer.start()
+            
+            result = fn(task_id, *args, **kwargs)
+            
+            if task.status == "cancelled":
+                logger.info(f"[Task {task_id}] user-cancelled during LLM call; discarding result")
+                return
+            
+            if timeout_holder["hit"]:
+                task.status = "failed"
+                task.error = f"任务超时（{int(timeout_seconds)}秒）"
+                task.completed_at = time.time()
+                logger.warning(f"[Task {task_id}] TIMEOUT after {int(timeout_seconds)}s")
+                return
+            
+            task.progress = 100
+            task.status = "completed"
+            task.result = result
+            task.completed_at = time.time()
+            logger.info(f"[Task {task_id}] DONE duration={task.duration_s:.1f}s")
+        
+        except Exception as e:
+            if task.status != "cancelled":
+                task.status = "failed"
+                task.error = str(e)
+                task.completed_at = time.time()
+                logger.error(f"[Task {task_id}] FAILED: {e}", exc_info=True)
+        finally:
+            if timer is not None:
+                timer.cancel()
+            _process_project_queue(task.project_id, task_id)
+    
+    _executor.submit(_run)
+
+
+def create_task(task_type: str, description: str, project_id: int = 0, run_id: int | None = None,
+                fn: Optional[Callable] = None, args: tuple = (), kwargs: dict = None) -> Task:
     """创建新任务"""
     task_id = str(uuid.uuid4())[:8]
     task = Task(
@@ -74,6 +204,9 @@ def create_task(task_type: str, description: str, project_id: int = 0, run_id: i
         description=description,
         project_id=project_id,
         run_id=run_id,
+        fn=fn,
+        args=args,
+        kwargs=kwargs or {},
     )
     with _tasks_lock:
         _tasks[task_id] = task
@@ -314,6 +447,8 @@ def run_task_async(task_id: str, fn: Callable, *args, **kwargs):
         finally:
             if timer is not None:
                 timer.cancel()
+            # 释放项目锁并处理队列中的任务
+            _process_project_queue(task.project_id, task_id)
 
     _executor.submit(_run)
 
@@ -347,8 +482,19 @@ def submit_llm_task(
         f"[P{project_id}] {description}",
         project_id=project_id,
         run_id=run_id,
+        fn=llm_call_fn,
+        args=args,
+        kwargs=kwargs,
     )
-    run_task_async(task.id, llm_call_fn, *args, **kwargs)
+    
+    # 项目锁检查：同一项目同一时间只能有一个 running 任务
+    # 如果有任务正在运行，新任务保持 pending 状态，等待队列处理
+    if acquire_project_lock(project_id, task.id):
+        run_task_async(task.id, llm_call_fn, *args, **kwargs)
+    else:
+        logger.info(f"[Task {task.id}] 项目 {project_id} 已有任务运行中，进入队列")
+        task.status = "queued"
+    
     return task
 
 

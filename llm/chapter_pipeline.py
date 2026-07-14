@@ -49,13 +49,113 @@ def _parse_json(text: str) -> dict | list | str:
         raise ValueError("empty response from LLM")
     text = text.strip()
     if text.startswith("```"):
-        m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
-        if m:
-            text = m.group(1).strip()
+        end_marker = text.find("```", 3)
+        if end_marker != -1:
+            text = text[3:end_marker].strip()
+            if text.startswith("json"):
+                text = text[4:].strip()
+        else:
+            text = text[3:].strip()
+            if text.startswith("json"):
+                text = text[4:].strip()
+    
     start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        text = text[start:end + 1]
+    if start != -1:
+        depth = 0
+        end = -1
+        in_string = False
+        escape_next = False
+        
+        for i in range(start, len(text)):
+            ch = text[i]
+            
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\":
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        
+        if end != -1:
+            text = text[start:end + 1]
+        else:
+            text = text[start:]
+            
+            in_string = False
+            escape_next = False
+            last_valid_close = -1
+            depth = 1
+            
+            for i, ch in enumerate(text):
+                if escape_next:
+                    escape_next = False
+                    continue
+                if ch == "\\":
+                    escape_next = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    last_valid_close = i
+            
+            if last_valid_close != -1 and depth <= 0:
+                text = text[:last_valid_close + 1]
+            else:
+                text = text.rstrip()
+                
+                in_string = False
+                escape_next = False
+                for ch in text:
+                    if escape_next:
+                        escape_next = False
+                        continue
+                    if ch == "\\":
+                        escape_next = True
+                        continue
+                    if ch == '"':
+                        in_string = not in_string
+                if in_string:
+                    text += '"'
+                
+                if text.endswith(","):
+                    text = text[:-1]
+                
+                if depth > 0:
+                    text += "]" * (depth // 2)
+                    text += "}" * ((depth + 1) // 2)
+                else:
+                    open_braces = text.count("{")
+                    close_braces = text.count("}")
+                    missing_braces = open_braces - close_braces
+                    
+                    open_brackets = text.count("[")
+                    close_brackets = text.count("]")
+                    missing_brackets = open_brackets - close_brackets
+                    
+                    if missing_brackets > 0:
+                        text += "]" * missing_brackets
+                    if missing_braces > 0:
+                        text += "}" * missing_braces
 
     # ── 1. 直接解析 ──
     try:
@@ -91,14 +191,30 @@ def _parse_json(text: str) -> dict | list | str:
     except json.JSONDecodeError:
         pass
 
-    # ── 6. 正则提取最大 {…} 块 ──
+    # ── 6. 正则提取最大 {…} 块（支持嵌套）──
     try:
         import re as _re
-        json_pattern = _re.compile(r'\{[^{}]*\}', _re.DOTALL)
-        matches = json_pattern.findall(text_no_comments)
-        if matches:
-            best = max(matches, key=len)
-            return json.loads(best)
+        def _extract_json(text):
+            start = text.find("{")
+            if start == -1:
+                return None
+            depth = 0
+            end = -1
+            for i in range(start, len(text)):
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+            if end != -1:
+                return text[start:end + 1]
+            return None
+        
+        extracted = _extract_json(text_no_comments)
+        if extracted:
+            return json.loads(extracted)
     except Exception:
         pass
 
@@ -384,6 +500,108 @@ def _call_llm(role_name: str, ctx: dict, user_msg: str, provider: str | None = N
         temperature=role.temperature,
         task_type=f"chapter_pipeline_{role_name}",  # 入 log 时按 role 分类
     )
+
+
+def _call_llm_with_fingerprint(role_name: str, ctx: dict, user_msg: str, 
+                                provider: str | None = None, db=None, 
+                                task_id: str = "", max_retries: int = 3) -> dict:
+    """通用 LLM 调用 helper，返回包含指纹信息的结果"""
+    role = ROLES.get(role_name)
+    if role is None:
+        raise ValueError(f"Unknown role: {role_name}")
+    system = role.build_system(ctx)
+    user = role.build_user({**ctx, "context": user_msg})
+    llm = LLMFactory.create(provider=provider, db=db)
+    
+    hyperparams = {
+        "max_tokens": role.max_tokens,
+        "temperature": role.temperature,
+        "top_p": role.top_p if hasattr(role, "top_p") else 1.0,
+        "frequency_penalty": role.frequency_penalty if hasattr(role, "frequency_penalty") else 0.0,
+        "presence_penalty": role.presence_penalty if hasattr(role, "presence_penalty") else 0.0,
+    }
+    
+    fingerprint = {
+        "task_id": task_id,
+        "role_name": role_name,
+        "provider": llm.provider_name,
+        "model": getattr(llm, "model", ""),
+        "timestamp": time.time(),
+        "request": {
+            "system_prompt": system,
+            "user_prompt": user,
+            "hyperparams": hyperparams,
+        },
+        "response": {},
+        "duration_ms": 0,
+        "retry_attempts": 0,
+        "retry_errors": [],
+    }
+    
+    last_exception = None
+    total_duration_ms = 0
+    
+    for attempt in range(1, max_retries + 1):
+        t0 = time.time()
+        attempt_start_time = time.time()
+        
+        try:
+            logger.info(f"[LLM] 调用开始: role={role_name}, attempt={attempt}/{max_retries}, task_id={task_id[:10] if task_id else 'None'}")
+            
+            response_text = llm.generate(
+                prompt=user,
+                system_prompt=system,
+                max_tokens=role.max_tokens,
+                temperature=role.temperature,
+                task_type=f"chapter_pipeline_{role_name}",
+            )
+            
+            attempt_duration_ms = (time.time() - t0) * 1000
+            total_duration_ms += attempt_duration_ms
+            
+            logger.info(f"[LLM] 调用成功: role={role_name}, attempt={attempt}, duration={attempt_duration_ms:.1f}ms, response_length={len(response_text)}")
+            
+            fingerprint["response"] = {
+                "text": response_text,
+                "success": True,
+            }
+            fingerprint["duration_ms"] = total_duration_ms
+            fingerprint["retry_attempts"] = attempt - 1
+            
+            return {
+                "text": response_text,
+                "fingerprint": fingerprint,
+            }
+            
+        except Exception as e:
+            attempt_duration_ms = (time.time() - t0) * 1000
+            total_duration_ms += attempt_duration_ms
+            last_exception = e
+            
+            error_info = {
+                "attempt": attempt,
+                "error": str(e),
+                "duration_ms": attempt_duration_ms,
+            }
+            fingerprint["retry_errors"].append(error_info)
+            
+            if attempt < max_retries:
+                logger.warning(f"[LLM] 调用失败 (第{attempt}/{max_retries}次): role={role_name}, error={e}, 将在5秒后重试...")
+                time.sleep(5)
+            else:
+                logger.error(f"[LLM] 调用失败 (全部{max_retries}次重试均失败): role={role_name}, task_id={task_id}, error={e}")
+                logger.error(f"[LLM] 最后一次请求信息: provider={llm.provider_name}, model={getattr(llm, 'model', '')}")
+                logger.error(f"[LLM] 请求 prompt 前200字: {user[:200]}...")
+    
+    fingerprint["response"] = {
+        "text": "",
+        "success": False,
+        "error": str(last_exception),
+    }
+    fingerprint["duration_ms"] = total_duration_ms
+    fingerprint["retry_attempts"] = max_retries
+    
+    raise last_exception
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -781,20 +999,41 @@ def review_chapter_outline(outline: dict, prep_info: dict, provider: str | None 
         "outline": json.dumps(outline, ensure_ascii=False, indent=2),
         "previous_events": previous_events,
     }
-    raw = _call_llm("outline_reviewer", ctx, "", provider)
-    try:
-        data = _parse_json(raw)
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.warning(
-            f"[review_chapter_outline] JSON 解析失败，默认通过: {e}\n"
-            f"原始返回前 300 字: {raw[:300]!r}"
-        )
-        return {
-            "issues": [],
-            "duplicate_risk": [],
-            "verdict": "pass",
-            "summary": "（评审解析失败，已默认通过）",
-        }
+    
+    # 带重试机制的调用
+    for attempt in range(3):
+        try:
+            result = _call_llm_with_fingerprint("outline_reviewer", ctx, "", provider)
+            
+            try:
+                data = _parse_json(result["text"])
+                return data
+            except (json.JSONDecodeError, ValueError):
+                pass
+            
+            if attempt < 2:
+                logger.warning(f"[review_chapter_outline] 第{attempt+1}次尝试: 返回内容不是有效JSON，5秒后重试...")
+                time.sleep(5)
+            else:
+                logger.error("[review_chapter_outline] 3次重试均失败，返回内容不是有效JSON，默认通过")
+                return {
+                    "issues": [],
+                    "duplicate_risk": [],
+                    "verdict": "pass",
+                    "summary": "（评审解析失败，已默认通过）",
+                }
+        except Exception as e:
+            logger.error(f"[review_chapter_outline] LLM调用失败: {e}")
+            if attempt < 2:
+                time.sleep(5)
+            else:
+                logger.error("[review_chapter_outline] 3次重试均失败，默认通过")
+                return {
+                    "issues": [],
+                    "duplicate_risk": [],
+                    "verdict": "pass",
+                    "summary": "（评审调用失败，已默认通过）",
+                }
 
     # ════════════════════════════════════════════════════════════════
     # 兜底去重：RAG 已命中的高相似事件直接进 issues + 强制 needs_revision
@@ -932,16 +1171,36 @@ def adjust_word_count(
     }
     try:
         t0 = time.time()
-        if actual > max_w:
-            raw = _call_llm("compressor", ctx, "", provider)
-            data = _parse_json(raw)
-            new_content = data.get("compressed_text", content)
-            claimed_count = data.get("final_word_count")
-        else:
-            raw = _call_llm("expander", ctx, "", provider)
-            data = _parse_json(raw)
-            new_content = data.get("expanded_text", content)
-            claimed_count = data.get("final_word_count")
+        role_name = "compressor" if actual > max_w else "expander"
+        target_key = "compressed_text" if actual > max_w else "expanded_text"
+        
+        # 带重试机制的调用
+        new_content = content
+        claimed_count = None
+        for attempt in range(3):
+            try:
+                result = _call_llm_with_fingerprint(role_name, ctx, "", provider)
+                
+                try:
+                    data = _parse_json(result["text"])
+                    new_content = data.get(target_key, content)
+                    claimed_count = data.get("final_word_count")
+                    break
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                
+                if attempt < 2:
+                    logger.warning(f"[adjust_word_count] 第{attempt+1}次尝试: 返回内容不是有效JSON，5秒后重试...")
+                    time.sleep(5)
+                else:
+                    logger.error(f"[adjust_word_count] 3次重试均失败，返回内容不是有效JSON，使用原内容")
+            except Exception as e:
+                logger.error(f"[adjust_word_count] LLM调用失败: {e}")
+                if attempt < 2:
+                    time.sleep(5)
+                else:
+                    logger.error(f"[adjust_word_count] 3次重试均失败，使用原内容")
+        
         duration_ms = (time.time() - t0) * 1000
         new_actual = _count_chinese_chars(new_content)
         in_range = min_w <= new_actual <= max_w
@@ -990,22 +1249,44 @@ def review_chapter_text(
         "title": project.title if project else "",
         "content": content[:8000],
     }
-    raw = _call_llm("review", ctx, "", provider)
-    try:
-        return _parse_json(raw)
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.warning(
-            f"[review_chapter_text] JSON 解析失败，使用 5 分兜底: {e}\n"
-            f"原始返回前 300 字: {raw[:300]!r}"
-        )
-        return {
-            "scores": {
-                "consistency": 5, "pacing": 5, "style": 5, "ai_removal": 5,
-                "word_count": 5, "foreshadowing": 5, "character_arc": 5, "thematic": 5,
-            },
-            "critique": "（评审解析失败，已使用默认 5 分中位值）",
-            "suggestions": [],
-        }
+    
+    # 带重试机制的调用
+    for attempt in range(3):
+        try:
+            result = _call_llm_with_fingerprint("review", ctx, "", provider)
+            
+            try:
+                return _parse_json(result["text"])
+            except (json.JSONDecodeError, ValueError):
+                pass
+            
+            if attempt < 2:
+                logger.warning(f"[review_chapter_text] 第{attempt+1}次尝试: 返回内容不是有效JSON，5秒后重试...")
+                time.sleep(5)
+            else:
+                logger.error("[review_chapter_text] 3次重试均失败，返回内容不是有效JSON，使用5分兜底")
+                return {
+                    "scores": {
+                        "consistency": 5, "pacing": 5, "style": 5, "ai_removal": 5,
+                        "word_count": 5, "foreshadowing": 5, "character_arc": 5, "thematic": 5,
+                    },
+                    "critique": "（评审解析失败，已使用默认 5 分中位值）",
+                    "suggestions": [],
+                }
+        except Exception as e:
+            logger.error(f"[review_chapter_text] LLM调用失败: {e}")
+            if attempt < 2:
+                time.sleep(5)
+            else:
+                logger.error("[review_chapter_text] 3次重试均失败，使用5分兜底")
+                return {
+                    "scores": {
+                        "consistency": 5, "pacing": 5, "style": 5, "ai_removal": 5,
+                        "word_count": 5, "foreshadowing": 5, "character_arc": 5, "thematic": 5,
+                    },
+                    "critique": "（评审调用失败，已使用默认 5 分中位值）",
+                    "suggestions": [],
+                }
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1029,20 +1310,38 @@ def decide_revision(review_data: dict, outline: dict, content: str, provider: st
         "outline": json.dumps(outline, ensure_ascii=False, indent=2),
         "content": content[:4000],
     }
-    raw = _call_llm("revision_decider", ctx, "", provider)
-    try:
-        return _parse_json(raw)
-    except (json.JSONDecodeError, ValueError) as e:
-        # 兜底：解析失败默认不修订（保守）
-        logger.warning(
-            f"[decide_revision] JSON 解析失败，默认不修订: {e}\n"
-            f"原始返回前 300 字: {raw[:300]!r}"
-        )
-        return {
-            "decision": "pass",
-            "focus_areas": [],
-            "reasoning": "（决策解析失败，默认不修订）",
-        }
+    
+    # 带重试机制的调用
+    for attempt in range(3):
+        try:
+            result = _call_llm_with_fingerprint("revision_decider", ctx, "", provider)
+            
+            try:
+                return _parse_json(result["text"])
+            except (json.JSONDecodeError, ValueError):
+                pass
+            
+            if attempt < 2:
+                logger.warning(f"[decide_revision] 第{attempt+1}次尝试: 返回内容不是有效JSON，5秒后重试...")
+                time.sleep(5)
+            else:
+                logger.error("[decide_revision] 3次重试均失败，返回内容不是有效JSON，默认不修订")
+                return {
+                    "decision": "pass",
+                    "focus_areas": [],
+                    "reasoning": "（决策解析失败，默认不修订）",
+                }
+        except Exception as e:
+            logger.error(f"[decide_revision] LLM调用失败: {e}")
+            if attempt < 2:
+                time.sleep(5)
+            else:
+                logger.error("[decide_revision] 3次重试均失败，默认不修订")
+                return {
+                    "decision": "pass",
+                    "focus_areas": [],
+                    "reasoning": "（决策调用失败，默认不修订）",
+                }
 
 
 def revise_chapter_text(
@@ -1120,8 +1419,28 @@ def run_post_chapter_processing(
         "current_relations": current_relations,
     }
     try:
-        raw = _call_llm("post_chapter", ctx, "", provider)
-        post_data = _parse_json(raw)
+        post_data = None
+        for attempt in range(3):
+            try:
+                llm_result = _call_llm_with_fingerprint("post_chapter", ctx, "", provider)
+                
+                try:
+                    post_data = _parse_json(llm_result["text"])
+                    break
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                
+                if attempt < 2:
+                    logger.warning(f"[run_post_chapter_processing] 第{attempt+1}次尝试: 返回内容不是有效JSON，5秒后重试...")
+                    time.sleep(5)
+                else:
+                    logger.error("[run_post_chapter_processing] 3次重试均失败，返回内容不是有效JSON")
+            except Exception as e:
+                logger.error(f"[run_post_chapter_processing] LLM调用失败: {e}")
+                if attempt < 2:
+                    time.sleep(5)
+                else:
+                    logger.error("[run_post_chapter_processing] 3次重试均失败")
     except Exception as e:
         logger.warning(f"[PostChapter] LLM failed: {e}")
         post_data = {}
@@ -1610,6 +1929,7 @@ def run_chapter_generation_pipeline(
     auto_revise: bool = True, revision_threshold: float = 6.5,
     progress_cb: Optional[Callable[[str, str, dict], None]] = None,
     guide: str = "",
+    task_id: str = "",
 ) -> dict:
     """
     9 步章节生成流水线
@@ -1690,17 +2010,159 @@ def run_chapter_generation_pipeline(
 
 
     try:
+        # 章节指纹信息收集
+        fingerprints = []
+        
         # Step 1: 准备
         stages["1_prep"], _ = _run_stage(
             "1_prep",
             lambda: build_chapter_prep_info(db, project_id, chapter_id),
         )
 
-        # Step 2: 细纲生成
-        stages["2_outline_gen"], _ = _run_stage(
-            "2_outline_gen",
-            lambda: generate_chapter_outline(db, project_id, chapter_id, provider, guide),
-        )
+        # Step 2: 细纲生成（LLM调用失败自动重试3次，间隔5秒）
+        def _generate_outline():
+            prep = stages["1_prep"]
+            project = db.query(__import__("storage.models", fromlist=["Project"]).Project).filter(
+                __import__("storage.models", fromlist=["Project"]).Project.id == project_id
+            ).first()
+
+            outline_ctx = {
+                "chapter_position": (prep["chapter_outline"] or {}).get("position", "发展"),
+                "pacing": (prep["chapter_outline"] or {}).get("pacing", "平稳"),
+                "key_content": (prep["chapter_outline"] or {}).get("key_content", ""),
+                "plot_advance": (prep["chapter_outline"] or {}).get("plot_advance", ""),
+                "prep_info": _format_prep_for_llm(prep),
+                "previous_events": prep.get("previous_event_signatures_text", "（暂无，这是首章）"),
+                "target_word_count": prep["project_meta"]["target_word_count"],
+                "guide": guide,
+            }
+
+            for attempt in range(3):
+                try:
+                    result = _call_llm_with_fingerprint("chapter_outline_gen", outline_ctx, "", provider, db, task_id)
+                    fingerprints.append(result["fingerprint"])
+                    
+                    try:
+                        parsed = _parse_json(result["text"])
+                        if isinstance(parsed, dict) and parsed.get("key_content"):
+                            return parsed
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    
+                    if attempt < 2:
+                        logger.warning(f"[generate_chapter_outline] 第{attempt+1}次尝试: 返回内容不是有效JSON，5秒后重试...")
+                        time.sleep(5)
+                    else:
+                        logger.error("[generate_chapter_outline] 3次重试均失败，尝试从不完整JSON中提取字段")
+                        
+                        partial_outline = {
+                            "chapter_position": "",
+                            "pacing": "平稳",
+                            "key_content": "",
+                            "plot_advance": "",
+                            "foreshadow_notes": "",
+                            "conflicts": [],
+                            "highlights": [],
+                            "target_word_count": outline_ctx.get("target_word_count", 3000),
+                            "min_word_count": 0,
+                            "max_word_count": 0,
+                            "qi_cheng_zhuan_he": {},
+                            "scenes": [],
+                            "pacing_hooks": [],
+                            "reversals": [],
+                            "foreshadow_actions": [],
+                            "character_developments": [],
+                            "word_count_check": "（细纲生成失败，跳过）",
+                        }
+                        
+                        import re as _re
+                        text = result["text"]
+                        text = text.replace("```json", "").replace("```", "")
+                        
+                        key_patterns = [
+                            ("key_content", r'"key_content"\s*:\s*"([^"]*?)"'),
+                            ("plot_advance", r'"plot_advance"\s*:\s*"([^"]*?)"'),
+                            ("chapter_position", r'"chapter_position"\s*:\s*"([^"]*?)"'),
+                            ("pacing", r'"pacing"\s*:\s*"([^"]*?)"'),
+                            ("title", r'"title"\s*:\s*"([^"]*?)"'),
+                        ]
+                        
+                        for key, pattern in key_patterns:
+                            match = _re.search(pattern, text)
+                            if match:
+                                partial_outline[key] = match.group(1)
+                        
+                        if partial_outline.get("key_content") or partial_outline.get("plot_advance"):
+                            logger.warning("[generate_chapter_outline] 从部分JSON中提取了关键信息，继续生成")
+                            return partial_outline
+                        
+                        logger.error("[generate_chapter_outline] 无法从部分JSON中提取有效信息，使用默认空细纲")
+                        return partial_outline
+                except Exception as e:
+                    logger.error(f"[generate_chapter_outline] LLM调用失败: {e}")
+                    raise
+        
+        stages["2_outline_gen"], _ = _run_stage("2_outline_gen", _generate_outline)
+
+        # 检查细纲是否有效，无效则跳过后续步骤并标记失败
+        # 注意：stages["2_outline_gen"] 直接存储的是细纲数据（不是 {"data": ...} 格式）
+        outline_data = stages["2_outline_gen"]
+        
+        if isinstance(outline_data, dict):
+            key_content = outline_data.get("key_content", "").strip()
+            plot_advance = outline_data.get("plot_advance", "").strip()
+            scenes = outline_data.get("scenes", [])
+            
+            if not key_content and not plot_advance and not scenes:
+                logger.error(f"[Pipeline] 章节 {chapter_id} 细纲内容为空，跳过正文生成及后续步骤，标记失败")
+                
+                try:
+                    chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
+                    if chapter:
+                        chapter.fingerprint = {
+                            "task_id": task_id,
+                            "timestamp": time.time(),
+                            "total_duration_ms": (time.time() - start_time) * 1000,
+                            "llm_calls": fingerprints,
+                            "error": "细纲内容为空，无法生成正文",
+                            "failure_stage": "2_outline_gen",
+                        }
+                        db.commit()
+                except Exception as save_err:
+                    logger.error(f"[Pipeline] 保存指纹失败: {save_err}")
+                
+                return {
+                    "status": "failed",
+                    "stages": stages,
+                    "error": "细纲内容为空，无法生成正文",
+                    "final_word_count": 0,
+                    "total_duration_ms": (time.time() - start_time) * 1000,
+                }
+        else:
+            logger.error(f"[Pipeline] 章节 {chapter_id} 细纲数据格式错误，标记失败")
+            
+            try:
+                chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
+                if chapter:
+                    chapter.fingerprint = {
+                        "task_id": task_id,
+                        "timestamp": time.time(),
+                        "total_duration_ms": (time.time() - start_time) * 1000,
+                        "llm_calls": fingerprints,
+                        "error": "细纲数据格式错误",
+                        "failure_stage": "2_outline_gen",
+                    }
+                    db.commit()
+            except Exception as save_err:
+                logger.error(f"[Pipeline] 保存指纹失败: {save_err}")
+            
+            return {
+                "status": "failed",
+                "stages": stages,
+                "error": "细纲数据格式错误，无法生成正文",
+                "final_word_count": 0,
+                "total_duration_ms": (time.time() - start_time) * 1000,
+            }
 
         # Step 3: 细纲评审
         def _review():
@@ -1729,12 +2191,54 @@ def run_chapter_generation_pipeline(
         stages["3_outline_review"], _ = _run_stage("3_outline_review", _review)
 
         # Step 4: 正文生成
-        stages["4_text_gen"], _ = _run_stage(
-            "4_text_gen",
-            lambda: generate_chapter_text(
-                db, project_id, chapter_id, stages["2_outline_gen"], provider,
-            ),
-        )
+        def _generate_text():
+            from storage.models import Project
+            project = db.query(Project).filter(Project.id == project_id).first()
+            prep = stages["1_prep"]
+            final_outline = stages["2_outline_gen"]
+
+            writing_ctx = {
+                "writing_style": project.writing_style or "平实",
+                "ai_removal_instruction": build_ai_removal_instruction(project.ai味去除程度) if project.ai味去除程度 else "",
+                "themes": prep["themes"],
+                "characters": "\n".join(prep["characters"]) or "（无）",
+                "character_arcs": "（参见上文 character 段）",
+                "world": prep["project_outline_text"] or "（无项目大纲）",
+                "foreshadowings": prep["active_foreshadowings"],
+                "chapters": prep["prev_chapters_summary"],
+                "target_word_count": prep["project_meta"]["target_word_count"],
+                "word_count_range": f"{prep['project_meta']['min_words']}~{prep['project_meta']['max_words']} 字",
+            }
+
+            user_msg = (
+                f"【本章细纲（严格遵循）】\n{json.dumps(final_outline, ensure_ascii=False, indent=2)}\n\n"
+                f"【上章结尾（衔接用）】\n{prep['prev_chapter_ending']}\n\n"
+                f"【登场人物】\n" + "\n".join(prep["characters"]) + "\n\n"
+                f"【目标字数】{prep['project_meta']['target_word_count']} 字\n\n"
+                f"请按细纲生成正文，**不要偏离细纲**。\n\n【重要约束】：请务必在生成完毕后检查字数，确保最终输出严格在{prep['project_meta']['min_words']}~{prep['project_meta']['max_words']}字之间，不要超出或过少。"
+            )
+
+            # LLM调用失败自动重试3次（间隔5秒），内容过短也重试
+            for attempt in range(3):
+                try:
+                    result = _call_llm_with_fingerprint("writing", writing_ctx, user_msg, provider, db, task_id)
+                    fingerprints.append(result["fingerprint"])
+                    text = result["text"].strip()
+                    
+                    if text and len(text) > 100:
+                        return text
+                    
+                    if attempt < 2:
+                        logger.warning(f"[generate_text] 第{attempt+1}次尝试: 生成内容过短({len(text)}字)，5秒后重试...")
+                        time.sleep(5)
+                    else:
+                        logger.error("[generate_text] 3次重试均失败，生成内容过短或为空")
+                        return ""
+                except Exception as e:
+                    logger.error(f"[generate_text] LLM调用失败: {e}")
+                    raise
+        
+        stages["4_text_gen"], _ = _run_stage("4_text_gen", _generate_text)
 
         # Step 5: 字数调整
         def _adjust():
@@ -1778,7 +2282,7 @@ def run_chapter_generation_pipeline(
             return {"decision": decision, "revised_text": stages["5_word_adjust"], "was_revised": False}
         stages["7_revise"], _ = _run_stage("7_revise", _decide)
 
-        # Step 8: 保存
+        # Step 8: 保存（确保指纹信息始终保存）
         def _save():
             chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
             if not chapter:
@@ -1786,13 +2290,21 @@ def run_chapter_generation_pipeline(
             final_text = stages["7_revise"]["revised_text"]
             chapter.content = final_text
             chapter.word_count = _count_chinese_chars(final_text)
-            # 备份版本
-            version = ChapterVersion(
-                chapter_id=chapter_id,
-                content=final_text,
-                version_num=_next_version_num(db, chapter_id),
-            )
-            db.add(version)
+            # 保存章节指纹信息（即使正文为空也要保存）
+            chapter.fingerprint = {
+                "task_id": task_id,
+                "timestamp": time.time(),
+                "total_duration_ms": (time.time() - start_time) * 1000,
+                "llm_calls": fingerprints,
+            }
+            # 备份版本（仅当正文非空时）
+            if final_text and final_text.strip():
+                version = ChapterVersion(
+                    chapter_id=chapter_id,
+                    content=final_text,
+                    version_num=_next_version_num(db, chapter_id),
+                )
+                db.add(version)
             db.commit()
             return final_text
         final_text, _ = _run_stage("8_save", _save)
@@ -1945,6 +2457,22 @@ def run_chapter_generation_pipeline(
 
     except Exception as e:
         logger.error(f"[Pipeline] failed: {e}")
+        # 即使失败也要保存已收集的指纹信息
+        try:
+            chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
+            if chapter:
+                chapter.fingerprint = {
+                    "task_id": task_id,
+                    "timestamp": time.time(),
+                    "total_duration_ms": (time.time() - start_time) * 1000,
+                    "llm_calls": fingerprints,
+                    "error": str(e),
+                }
+                db.commit()
+            logger.info(f"[Pipeline] saved partial fingerprint for chapter {chapter_id} after failure")
+        except Exception as save_err:
+            logger.error(f"[Pipeline] failed to save fingerprint after pipeline failure: {save_err}")
+        
         return {
             "status": "failed",
             "stages": stages,
@@ -1963,8 +2491,34 @@ def _revise_outline(outline: dict, prep: dict, suggestions: str, provider: str |
         "prep_info": _format_prep_for_llm(prep) + f"\n\n【需修复的严重问题】\n{suggestions}",
         "target_word_count": prep["project_meta"]["target_word_count"],
     }
-    raw = _call_llm("chapter_outline_gen", ctx, "", provider)
-    return _parse_json(raw)
+    
+    # 使用带重试机制的 _call_llm_with_fingerprint
+    for attempt in range(3):
+        try:
+            result = _call_llm_with_fingerprint("chapter_outline_gen", ctx, "", provider)
+            
+            try:
+                parsed = _parse_json(result["text"])
+                if isinstance(parsed, dict) and parsed.get("key_content"):
+                    return parsed
+            except (json.JSONDecodeError, ValueError):
+                pass
+            
+            if attempt < 2:
+                logger.warning(f"[_revise_outline] 第{attempt+1}次尝试: 返回内容不是有效JSON，5秒后重试...")
+                time.sleep(5)
+            else:
+                logger.error("[_revise_outline] 3次重试均失败，返回内容不是有效JSON，使用原细纲")
+                return outline
+        except Exception as e:
+            logger.error(f"[_revise_outline] LLM调用失败: {e}")
+            if attempt < 2:
+                time.sleep(5)
+            else:
+                logger.error("[_revise_outline] 3次重试均失败，使用原细纲")
+                return outline
+    
+    return outline
 
 
 def _next_version_num(db, chapter_id: int) -> int:

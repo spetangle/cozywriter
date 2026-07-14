@@ -329,6 +329,13 @@ function app() {
                 intro_chapter_id: null, develop_chapter_id: null, climax_chapter_id: null, resolve_chapter_id: null,
                 intro_note: '', develop_note: '', climax_note: '', resolve_note: '' },
 
+    // 全文评审
+    fullReviewTaskRunning: false,
+    fullReviewProgress: 0,
+    fullReviewResult: null,
+    fullReviewHistory: [],
+    activeReviewDimension: 'story',
+
     // 预览面板
     previewSubTab: 'content',   // content / outline / review
     writingTab: 'content',       // content / outline / review (写作台内页签)
@@ -370,6 +377,11 @@ function app() {
     deleteCharacterId: '',
     deleteCharacterCanDelete: false,
     deleteCharacterChecking: false,
+
+    // 角色改名
+    showRenameCharacterModal: false,
+    renameCharacter: null,
+    renameNewName: '',
 
     // AI 生成
     showGenerateModal: false,
@@ -1345,6 +1357,7 @@ function app() {
       kind: '',           // 'in_flight' | 'awaiting_commit' | 'partial_failed'
       runId: null,
       message: '',
+      committing: false,  // 防连点：提交中状态
     },
     _bannerDismissed: new Set(),
 
@@ -1513,9 +1526,10 @@ function app() {
           wiz.status = 'failed';
           wiz.errorMsg = '有 stage 执行失败';
           this._stopBootstrapPolling();
-        } else if (allDone && (data.status === 'completed' || failedCount === 0)) {
+        } else if (allDone && (data.status === 'completed' || data.status === 'partial' || failedCount === 0)) {
           // 后端已自动 commit（auto_commit=true），但前端保险起见也自动调一次 commit
           // （用户无感，不会卡住）
+          // partial 状态也需要自动提交（rerun_stage 后状态为 partial）
           wiz.status = 'committing';
           wiz.completedAt = Date.now();
           this._stopBootstrapPolling();
@@ -1651,53 +1665,136 @@ function app() {
         'stage_3c_supporting': '配角',
         'stage_3d_arcs': '角色弧光',
         'stage_4a_outline': '项目大纲',
+        'stage_4a_chapter_outlines': '每章一句话大纲',
         'stage_4b_foreshadow': '伏笔',
       }[stageId] || stageId;
-      if (!confirm(`确定重新生成「${stageLabel}」吗？将覆盖之前的结果。`)) return;
+      
+      // 对于大纲相关的 stage，添加章节序号区间信息
+      let chapterRange = '';
+      if (stageId === 'stage_4a_outline' || stageId === 'stage_4a_chapter_outlines') {
+        const totalChapters = this.currentProject.total_chapters || 0;
+        if (totalChapters > 0) {
+          chapterRange = `\n预计重新生成第 ${1} 章到第 ${totalChapters} 章，共计 ${totalChapters} 章。`;
+        }
+      }
+      
+      if (!confirm(`确定重新生成「${stageLabel}」吗？将覆盖之前的结果。${chapterRange}`)) return;
 
-      this.rerunStageBusy[stageId] = true;
-      try {
-        // 取最新 run_id
-        const lr = await fetch(`/api/workflow/project/${this.currentProject.id}/latest`);
-        if (!lr.ok) {
-          alert('未找到 bootstrap 运行记录，请先完成设定生成。');
-          return;
-        }
-        const runData = await lr.json();
-        const runId = runData.run_id;
-        if (runData.status === 'committed' || runData.status === 'failed') {
-          // committed 后支持 rerun，failed 也支持
-        }
+      const stagesToRerun = [];
+      if (stageId === 'stage_4a_outline') {
+        stagesToRerun.push('stage_4a_outline', 'stage_4a_chapter_outlines');
+      } else {
+        stagesToRerun.push(stageId);
+      }
 
-        const res = await fetch(`/api/workflow/run/${runId}/rerun`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ stage_id: stageId }),
-        });
-        const data = await res.json();
-        if (data.status !== 'submitted') {
-          alert('重跑失败: ' + (data.error || JSON.stringify(data)));
-          return;
-        }
-        const task = await this._pollTask(data.task_id, { onProgress: () => this.refreshAllTasks() });
-        if (task.status === 'completed') {
-          // 自动 commit 让用户立即看到新结果
-          await fetch(`/api/workflow/run/${runId}/commit`, { method: 'POST' });
-          // 刷新当前项目的 bootstrapData（更新"设定文档预览"显示）
-          await this._refreshBootstrapData();
-          // 重新打开项目，让角色/世界观/伏笔等列表也刷新
-          if (this.currentProject) {
-            await this.openProject(this.currentProject);
+      for (const sid of stagesToRerun) {
+        this.rerunStageBusy[sid] = true;
+        try {
+          const lr = await fetch(`/api/workflow/project/${this.currentProject.id}/latest`);
+          if (!lr.ok) {
+            alert('未找到 bootstrap 运行记录，请先完成设定生成。');
+            return;
           }
-          // 弹个轻量提示
-          this.toast?.(`✅ ${stageLabel} 已重新生成`);
-        } else {
-          alert('重跑失败: ' + (task.error || 'unknown'));
+          const runData = await lr.json();
+          const runId = runData.run_id;
+
+          const res = await fetch(`/api/workflow/run/${runId}/rerun`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ stage_id: sid }),
+          });
+          const data = await res.json();
+          if (data.status !== 'submitted') {
+            alert('重跑失败: ' + (data.error || JSON.stringify(data)));
+            return;
+          }
+          const task = await this._pollTask(data.task_id, { onProgress: () => this.refreshAllTasks() });
+          if (task.status === 'completed') {
+            await fetch(`/api/workflow/run/${runId}/commit`, { method: 'POST' });
+          } else {
+            alert('重跑失败: ' + (task.error || 'unknown'));
+            return;
+          }
+        } catch (e) {
+          alert('重跑失败: ' + e.message);
+          return;
+        } finally {
+          this.rerunStageBusy[sid] = false;
         }
-      } catch (e) {
-        alert('重跑失败: ' + e.message);
-      } finally {
-        this.rerunStageBusy[stageId] = false;
+      }
+
+      await this._refreshBootstrapData();
+      if (this.currentProject) {
+        await this.openProject(this.currentProject);
+      }
+      this.toast?.(`✅ ${stageLabel} 已重新生成`);
+    },
+
+    async rerunAllCharacters() {
+      if (!this.currentProject) {
+        alert('请先打开一个项目');
+        return;
+      }
+      if (!confirm('确定重新生成全部角色吗？将覆盖之前的主角、反派、配角和角色弧光。')) return;
+
+      const stagesToRerun = ['stage_3a_protagonist', 'stage_3b_antagonist', 'stage_3c_supporting', 'stage_3d_arcs'];
+      const stageLabels = {
+        'stage_3a_protagonist': '主角',
+        'stage_3b_antagonist': '反派',
+        'stage_3c_supporting': '配角',
+        'stage_3d_arcs': '角色弧光',
+      };
+
+      let runId = null;
+
+      for (const sid of stagesToRerun) {
+        this.rerunStageBusy[sid] = true;
+        try {
+          const lr = await fetch(`/api/workflow/project/${this.currentProject.id}/latest`);
+          if (!lr.ok) {
+            alert('未找到 bootstrap 运行记录，请先完成设定生成。');
+            return;
+          }
+          const runData = await lr.json();
+          runId = runData.run_id;
+
+          const res = await fetch(`/api/workflow/run/${runId}/rerun`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ stage_id: sid }),
+          });
+          const data = await res.json();
+          if (data.status !== 'submitted') {
+            alert(`重跑 ${stageLabels[sid]} 失败: ` + (data.error || JSON.stringify(data)));
+            return;
+          }
+          const task = await this._pollTask(data.task_id, { onProgress: () => this.refreshAllTasks() });
+          if (task.status !== 'completed') {
+            alert(`重跑 ${stageLabels[sid]} 失败: ` + (task.error || 'unknown'));
+            return;
+          }
+        } catch (e) {
+          alert(`重跑 ${stageLabels[sid]} 失败: ` + e.message);
+          return;
+        } finally {
+          this.rerunStageBusy[sid] = false;
+        }
+      }
+
+      if (runId) {
+        this.bootstrapWizard.runId = runId;
+        await fetch(`/api/workflow/run/${runId}/commit`, { method: 'POST' });
+      }
+
+      await this._refreshBootstrapData();
+      if (this.currentProject) {
+        await this.openProject(this.currentProject);
+      }
+      this.toast?.('✅ 全部角色已重新生成');
+
+      const shouldRerunOutline = confirm('⚠️ 角色已更新！\n\n大纲中的角色名可能与新角色不一致。\n\n是否立即重新生成大纲以保持剧情一致性？');
+      if (shouldRerunOutline) {
+        await this.rerunBootstrapStage('stage_4a_outline');
       }
     },
 
@@ -2007,14 +2104,21 @@ function app() {
       }
     },
 
-    async commitBootstrap(auto = false) {
+    async commitBootstrap(auto = false, projectId = null, runId = null) {
       const wiz = this.bootstrapWizard;
-      if (!wiz.runId) return;
-      // 手动点击时守护；auto 触发时允许连续（如轮询里调用）
-      if (!auto && wiz.committing) return;
-      wiz.committing = true;
+      const targetRunId = runId || wiz.runId;
+      const targetProjectId = projectId || wiz.projectId;
+      if (!targetRunId) return;
+      
+      if (!auto) {
+        if (wiz.committing) return;
+        if (this.bootstrapBanner.committing) return;
+        wiz.committing = true;
+        this.bootstrapBanner.committing = true;
+      }
+      
       try {
-        const res = await fetch(`/api/workflow/run/${wiz.runId}/commit`, {
+        const res = await fetch(`/api/workflow/run/${targetRunId}/commit`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
         });
@@ -2022,12 +2126,17 @@ function app() {
         if (data.status === 'committed' || data.status === 'already_committed') {
           wiz.status = 'committed';
           wiz.completedAt = Date.now();
+          wiz.projectId = targetProjectId;
+          wiz.runId = targetRunId;
           this._stopBootstrapPolling();
-          // 刷新当前项目数据
           if (this.currentProject) {
             await this.openProject(this.currentProject);
+          } else if (targetProjectId) {
+            const proj = this.projects.find((p) => p.id === targetProjectId);
+            if (proj) {
+              await this.openProject(proj);
+            }
           }
-          // 自动提交不弹 alert（用户体验流畅），手动点击才提示
           if (!auto) {
             const summary = data.summary || {};
             const msg = '✅ AI 补全已成功写入数据库！\n\n' +
@@ -2040,15 +2149,16 @@ function app() {
               '点确定后可进入写作台开始创作！';
             alert(msg);
           }
+          this.bootstrapBanner.visible = false;
         } else {
-          // 失败时：auto 模式让 wizard 退回 completed 等用户手动重试；手动模式弹 alert
           if (auto) {
-            throw new Error(data.error || 'commit failed');
+            throw new Error(data.error || data.detail || 'commit failed');
           }
-          alert('提交失败: ' + (data.error || 'unknown'));
+          alert('提交失败: ' + (data.error || data.detail || 'unknown'));
         }
       } finally {
         wiz.committing = false;
+        this.bootstrapBanner.committing = false;
       }
     },
 
@@ -2143,7 +2253,11 @@ function app() {
     },
 
     async openProject(project) {
+      console.log('[openProject] project:', project);
+      console.log('[openProject] project.id:', project.id);
       this.currentProject = { ...project };
+      console.log('[openProject] currentProject:', this.currentProject);
+      console.log('[openProject] currentProject.id:', this.currentProject.id);
       this.activePanel = 'writing';
       this.outlineSubPanel = 'overview';
       this._saveLastView();
@@ -2826,6 +2940,31 @@ function app() {
       }
     },
 
+    async loadChapterFingerprint(chapterId) {
+      if (!chapterId || !this.currentProject) return;
+      try {
+        const res = await fetch(
+          `/api/projects/${this.currentProject.id}/chapters/${chapterId}/fingerprint`
+        );
+        if (res.ok) {
+          const data = await res.json();
+          if (this.currentChapter && this.currentChapter.id === chapterId) {
+            this.currentChapter.fingerprint = data.fingerprint || {};
+          }
+        }
+      } catch (e) {
+        console.warn('[loadChapterFingerprint] failed:', e);
+      }
+    },
+
+    switchToFingerprintTab() {
+      this.writingTab = 'fingerprint';
+      this._saveLastView();
+      if (this.currentChapter && this.currentChapter.id) {
+        this.loadChapterFingerprint(this.currentChapter.id);
+      }
+    },
+
     async _loadChapterReview(chapter) {
       if (!chapter || !this.currentProject) return;
       this.previewReview = null;
@@ -2909,6 +3048,16 @@ function app() {
     get wordProgressPercent() {
       if (!this.currentProject || !this.currentProject.target_word_count) return 0;
       return Math.min(100, (this.currentProject.word_count / this.currentProject.target_word_count) * 100);
+    },
+
+    get generatedChapterCount() {
+      return this.chapters.filter(c => c.content && c.content.trim().length > 0).length;
+    },
+
+    get chapterProgressPercent() {
+      const total = this.currentProject?.total_chapters || 0;
+      if (total === 0) return 0;
+      return Math.min(100, (this.generatedChapterCount / total) * 100);
     },
 
     getWordCountStyle(chapter) {
@@ -3073,6 +3222,206 @@ function app() {
       } catch (e) {
         alert('删除失败：' + e.message);
       }
+    },
+
+    // ═══ 全文评审功能 ═══
+    async startFullReview() {
+      if (!this.currentProject) return;
+      if (this.chapters.length === 0) {
+        alert('暂无章节内容可评审');
+        return;
+      }
+
+      this.fullReviewTaskRunning = true;
+      this.fullReviewProgress = 0;
+
+      try {
+        // 提交评审任务
+        const res = await fetch('/api/full-reviews', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ project_id: this.currentProject.id }),
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.detail || '提交失败');
+        }
+        const data = await res.json();
+        const taskId = data.task_id;
+
+        // 轮询任务状态
+        await this.pollFullReviewTask(taskId);
+      } catch (e) {
+        alert('评审失败：' + e.message);
+        this.fullReviewTaskRunning = false;
+      }
+    },
+
+    async pollFullReviewTask(taskId) {
+      const pollInterval = 2000; // 2秒轮询一次
+
+      const poll = async () => {
+        try {
+          const res = await fetch(`/api/tasks/${taskId}`);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const task = await res.json();
+
+          this.fullReviewProgress = task.progress || 0;
+
+          if (task.status === 'completed') {
+            this.fullReviewTaskRunning = false;
+            if (task.result?.id) {
+              await this.loadFullReviewResult(task.result.id);
+              await this.loadFullReviewHistory();
+            }
+          } else if (task.status === 'failed') {
+            this.fullReviewTaskRunning = false;
+            alert('评审失败：' + (task.error || '未知错误'));
+          } else {
+            // 继续轮询
+            setTimeout(poll, pollInterval);
+          }
+        } catch (e) {
+          console.error('轮询任务状态失败:', e);
+          setTimeout(poll, pollInterval);
+        }
+      };
+
+      poll();
+    },
+
+    async loadFullReviewResult(reviewId) {
+      if (!this.currentProject) return;
+      try {
+        const res = await fetch(
+          `/api/full-reviews/${reviewId}?project_id=${this.currentProject.id}`
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        this.fullReviewResult = await res.json();
+
+        // 绘制雷达图
+        this.$nextTick(() => {
+          this.drawRadarChart();
+        });
+      } catch (e) {
+        console.error('加载评审结果失败:', e);
+      }
+    },
+
+    async loadFullReviewHistory() {
+      if (!this.currentProject) return;
+      try {
+        const res = await fetch(
+          `/api/full-reviews/project/${this.currentProject.id}`
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        this.fullReviewHistory = await res.json();
+      } catch (e) {
+        console.error('加载评审历史失败:', e);
+      }
+    },
+
+    drawRadarChart() {
+      const canvas = document.getElementById('radarChart');
+      if (!canvas || !this.fullReviewResult) return;
+
+      const ctx = canvas.getContext('2d');
+      const data = this.fullReviewResult;
+
+      // 清除画布
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+      const radius = 150;
+
+      // 五个维度
+      const dimensions = [
+        { key: 'score_story', label: '故事情节' },
+        { key: 'score_character', label: '人物塑造' },
+        { key: 'score_prose', label: '文笔语言' },
+        { key: 'score_theme', label: '主题立意' },
+        { key: 'score_market', label: '市场潜力' },
+      ];
+
+      const angleStep = (2 * Math.PI) / dimensions.length;
+      const startAngle = -Math.PI / 2; // 从顶部开始
+
+      // 绘制背景网格
+      ctx.strokeStyle = '#e0e0e0';
+      ctx.lineWidth = 1;
+      for (let r = 0.2; r <= 1; r += 0.2) {
+        ctx.beginPath();
+        for (let i = 0; i <= dimensions.length; i++) {
+          const angle = startAngle + i * angleStep;
+          const x = centerX + Math.cos(angle) * radius * r;
+          const y = centerY + Math.sin(angle) * radius * r;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        ctx.stroke();
+      }
+
+      // 绘制轴线和标签
+      ctx.fillStyle = '#666';
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      dimensions.forEach((dim, i) => {
+        const angle = startAngle + i * angleStep;
+        const x = centerX + Math.cos(angle) * (radius + 30);
+        const y = centerY + Math.sin(angle) * (radius + 30);
+        ctx.fillText(dim.label, x, y);
+      });
+
+      // 绘制数据区域
+      ctx.beginPath();
+      dimensions.forEach((dim, i) => {
+        const score = data[dim.key] || 0;
+        const normalizedScore = score / 10; // 转换为 0-1
+        const angle = startAngle + i * angleStep;
+        const x = centerX + Math.cos(angle) * radius * normalizedScore;
+        const y = centerY + Math.sin(angle) * radius * normalizedScore;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.closePath();
+
+      // 填充颜色
+      ctx.fillStyle = 'rgba(59, 130, 246, 0.3)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(59, 130, 246, 0.8)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // 绘制数据点
+      dimensions.forEach((dim, i) => {
+        const score = data[dim.key] || 0;
+        const normalizedScore = score / 10;
+        const angle = startAngle + i * angleStep;
+        const x = centerX + Math.cos(angle) * radius * normalizedScore;
+        const y = centerY + Math.sin(angle) * radius * normalizedScore;
+
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, 2 * Math.PI);
+        ctx.fillStyle = '#3b82f6';
+        ctx.fill();
+      });
+    },
+
+    getScoreClass(score) {
+      if (score >= 8) return 'score-excellent';
+      if (score >= 6) return 'score-good';
+      if (score >= 4) return 'score-average';
+      return 'score-poor';
+    },
+
+    formatTime(isoString) {
+      if (!isoString) return '';
+      const date = new Date(isoString);
+      return date.toLocaleString('zh-CN');
     },
 
     togglePlotExpanded(id) {
@@ -5035,6 +5384,54 @@ function app() {
         alert('替换失败: ' + e.message);
       } finally {
         this.replacingCharacter = false;
+      }
+    },
+
+    openRenameCharacterModal(character) {
+      this.renameCharacter = character;
+      this.renameNewName = character.name || '';
+      this.showRenameCharacterModal = true;
+    },
+
+    async renameCharacterAction() {
+      const char = this.renameCharacter;
+      const newName = this.renameNewName.trim();
+      if (!char || !newName || newName === char.name) return;
+
+      if (!confirm(`确定将「${char.name}」改名为「${newName}」吗？这将修改所有涉及该角色名称的内容。`)) return;
+
+      try {
+        // 1. 更新角色名称
+        if (char._source === 'manual') {
+          await fetch(`/api/projects/${this.currentProject.id}/characters/${char.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: newName }),
+          });
+        }
+
+        // 2. 替换所有内容中的角色名称
+        this.replaceFind = char.name;
+        this.replaceReplace = newName;
+        await this.replaceAllOccurrences();
+
+        // 3. 更新角色弧光中的角色名称
+        for (const arc of this.characterArcs) {
+          if (arc.character_id === char.id) {
+            await fetch(`/api/projects/${this.currentProject.id}/arcs/${arc.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ character_name: newName }),
+            });
+          }
+        }
+
+        await this.openProject(this.currentProject);
+        this.showRenameCharacterModal = false;
+        alert('角色改名完成');
+      } catch (e) {
+        console.error('[角色改名] 失败:', e);
+        alert('改名失败: ' + e.message);
       }
     },
     

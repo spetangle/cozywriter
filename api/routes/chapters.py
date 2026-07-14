@@ -39,11 +39,15 @@ class ChapterResponse(BaseModel):
     content: str
     word_count: int
     synopsis: str
+    fingerprint: dict = None
     created_at: object
     updated_at: object
 
     class Config:
         from_attributes = True
+        json_encoders = {
+            type(None): lambda v: None,
+        }
 
 
 class VersionResponse(BaseModel):
@@ -179,6 +183,13 @@ async def get_chapter(project_id: str, chapter_id: int, db: Session = Depends(ge
     """获取章节详情（带项目隔离验证）"""
     chapter = _verify_chapter(chapter_id, project_id, db)
     return chapter
+
+
+@router.get("/projects/{project_id}/chapters/{chapter_id}/fingerprint")
+async def get_chapter_fingerprint(project_id: str, chapter_id: int, db: Session = Depends(get_db)):
+    """获取章节指纹信息（单独端点，避免每次切换章节传输大量数据）"""
+    chapter = _verify_chapter(chapter_id, project_id, db)
+    return {"fingerprint": chapter.fingerprint or {}}
 
 
 @router.put("/projects/{project_id}/chapters/{chapter_id}", response_model=ChapterResponse)

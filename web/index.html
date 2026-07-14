@@ -174,9 +174,8 @@
             </template>
           </div>
           <div class="topbar-center">
-            <template x-if="currentProject">
-              <span class="project-title" x-text="currentProject.title"></span>
-            </template>
+            <span x-show="currentProject" class="project-title" x-text="currentProject.title"></span>
+            <span x-show="currentProject && currentProject.id" class="project-id-badge" x-text="'(' + currentProject.id + ')'"></span>
           </div>
           <div class="topbar-right">
             <button class="btn-icon" @click="openInspirationHub()" title="灵感池">
@@ -230,22 +229,23 @@
                 <!-- 一致性检查已自动化、评审是单章节功能,菜单移除;功能保留在背景自动跑 -->
                 <button @click="activePanel = 'plot-tracker'; _saveLastView()" :class="{ active: activePanel === 'plot-tracker' }">📊 剧情追踪</button>
                 <button @click="activePanel = 'inspirations'; _saveLastView()" :class="{ active: activePanel === 'inspirations' }">💡 灵感</button>
+                <button @click="activePanel = 'full-review'; _saveLastView()" :class="{ active: activePanel === 'full-review' }">📝 全文评审</button>
                 <button @click="openTextReplaceModal()">🔄 替换</button>
                 <button @click="openExportModal()">📤 导出</button>
               </div>
             </div>
 
-            <!-- 字数目标进度 -->
+            <!-- 章节进度 -->
             <template x-if="currentProject">
               <div class="sidebar-section">
-                <div class="sidebar-header"><span>字数进度</span></div>
+                <div class="sidebar-header"><span>章节进度</span></div>
                 <div class="word-progress">
                   <div class="wp-bar">
-                    <div class="wp-fill" :style="`width: ${wordProgressPercent}%`"></div>
+                    <div class="wp-fill" :style="`width: ${chapterProgressPercent}%`"></div>
                   </div>
                   <div class="wp-text">
-                    <span x-text="`${currentProject.word_count || 0} / ${currentProject.target_word_count || 0} 字`"></span>
-                    <span x-text="`${chapters.length} 章`"></span>
+                    <span x-text="`${generatedChapterCount} / ${currentProject.total_chapters || 0} 章`"></span>
+                    <span x-text="`${currentProject.word_count || 0} 字`"></span>
                   </div>
                   </div>
               </div>
@@ -374,10 +374,12 @@
                   }[bootstrapBanner.kind] || 'AI 补全：'"></strong>
                   <span x-text="bootstrapBanner.message"></span>
                 </div>
-                <button class="btn-small" @click="openBootstrapWizard(bootstrapBanner.projectId, bootstrapBanner.runId)"
+                <button class="btn-small" 
+                        :disabled="bootstrapBanner.committing"
+                        @click="bootstrapBanner.kind === 'awaiting_commit' ? commitBootstrap(false, bootstrapBanner.projectId, bootstrapBanner.runId) : openBootstrapWizard(bootstrapBanner.projectId, bootstrapBanner.runId)"
                         x-text="{
                           in_flight: '查看进度',
-                          awaiting_commit: '提交入库',
+                          awaiting_commit: bootstrapBanner.committing ? '提交中...' : '提交入库',
                           partial_failed: '查看/重跑',
                           aborted: '重新启动',
                           cancelled: '查看详情'
@@ -406,7 +408,7 @@
                     </span>
                     <button :class="{ active: writingTab === 'content' }" @click="writingTab = 'content'; _saveLastView()">正文</button>
                     <button :class="{ active: writingTab === 'outline' }" @click="writingTab = 'outline'; _saveLastView()">细纲</button>
-                    <!-- 评审报告 tab 已移除(评审是单章节功能,归到写作台入口时的自动流程) -->
+                    <button :class="{ active: writingTab === 'fingerprint' }" @click="switchToFingerprintTab()">🔍 LLM指纹</button>
                   </div>
                 </div>
 
@@ -575,6 +577,69 @@
                     <div class="preview-empty">
                       <p>本章暂无细纲</p>
                       <p style="font-size:13px;color:var(--text-muted)">点击「一键生成」生成细纲和正文</p>
+                    </div>
+                  </template>
+                </div>
+
+                <!-- LLM 指纹信息显示区 -->
+                <div x-show="writingTab === 'fingerprint'" class="writing-tab-content writing-fingerprint-panel">
+                  <template x-if="currentChapter && currentChapter.fingerprint && (currentChapter.fingerprint.llm_calls || []).length > 0">
+                    <div class="fingerprint-detail">
+                      <h3>🔍 LLM 指纹信息</h3>
+                      <template x-for="(call, i) in currentChapter.fingerprint.llm_calls" :key="i">
+                        <div class="fingerprint-call-card">
+                          <div class="fingerprint-call-header">
+                            <span class="fingerprint-call-index">#{{ i + 1 }}</span>
+                            <span class="fingerprint-call-role" x-text="call.role_name || 'unknown'"></span>
+                            <span class="fingerprint-call-provider" x-text="call.provider || ''"></span>
+                            <span class="fingerprint-call-model" x-text="call.model || ''"></span>
+                          </div>
+                          <div class="fingerprint-call-meta">
+                            <span>任务ID: <code x-text="call.task_id || '-'"></code></span>
+                            <span>耗时: <code x-text="call.duration_ms ? call.duration_ms.toFixed(0) + 'ms' : '-'"></code></span>
+                            <span>状态: <code :class="{ success: call.response?.success, error: !call.response?.success }" x-text="call.response?.success ? '成功' : '失败'"></code></span>
+                          </div>
+                          
+                          <div class="fingerprint-section">
+                            <h4>📋 请求参数</h4>
+                            <div class="fingerprint-params">
+                              <div class="param-row">
+                                <span class="param-label">max_tokens:</span>
+                                <span class="param-value" x-text="call.request?.hyperparams?.max_tokens || '-'"></span>
+                              </div>
+                              <div class="param-row">
+                                <span class="param-label">temperature:</span>
+                                <span class="param-value" x-text="call.request?.hyperparams?.temperature || '-'"></span>
+                              </div>
+                              <div class="param-row">
+                                <span class="param-label">top_p:</span>
+                                <span class="param-value" x-text="call.request?.hyperparams?.top_p || '-'"></span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div class="fingerprint-section">
+                            <h4>📝 System Prompt</h4>
+                            <pre class="fingerprint-prompt">{{ call.request?.system_prompt || '' }}</pre>
+                          </div>
+
+                          <div class="fingerprint-section">
+                            <h4>💬 User Prompt</h4>
+                            <pre class="fingerprint-prompt">{{ call.request?.user_prompt || '' }}</pre>
+                          </div>
+
+                          <div class="fingerprint-section" x-show="call.response">
+                            <h4>📤 Response</h4>
+                            <pre class="fingerprint-response" x-text="call.response?.text || (call.response?.error || '无响应')"></pre>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                  <template x-if="!currentChapter || !currentChapter.fingerprint || !(currentChapter.fingerprint.llm_calls || []).length">
+                    <div class="preview-empty">
+                      <p>📭 暂无 LLM 指纹信息</p>
+                      <p style="font-size:13px;color:var(--text-muted)">章节生成后将自动记录 LLM 请求和响应信息</p>
                     </div>
                   </template>
                 </div>
@@ -856,6 +921,10 @@
                   <div class="panel-section">
                     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                       <button class="btn-primary" @click="showCharacterForm = true">➕ 添加角色</button>
+                      <button class="btn-secondary" @click="rerunAllCharacters()"
+                              :disabled="!currentProject">
+                        🔄 重新生成全部角色
+                      </button>
                       <button class="btn-secondary" @click="openReplaceCharacterModal()"
                               :disabled="!currentProject || characters.length === 0">
                         🔄 替换角色
@@ -882,6 +951,9 @@
                             <!-- AI 角标：仅在 AI 生成角色时显示 -->
                             <span x-show="c._source === 'ai'"
                                   style="font-size:10px;font-weight:600;color:#6d28d9;background:#ede9fe;padding:2px 6px;border-radius:4px;margin-left:auto">AI</span>
+                            <button @click="openRenameCharacterModal(c)"
+                                    style="font-size:12px;padding:2px 6px;margin-left:4px;border:none;background:transparent;color:var(--text-muted);cursor:pointer"
+                                    title="改名">✏️</button>
                           </div>
                           <div class="char-desc" x-text="c.description || '暂无描述'"></div>
                           <div class="char-profile" x-show="c.profile && Object.keys(c.profile).length > 0">
@@ -914,6 +986,48 @@
                         </div>
                       </div>
                     </template>
+                  </div>
+                </template>
+
+                <!-- 角色改名模态框 -->
+                <template x-if="showRenameCharacterModal">
+                  <div class="modal-overlay" @click.self="showRenameCharacterModal = false">
+                    <div class="modal" style="max-width:500px">
+                      <header class="pipeline-header">
+                        <h3>✏️ 角色改名</h3>
+                        <button class="modal-close-x" @click="showRenameCharacterModal = false">×</button>
+                      </header>
+                      <div style="padding:20px">
+                        <div style="margin-bottom:16px">
+                          <label style="display:block;font-weight:600;margin-bottom:8px">当前角色</label>
+                          <div style="padding:12px;background:var(--surface);border-radius:8px;border:1px solid var(--border)">
+                            <div style="font-weight:600" x-text="renameCharacter?.name"></div>
+                            <div style="font-size:12px;color:var(--text-muted)" x-text="renameCharacter?.role"></div>
+                          </div>
+                        </div>
+                        <div style="margin-bottom:16px">
+                          <label style="display:block;font-weight:600;margin-bottom:8px">新角色名</label>
+                          <input type="text" x-model="renameNewName" placeholder="输入新角色名" 
+                                 style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px">
+                        </div>
+                        <div style="margin-bottom:16px;padding:12px;background:#fffbeb;border-radius:8px;border:1px solid #fde68a;color:#92400e;font-size:13px">
+                          <div style="font-weight:600;margin-bottom:4px">⚠️ 改名会影响以下内容：</div>
+                          <ul style="margin:0;padding-left:20px">
+                            <li>章节正文中的角色名称</li>
+                            <li>剧情点中的角色名称</li>
+                            <li>伏笔中的角色名称</li>
+                            <li>角色关系中的角色名称</li>
+                          </ul>
+                        </div>
+                        <div style="display:flex;gap:8px">
+                          <button class="btn-secondary" @click="showRenameCharacterModal = false">取消</button>
+                          <button class="btn-primary" @click="renameCharacterAction()" 
+                                  :disabled="!renameNewName.trim() || renameNewName === renameCharacter?.name">
+                            确认改名
+                          </button>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </template>
 
@@ -1585,6 +1699,177 @@
               </div>
             </template>
 
+            <!-- ═══ 全文评审面板 ═══ -->
+            <template x-if="activePanel === 'full-review' && currentProject">
+              <div class="panel-page">
+                <div class="panel-page-header">
+                  <h2>📝 全文评审</h2>
+                  <div style="display:flex;gap:8px;margin-left:auto">
+                    <button class="btn-primary" @click="startFullReview()"
+                            :disabled="fullReviewTaskRunning || chapters.length === 0">
+                      <span x-show="!fullReviewTaskRunning">🔍 开始评审</span>
+                      <span x-show="fullReviewTaskRunning">⏳ 评审中...</span>
+                    </button>
+                  </div>
+                </div>
+
+                <!-- 进度提示 -->
+                <div x-show="fullReviewTaskRunning" class="full-review-progress">
+                  <div class="progress-bar">
+                    <div class="progress-fill" :style="`width: ${fullReviewProgress}%`"></div>
+                  </div>
+                  <p x-text="`正在评审全文内容... ${fullReviewProgress}%`"></p>
+                </div>
+
+                <!-- 无章节提示 -->
+                <div x-show="!fullReviewTaskRunning && chapters.length === 0" class="full-review-empty">
+                  <p>📭 暂无章节内容可评审</p>
+                  <p class="hint">请先创建章节并生成正文内容</p>
+                </div>
+
+                <!-- 评审结果展示 -->
+                <div x-show="fullReviewResult && !fullReviewTaskRunning" class="full-review-result">
+                  <!-- 综合评分 -->
+                  <div class="review-overall-score">
+                    <div class="overall-score-number" :class="getScoreClass(fullReviewResult.overall_score)">
+                      <span x-text="fullReviewResult.overall_score.toFixed(1)"></span>
+                    </div>
+                    <div class="overall-score-label">综合评分</div>
+                  </div>
+
+                  <!-- 五维雷达图 -->
+                  <div class="review-radar-chart">
+                    <canvas id="radarChart" width="400" height="400"></canvas>
+                  </div>
+
+                  <!-- 五维度评分卡片 -->
+                  <div class="review-dimension-cards">
+                    <div class="dimension-card" @click="activeReviewDimension = 'story'">
+                      <div class="dimension-header">
+                        <span class="dimension-icon">📖</span>
+                        <span class="dimension-name">故事与情节</span>
+                        <span class="dimension-score" :class="getScoreClass(fullReviewResult.score_story)"
+                              x-text="fullReviewResult.score_story.toFixed(1)"></span>
+                      </div>
+                      <div class="dimension-bar">
+                        <div class="bar-fill" :style="`width: ${fullReviewResult.score_story * 10}%`"></div>
+                      </div>
+                    </div>
+
+                    <div class="dimension-card" @click="activeReviewDimension = 'character'">
+                      <div class="dimension-header">
+                        <span class="dimension-icon">👥</span>
+                        <span class="dimension-name">人物塑造</span>
+                        <span class="dimension-score" :class="getScoreClass(fullReviewResult.score_character)"
+                              x-text="fullReviewResult.score_character.toFixed(1)"></span>
+                      </div>
+                      <div class="dimension-bar">
+                        <div class="bar-fill" :style="`width: ${fullReviewResult.score_character * 10}%`"></div>
+                      </div>
+                    </div>
+
+                    <div class="dimension-card" @click="activeReviewDimension = 'prose'">
+                      <div class="dimension-header">
+                        <span class="dimension-icon">✍️</span>
+                        <span class="dimension-name">文笔与语言</span>
+                        <span class="dimension-score" :class="getScoreClass(fullReviewResult.score_prose)"
+                              x-text="fullReviewResult.score_prose.toFixed(1)"></span>
+                      </div>
+                      <div class="dimension-bar">
+                        <div class="bar-fill" :style="`width: ${fullReviewResult.score_prose * 10}%`"></div>
+                      </div>
+                    </div>
+
+                    <div class="dimension-card" @click="activeReviewDimension = 'theme'">
+                      <div class="dimension-header">
+                        <span class="dimension-icon">🎯</span>
+                        <span class="dimension-name">主题与立意</span>
+                        <span class="dimension-score" :class="getScoreClass(fullReviewResult.score_theme)"
+                              x-text="fullReviewResult.score_theme.toFixed(1)"></span>
+                      </div>
+                      <div class="dimension-bar">
+                        <div class="bar-fill" :style="`width: ${fullReviewResult.score_theme * 10}%`"></div>
+                      </div>
+                    </div>
+
+                    <div class="dimension-card" @click="activeReviewDimension = 'market'">
+                      <div class="dimension-header">
+                        <span class="dimension-icon">💡</span>
+                        <span class="dimension-name">创新与市场潜力</span>
+                        <span class="dimension-score" :class="getScoreClass(fullReviewResult.score_market)"
+                              x-text="fullReviewResult.score_market.toFixed(1)"></span>
+                      </div>
+                      <div class="dimension-bar">
+                        <div class="bar-fill" :style="`width: ${fullReviewResult.score_market * 10}%`"></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 评审详情 -->
+                  <div class="review-details">
+                    <div class="review-detail-section" x-show="activeReviewDimension === 'story'">
+                      <h3>📖 故事与情节评审依据</h3>
+                      <p class="rationale-text" x-text="fullReviewResult.rationale_story"></p>
+                    </div>
+                    <div class="review-detail-section" x-show="activeReviewDimension === 'character'">
+                      <h3>👥 人物塑造评审依据</h3>
+                      <p class="rationale-text" x-text="fullReviewResult.rationale_character"></p>
+                    </div>
+                    <div class="review-detail-section" x-show="activeReviewDimension === 'prose'">
+                      <h3>✍️ 文笔与语言评审依据</h3>
+                      <p class="rationale-text" x-text="fullReviewResult.rationale_prose"></p>
+                    </div>
+                    <div class="review-detail-section" x-show="activeReviewDimension === 'theme'">
+                      <h3>🎯 主题与立意评审依据</h3>
+                      <p class="rationale-text" x-text="fullReviewResult.rationale_theme"></p>
+                    </div>
+                    <div class="review-detail-section" x-show="activeReviewDimension === 'market'">
+                      <h3>💡 创新与市场潜力评审依据</h3>
+                      <p class="rationale-text" x-text="fullReviewResult.rationale_market"></p>
+                    </div>
+                  </div>
+
+                  <!-- 总体评价 -->
+                  <div class="review-critique">
+                    <h3>📝 总体评价</h3>
+                    <p x-text="fullReviewResult.overall_critique"></p>
+                  </div>
+
+                  <!-- 改进建议 -->
+                  <div class="review-suggestions" x-show="fullReviewResult.improvement_suggestions?.length">
+                    <h3>💡 改进建议</h3>
+                    <ul>
+                      <template x-for="suggestion in fullReviewResult.improvement_suggestions" :key="suggestion">
+                        <li x-text="suggestion"></li>
+                      </template>
+                    </ul>
+                  </div>
+
+                  <!-- 评审元数据 -->
+                  <div class="review-meta">
+                    <span x-text="`评审章节数：${fullReviewResult.total_chapters} 章`"></span>
+                    <span x-text="`评审总字数：${fullReviewResult.total_words} 字`"></span>
+                    <span x-text="`评审时间：${formatTime(fullReviewResult.created_at)}`"></span>
+                  </div>
+                </div>
+
+                <!-- 历史评审记录 -->
+                <div class="review-history" x-show="fullReviewHistory.length > 0 && !fullReviewTaskRunning">
+                  <h3>📜 历史评审记录</h3>
+                  <div class="history-list">
+                    <template x-for="record in fullReviewHistory" :key="record.id">
+                      <div class="history-item" @click="loadFullReviewResult(record.id)">
+                        <span class="history-score" :class="getScoreClass(record.overall_score)"
+                              x-text="record.overall_score.toFixed(1)"></span>
+                        <span class="history-info" x-text="`${record.total_chapters}章 / ${record.total_words}字`"></span>
+                        <span class="history-time" x-text="formatTime(record.created_at)"></span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </div>
+            </template>
+
             <!-- ═══ 独立世界观面板 ═══ -->
             <template x-if="activePanel === 'worldbuilding' && currentProject">
               <div class="panel-page">
@@ -1986,7 +2271,7 @@
                             @click="generateLlmOptions()"
                             :disabled="stepQuestionnaire.isGeneratingOptions"
                           >
-                            ✨ 让 AI 生成更贴合的选项
+                            ✨ 换一批选项（AI）
                           </button>
                         </div>
 
@@ -2003,7 +2288,7 @@
                             x-show="stepQuestionnaire.currentQuestion.custom_input.type === 'textarea'"
                             x-model="stepQuestionnaire.customAnswer" 
                             :placeholder="stepQuestionnaire.currentQuestion.custom_input.placeholder"
-                            rows="4"
+                            rows="2"
                             @focus="stepQuestionnaire.lastFocus = 'custom'"
                           ></textarea>
                           <input 
