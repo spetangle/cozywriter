@@ -284,6 +284,9 @@ async def create_project_from_inspiration(
     db.commit()
     db.refresh(project)
 
+    # 供 bootstrap 自动提交时定位项目（与 create_project 保持一致）
+    user_input["_project_id"] = project.id
+
     # 2) 标记灵感已融合
     insp.is_consumed = 1
     insp.consumed_at = datetime.utcnow()

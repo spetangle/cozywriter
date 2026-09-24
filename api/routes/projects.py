@@ -245,6 +245,7 @@ async def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
 
     # 6) 提交执行（异步：提交到线程池，立即返回 run_id）
     user_input = data.model_dump()
+    user_input["_project_id"] = project.id  # 供 _run_bootstrap_task 自动提交时定位项目
     from api.tasks import submit_llm_task
     submit_llm_task(
         task_type="bootstrap",
