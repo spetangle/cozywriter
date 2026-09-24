@@ -1682,6 +1682,10 @@ def run_post_chapter_processing(
         logger.warning(f"[PostChapter] LLM failed: {e}")
         post_data = {}
 
+    # 兜底：3 次重试均失败 / LLM 返回非 dict 时，避免 post_data 为 None 导致后续 .get 崩溃
+    if not isinstance(post_data, dict):
+        post_data = {}
+
     # 应用弧光更新
     for arc_upd in post_data.get("arc_updates", []):
         cname = arc_upd.get("character_name", "")
