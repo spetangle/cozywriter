@@ -1,5 +1,8 @@
 # CozyWriter 项目架构文档
 
+> ⚠️ 本文档部分内容已过时：前端已重构为多页面 SPA，新增剧本子系统与 deepseek/mimo provider，
+> Project ID 已改为 hex 字符串。请以代码与 `AGENTS.md` 为准。
+>
 > **梳理时间**: 2026-06-12  
 > **项目版本**: 开发中  
 > **技术栈**: FastAPI + SQLAlchemy + Alpine.js + ChromaDB

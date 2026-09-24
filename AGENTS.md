@@ -22,6 +22,7 @@ Windows 用 `run.bat` / `run.ps1`，Python 为 `.venv\Scripts\python.exe`。
 .venv/bin/python tests/test_frontend_routes.py     # 前端 /api 调用 ↔ 后端路由一致性
 .venv/bin/python tests/test_script_api.py          # 剧本 API 集成
 .venv/bin/python tests/test_script_post_process.py # 剧本后处理回归
+.venv/bin/python tests/test_script_bootstrap.py    # 剧本 planner / locked / commit / JSON 兜底
 node tests/test_spa_components.js                  # SPA 模板 / 组件装配
 ```
 

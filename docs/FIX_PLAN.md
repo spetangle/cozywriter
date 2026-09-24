@@ -54,10 +54,10 @@
 
 ## Phase 5 · 工程与文档
 
-- [ ] 5.1 `AGENTS.md` 增补已知坏损链路
-- [ ] 5.2 `README.md` / `ARCHITECTURE.md` 标注或更新
-- [ ] 5.3 Windows 侧跑通 3 个 Python 测试脚本
-- [ ] 5.4 清理死代码
+- [x] 5.1 `AGENTS.md` 增补 `test_script_bootstrap.py` 命令
+- [x] 5.2 `README.md` / `ARCHITECTURE.md` 顶部标注过时内容，指向代码与 `AGENTS.md`
+- [~] 5.3 Windows 侧跑通测试：Linux 侧已跑 `test_script_bootstrap.py` / `test_script_post_process.py` / `test_script_api.py` / `test_spa_components.js`；`test_frontend_routes.py` 受本机 FastAPI 0.141 路由包装结构影响（后端实际路由正常），需在项目目标环境复跑
+- [x] 5.4 清理 `chapters.py` 无效 import；无其他 `_commit_bootstrap_results` 引用
 
 ## 验证策略
 

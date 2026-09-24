@@ -1,5 +1,8 @@
 # CozyWriter · AI 小说编写助手
 
+> ⚠️ 本文档部分内容已过时：前端已重构为多页面 SPA，新增剧本子系统与 deepseek/mimo provider，
+> Project ID 已改为 hex 字符串。请以代码与 `AGENTS.md` 为准。
+>
 > 本地化 · 一键启动 · 长篇连载级一致性  
 > 基于 LLM API + RAG 知识管理 + 9 步章节生成流水线的 FastAPI Web 写作系统
 
