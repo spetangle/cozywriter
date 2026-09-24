@@ -150,8 +150,12 @@ def _do_generate(
 
 # ─── 异步任务函数 ───
 
-def _async_generate_task(task_id: str, project_id: str, chapter_id: int | None, prompt: str, mode: str, provider: str | None):
-    """异步生成任务（在线程池中执行）"""
+def _async_generate_task(task_id: str, _project_id: str, chapter_id: int | None, prompt: str, mode: str, provider: str | None):
+    """异步生成任务（在线程池中执行）
+
+    注意：业务参数用下划线前缀（`_project_id`），因为 submit_llm_task 的 `project_id`
+    是任务元数据参数，不会透传给本函数。
+    """
     from storage.database import SessionLocal
     db = SessionLocal()
     try:
@@ -159,7 +163,7 @@ def _async_generate_task(task_id: str, project_id: str, chapter_id: int | None, 
         if not task:
             return
 
-        result = _do_generate(project_id, chapter_id, prompt, mode, provider, db)
+        result = _do_generate(_project_id, chapter_id, prompt, mode, provider, db)
         task.result = result
         task.status = "completed"
         task.progress = 100
@@ -194,6 +198,7 @@ async def generate_text(
         task_type="generate",
         llm_call_fn=_async_generate_task,
         project_id=req.project_id,
+        _project_id=req.project_id,
         description=f"生成 [{req.mode}] {req.prompt[:50]}...",
         chapter_id=req.chapter_id,
         prompt=req.prompt,

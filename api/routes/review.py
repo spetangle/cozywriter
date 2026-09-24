@@ -139,12 +139,13 @@ def _do_review(project_id: str, chapter_id: int | None, session_type: str, db: S
 
 # ─── 异步任务函数 ───
 
-def _async_review_task(task_id: str, project_id: str, chapter_id: int | None, session_type: str):
+def _async_review_task(task_id: str, _project_id: str, chapter_id: int | None, session_type: str):
+    # 业务参数用下划线前缀：submit_llm_task 的 project_id 是任务元数据，不会透传
     from storage.database import SessionLocal
     db = SessionLocal()
     try:
         task = get_task(task_id)
-        result = _do_review(project_id, chapter_id, session_type, db)
+        result = _do_review(_project_id, chapter_id, session_type, db)
         task.result = result
         task.status = "completed"
         task.progress = 100
@@ -173,6 +174,7 @@ async def create_review(
         task_type="review",
         llm_call_fn=_async_review_task,
         project_id=data.project_id,
+        _project_id=data.project_id,
         description=f"评审 chapter_id={data.chapter_id}",
         chapter_id=data.chapter_id,
         session_type=data.session_type,

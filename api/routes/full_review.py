@@ -200,7 +200,7 @@ def _get_theme_summary(db: Session, project_id: str) -> str:
     
     lines = []
     for t in themes:
-        lines.append(f"- {t.name or '未命名'}：{t.description or ''}")
+        lines.append(f"- {t.title or '未命名'}：{t.description or ''}")
     
     return "\n".join(lines)
 
@@ -260,8 +260,9 @@ def _calculate_overall_score(scores: dict) -> float:
 
 # ─── 异步评审任务 ───
 
-def _async_full_review_task(task_id: str, project_id: str):
+def _async_full_review_task(task_id: str, _project_id: str):
     """异步执行全文评审"""
+    project_id = _project_id  # 业务参数带下划线前缀，函数内沿用 project_id 命名
     from storage.database import SessionLocal
     from api.tasks import get_task
     
@@ -421,6 +422,7 @@ async def create_full_review(
         task_type="full_review",
         llm_call_fn=_async_full_review_task,
         project_id=data.project_id,
+        _project_id=data.project_id,
         description=f"全文评审 {project.title}",
     )
     
