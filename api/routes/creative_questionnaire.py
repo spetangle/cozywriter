@@ -404,7 +404,7 @@ async def skip_to_ai(q_id: int, db: Session = Depends(get_db)):
     answers = dict(q.answers or {})
     logger.info(f"[问卷] 当前已填写答案: {answers}")
     
-    ai_answers = _complete_with_ai(answers, db, skip_novel_title=True)
+    ai_answers = _complete_with_ai(answers, db, skip_novel_title=True) or {}
     logger.info(f"[问卷] AI补全结果: {ai_answers}")
 
     answers.update(ai_answers)
@@ -1031,8 +1031,7 @@ def _complete_with_ai(answers: dict, db, skip_novel_title: bool = False) -> dict
             except Exception as e:
                 logger.error(f"[问卷] 小说名称生成失败: {e}")
                 result["novel_title"] = "未命名小说"
-            
-                return result
+            return result
         else:
             context_text = "\n".join([f"- {k}: {v}" for k, v in answers.items() if v])
             
