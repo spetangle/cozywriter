@@ -82,6 +82,10 @@ class ProjectCreate(BaseModel):
     antagonist: str | None = None
     supporting: str | None = None
     notes: str | None = None
+    # 剧本专用
+    project_type: str = Field(default="novel", description="项目类型: novel/script")
+    script_format: str = Field(default="movie", description="剧本格式: movie/short_drama/stage_play/tv_series")
+    script_episode_count: int = Field(default=1, description="集数（仅电视剧）")
     # 行为开关
     auto_commit: bool = Field(default=True, description="stage 全过后是否自动入库")
 
@@ -110,6 +114,9 @@ class ProjectResponse(BaseModel):
     word_count_max: int
     total_chapters: int
     chapter_count: int = 0
+    project_type: str = "novel"
+    script_format: str = "movie"
+    script_episode_count: int = 1
     created_at: datetime
     updated_at: datetime
 
@@ -199,6 +206,9 @@ async def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
         word_count_max=int(data.chapter_word_count * 1000 * 1.1),
         total_chapters=data.total_chapters,
         writing_style=data.style or "平实",
+        project_type=data.project_type,
+        script_format=data.script_format,
+        script_episode_count=data.script_episode_count,
     )
     db.add(project)
     db.commit()

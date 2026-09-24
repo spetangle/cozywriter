@@ -45,7 +45,7 @@ class QuestionnaireResponse(BaseModel):
 
 class StepAnswer(BaseModel):
     question_id: str
-    answer: str
+    answer: str | list = ""
     is_custom: bool = False
 
 
@@ -215,9 +215,10 @@ async def get_current_step(q_id: int, db: Session = Depends(get_db)):
     
     if question and question.get("llm_enabled", False):
         llm_suggestions = q.llm_suggestions or {}
-        if question["id"] in llm_suggestions:
+        cached = llm_suggestions.get(question["id"])
+        if cached and cached.get("user_generated", False):
             question = question.copy()
-            question["options"] = llm_suggestions[question["id"]].get("options", question.get("options", []))
+            question["options"] = cached.get("options", question.get("options", []))
     
     return StepResponse(
         questionnaire_id=q.id,
@@ -288,12 +289,13 @@ async def generate_llm_options(q_id: int, db: Session = Depends(get_db)):
     llm_suggestions[question["id"]] = {
         "options": llm_options,
         "suggestions": suggestions,
+        "user_generated": True,
     }
     q.llm_suggestions = llm_suggestions
     db.commit()
     db.refresh(q)
     
-    logger.info(f"[问卷] LLM选项生成完成，问卷ID: {q_id}, 问题ID: {question['id']}, 生成选项数: {len(llm_options)}")
+    logger.info(f"[问卷] LLM选项生成完成，问卷ID: {q_id}, 问题ID: {question['id']}, 生成选项数: {len(llm_options)}, 用户主动生成")
 
     return LlmOptionsResponse(
         status="ok",
@@ -322,7 +324,11 @@ async def answer_step(q_id: int, data: StepAnswer, db: Session = Depends(get_db)
     answers = dict(q.answers or {})
     
     if data.question_id == "novel_title":
-        q.novel_title = data.answer
+        # novel_title 是 String 字段，若前端传来列表则取首个值
+        if isinstance(data.answer, list):
+            q.novel_title = data.answer[0] if data.answer else ""
+        else:
+            q.novel_title = data.answer
     
     answers[data.question_id] = data.answer
     q.answers = answers
@@ -356,15 +362,17 @@ async def answer_step(q_id: int, data: StepAnswer, db: Session = Depends(get_db)
     
     if next_question and next_question.get("llm_enabled", False):
         llm_suggestions = q.llm_suggestions or {}
-        if next_question["id"] in llm_suggestions:
+        cached = llm_suggestions.get(next_question["id"])
+        if cached and cached.get("user_generated", False):
             next_question = next_question.copy()
-            next_question["options"] = llm_suggestions[next_question["id"]].get("options", next_question.get("options", []))
+            next_question["options"] = cached.get("options", next_question.get("options", []))
         else:
             logger.info(f"[问卷] 自动为下一问题生成LLM选项，问题ID: {next_question['id']}")
             llm_options, suggestions = _generate_llm_options_for_question(next_question, dict(q.answers or {}), db)
             llm_suggestions[next_question["id"]] = {
                 "options": llm_options,
                 "suggestions": suggestions,
+                "user_generated": False,
             }
             q.llm_suggestions = llm_suggestions
             db.commit()
@@ -456,8 +464,22 @@ async def build_project_from_questionnaire(q_id: int, db: Session = Depends(get_
     logger.info(f"[问卷] AI补全答案: {ai_a}")
     logger.info(f"[问卷] 合并后答案: {all_answers}")
 
-    chapter_word_count = int(all_answers.get("chapter_word_count", 3000))
-    total_chapters = int(all_answers.get("total_chapters", 30))
+    def _extract_single_value(v):
+        """从答案中提取单个值（处理列表和字符串）"""
+        if isinstance(v, list):
+            return v[0] if v else ""
+        return v or ""
+
+    def _extract_int_value(v, default=0):
+        """从答案中提取整数值"""
+        single = _extract_single_value(v)
+        try:
+            return int(single) if single else default
+        except (ValueError, TypeError):
+            return default
+
+    chapter_word_count = _extract_int_value(all_answers.get("chapter_word_count"), 3000)
+    total_chapters = _extract_int_value(all_answers.get("total_chapters"), 30)
     est_total = chapter_word_count * total_chapters
     logger.info(f"[问卷] 篇幅估算：每章{chapter_word_count}字 × {total_chapters}章 = 总字数{est_total}")
 
@@ -466,35 +488,38 @@ async def build_project_from_questionnaire(q_id: int, db: Session = Depends(get_
         "幽默": "幽默", "冷峻": "冷峻",
     }
 
-    project_title = all_answers.get("novel_title", "") or all_answers.get("theme", "未命名小说")
+    # 提取并转换各个字段，处理列表值
+    project_title = _extract_single_value(all_answers.get("novel_title")) or _extract_single_value(all_answers.get("theme")) or "未命名小说"
+    style_raw = _extract_single_value(all_answers.get("style"))
+    genre_raw = all_answers.get("genre", "")  # genre 是逗号分隔的多选，保持原样或取第一个
     
     project = Project(
         title=project_title,
-        description=all_answers.get("summary", "") or all_answers.get("world_setting", "") or all_answers.get("premise", ""),
-        writing_style=style_map.get(all_answers.get("style", ""), "平实"),
+        description=_extract_single_value(all_answers.get("summary")) or _extract_single_value(all_answers.get("world_setting")) or _extract_single_value(all_answers.get("premise")),
+        writing_style=style_map.get(style_raw, "平实"),
         target_word_count=chapter_word_count,
         word_count_min=int(chapter_word_count * 0.9),
         word_count_max=int(chapter_word_count * 1.1),
         total_chapters=total_chapters,
-        genre=all_answers.get("genre", ""),
+        genre=genre_raw,
     )
     db.add(project)
     db.commit()
     db.refresh(project)
     logger.info(f"[问卷] 项目创建成功，ID: {project.id}, 标题: {project.title}, 题材: {project.genre}, 风格: {project.writing_style}")
 
-    theme_text = all_answers.get("theme", "")
+    theme_text = _extract_single_value(all_answers.get("theme"))
     if theme_text:
         t = Theme(
             project_id=project.id,
             theme_type="core_theme",
             title=theme_text,
-            description=f"基调：{all_answers.get('tone', '')}",
+            description=f"基调：{_extract_single_value(all_answers.get('tone'))}",
         )
         db.add(t)
         logger.info(f"[问卷] 创建主题记录，项目ID: {project.id}, 主题: {theme_text}")
 
-    core_hook_text = all_answers.get("core_hook", "")
+    core_hook_text = _extract_single_value(all_answers.get("core_hook"))
     if core_hook_text:
         h = Theme(
             project_id=project.id,
@@ -505,18 +530,19 @@ async def build_project_from_questionnaire(q_id: int, db: Session = Depends(get_
         db.add(h)
         logger.info(f"[问卷] 创建核心看点记录，项目ID: {project.id}, 核心看点: {core_hook_text[:50]}...")
 
-    protagonist_text = all_answers.get("protagonist", "")
-    if protagonist_text:
+    protagonist_text = _extract_single_value(all_answers.get("protagonist"))
+    protagonist_name = _extract_single_value(all_answers.get("protagonist_name")) or "主角"
+    if protagonist_text or protagonist_name:
         c = Character(
             project_id=project.id,
-            name="主角",
+            name=protagonist_name,
             role="主角",
             description=protagonist_text,
         )
         db.add(c)
-        logger.info(f"[问卷] 创建主角记录，项目ID: {project.id}, 主角描述: {protagonist_text[:50]}...")
+        logger.info(f"[问卷] 创建主角记录，项目ID: {project.id}, 主角姓名: {protagonist_name}, 主角描述: {protagonist_text[:50]}...")
 
-    antagonist_text = all_answers.get("antagonist", "")
+    antagonist_text = _extract_single_value(all_answers.get("antagonist"))
     if antagonist_text:
         c = Character(
             project_id=project.id,
@@ -527,7 +553,7 @@ async def build_project_from_questionnaire(q_id: int, db: Session = Depends(get_
         db.add(c)
         logger.info(f"[问卷] 创建反派记录，项目ID: {project.id}, 反派描述: {antagonist_text[:50]}...")
 
-    world_setting_text = all_answers.get("world_setting", "")
+    world_setting_text = _extract_single_value(all_answers.get("world_setting"))
     if world_setting_text:
         w = WorldEntry(
             project_id=project.id,
@@ -538,7 +564,7 @@ async def build_project_from_questionnaire(q_id: int, db: Session = Depends(get_
         db.add(w)
         logger.info(f"[问卷] 创建世界观记录，项目ID: {project.id}, 世界观: {world_setting_text[:50]}...")
 
-    society_structure_text = all_answers.get("society_structure", "")
+    society_structure_text = _extract_single_value(all_answers.get("society_structure"))
     if society_structure_text:
         s = WorldEntry(
             project_id=project.id,
@@ -558,23 +584,32 @@ async def build_project_from_questionnaire(q_id: int, db: Session = Depends(get_
     # ─── 自动启动 bootstrap 工作流 ───
     logger.info(f"[问卷] 开始启动 bootstrap 工作流，项目ID: {project.id}")
     
-    genre_str = all_answers.get("genre", "")
+    genre_str = genre_raw  # 已经是字符串或逗号分隔的多选值
     if genre_str:
         genre_str = genre_str.split("/")[0].strip()
     
+    # 对于多选字段（如 pacing），用逗号连接；对于单选字段，取第一个值
+    def _format_for_workflow(v):
+        """将答案格式化为工作流可用的字符串"""
+        if isinstance(v, list):
+            return ", ".join(str(item) for item in v)
+        return str(v) if v else ""
+    
     user_filled = {
-        "tone": all_answers.get("tone", ""),
-        "chapter_word_count": all_answers.get("chapter_word_count", ""),
-        "total_chapters": all_answers.get("total_chapters", ""),
-        "protagonist": all_answers.get("protagonist", ""),
-        "antagonist": all_answers.get("antagonist", ""),
-        "world_setting": all_answers.get("world_setting", ""),
-        "society_structure": all_answers.get("society_structure", ""),
-        "pacing": all_answers.get("pacing", ""),
-        "style": all_answers.get("style", ""),
-        "core_hook": all_answers.get("core_hook", ""),
-        "theme": all_answers.get("theme", ""),
-        "summary": all_answers.get("summary", "") or all_answers.get("world_setting", ""),
+        "tone": _format_for_workflow(all_answers.get("tone")),
+        "chapter_word_count": chapter_word_count,  # 已转换为整数
+        "total_chapters": total_chapters,  # 已转换为整数
+        "protagonist": _format_for_workflow(all_answers.get("protagonist")),
+        "protagonist_name": _extract_single_value(all_answers.get("protagonist_name")),
+        "antagonist": _format_for_workflow(all_answers.get("antagonist")),
+        "world_setting": _format_for_workflow(all_answers.get("world_setting")),
+        "society_structure": _format_for_workflow(all_answers.get("society_structure")),
+        "pacing": _format_for_workflow(all_answers.get("pacing")),
+        "style": _extract_single_value(all_answers.get("style")),
+        "core_hook": _format_for_workflow(all_answers.get("core_hook")),
+        "theme": _format_for_workflow(all_answers.get("theme")),
+        "romance_type": _format_for_workflow(all_answers.get("romance_type")),
+        "summary": _format_for_workflow(all_answers.get("summary")) or _format_for_workflow(all_answers.get("world_setting")),
     }
     
     user_filled = {k: v for k, v in user_filled.items() if v}
@@ -644,6 +679,7 @@ def _get_default_answers(missing_fields: list) -> dict:
         "chapter_word_count": "3000",
         "total_chapters": "50",
         "protagonist": "一个平凡的少年，意外获得神秘力量，踏上冒险之旅，逐渐成长为英雄。他性格坚韧，重情重义，在面对困难时从不退缩。",
+        "protagonist_name": "林墨白",
         "premise": "在一个充满魔法和奇幻生物的世界，古老的预言正在苏醒。不同种族之间的矛盾日益加剧，而主角的命运将决定整个世界的走向。",
         "style": "优美",
         "pacing": "中等节奏",
@@ -651,6 +687,7 @@ def _get_default_answers(missing_fields: list) -> dict:
         "antagonist": "一个强大的反派，他的动机与主角形成鲜明对比，代表着故事中需要被克服的黑暗面。",
         "world_setting": "一个充满神秘和奇幻色彩的世界，有着独特的规则和历史。",
         "society_structure": "等级森严的社会结构，底层人民渴望改变现状。",
+        "romance_type": "无CP",
         "novel_title": "未命名小说",
     }
     return {k: defaults[k] for k in missing_fields if k in defaults}
@@ -674,7 +711,17 @@ def _generate_llm_options_for_question(question: dict, answers: dict, db) -> tup
     
     context_text = "\n".join([f"- {k}: {v}" for k, v in answers.items() if v])
     
-    if question_id == "novel_title":
+    # 如果问题定义中有自定义的 llm_prompt，使用它
+    custom_llm_prompt = question.get("llm_prompt", "")
+    
+    if custom_llm_prompt:
+        # 使用自定义提示词，替换占位符
+        try:
+            prompt = custom_llm_prompt.format(**{k: v for k, v in answers.items() if v})
+        except (KeyError, IndexError) as e:
+            logger.warning(f"[问卷] 自定义llm_prompt占位符替换失败: {e}, 使用原始提示词")
+            prompt = custom_llm_prompt
+    elif question_id == "novel_title":
         prompt = f"""
 你是一位专业的小说编辑和创意顾问。用户已经完成了小说创作问卷的大部分内容，现在需要为小说命名。
 
@@ -760,10 +807,20 @@ def _generate_llm_options_for_question(question: dict, answers: dict, db) -> tup
             clean_response = re.sub(r',\s*]', ']', clean_response)
             clean_response = re.sub(r',\s*}', '}', clean_response)
             result = json.loads(clean_response)
-            options = result.get("options", question.get("options", []))
-            suggestions = result.get("suggestions", {})
+            
+            # 兼容两种返回格式：纯数组 [...] 或 对象包裹 {"options": [...], "suggestions": {...}}
+            if isinstance(result, list):
+                options = result
+                suggestions = {}
+            elif isinstance(result, dict):
+                options = result.get("options", question.get("options", []))
+                suggestions = result.get("suggestions", {})
+            else:
+                options = question.get("options", [])
+                suggestions = {}
             
             options = _validate_and_fix_option_values(options)
+            options = _deduplicate_options(options)
             
             logger.info(f"[问卷] LLM选项生成成功，选项数: {len(options)}")
             return options, suggestions
@@ -816,6 +873,39 @@ def _validate_and_fix_option_values(options: list) -> list:
     return fixed_options
 
 
+def _deduplicate_options(options: list) -> list:
+    """对LLM生成的选项进行去重，基于value和label的重复检测"""
+    if not options:
+        return options
+    
+    seen_values = set()
+    seen_labels = set()
+    unique_options = []
+    duplicate_count = 0
+    
+    for opt in options:
+        value = opt.get("value", "")
+        label = opt.get("label", "")
+        
+        # 检查 value 和 label 是否都已出现过（去重）
+        if (value and value in seen_values) or (label and label in seen_labels):
+            duplicate_count += 1
+            logger.debug(f"[问卷] 发现重复选项，已去重: value={value}, label={label}")
+            continue
+        
+        if value:
+            seen_values.add(value)
+        if label:
+            seen_labels.add(label)
+        
+        unique_options.append(opt)
+    
+    if duplicate_count > 0:
+        logger.info(f"[问卷] 选项去重完成，移除 {duplicate_count} 个重复项，剩余 {len(unique_options)} 个")
+    
+    return unique_options
+
+
 def _complete_with_ai(answers: dict, db, skip_novel_title: bool = False) -> dict:
     """使用 LLM 补全缺失的设定"""
     logger.info(f"[问卷] 开始AI补全，已填写答案: {answers}, skip_novel_title: {skip_novel_title}")
@@ -860,15 +950,17 @@ def _complete_with_ai(answers: dict, db, skip_novel_title: bool = False) -> dict
 1. genre（题材）：从 玄幻/都市/科幻/武侠/仙侠/历史/悬疑/现实主义/奇幻 中选择，可多选，用逗号分隔（如：玄幻,仙侠）
 2. core_hook（核心看点）：小说最吸引人的核心亮点
 3. theme（主题）：一句话核心主题，如 救赎、成长、复仇等
-4. tone（基调）：从 热血/深沉/轻松/黑暗/治愈/史诗/悬疑紧张/浪漫/幽默/冷峻 中选择
+4. tone（基调）：从 热血/深沉/轻松/黑暗/治愈/史诗/悬疑紧张/浪漫/幽默/冷峻 中选择，可多选，用逗号分隔
 5. chapter_word_count（每章字数）：从 2000/3000/5000/8000/10000 中选择一个数字
 6. total_chapters（总章节数）：从 30/50/100/150 中选择一个数字
 7. protagonist（主角）：描述主角的性格、目标、背景（3-5句话）
-8. antagonist（反派）：描述反派的动机、背景和与主角的矛盾（2-3句话）
-9. world_setting（世界观）：描述故事发生的世界、时代、社会规则（3-5句话）
-10. society_structure（社会结构）：描述社会的组织形式、权力结构、价值观（2-3句话）
-11. style（风格）：从 优美/平实/诗意/幽默/冷峻 中选择
-12. pacing（节奏）：从 快节奏/中等节奏/慢热型/起伏型 中选择
+8. protagonist_name（主角姓名）：主角的中文姓名，须为全名（姓+名），无叠字、无谐音梗、无生僻字、无负能量寓意，2-4个字
+9. antagonist（反派）：描述反派的动机、背景和与主角的矛盾（2-3句话）
+10. world_setting（世界观）：描述故事发生的世界、时代、社会规则（3-5句话）
+11. society_structure（社会结构）：描述社会的组织形式、权力结构、价值观（2-3句话）
+12. style（风格）：从 优美/平实/诗意/幽默/冷峻 中选择，可多选，用逗号分隔
+13. pacing（节奏）：从 快节奏/中等节奏/慢热型/起伏型 中选择，可多选，用逗号分隔
+14. romance_type（恋爱关系/CP）：从 无CP/单CP/多CP/暧昧向/暗恋 中选择
 
 请输出 JSON 格式，只包含需要补全的字段，不要包含 novel_title。
 """
@@ -997,15 +1089,17 @@ def _complete_with_ai(answers: dict, db, skip_novel_title: bool = False) -> dict
 1. genre（题材）：从 玄幻/都市/科幻/武侠/仙侠/历史/悬疑/现实主义/奇幻 中选择，可多选，用逗号分隔（如：玄幻,仙侠）
 2. core_hook（核心看点）：小说最吸引人的核心亮点
 3. theme（主题）：一句话核心主题，如 救赎、成长、复仇等
-4. tone（基调）：从 热血/深沉/轻松/黑暗/治愈/史诗/悬疑紧张/浪漫/幽默/冷峻 中选择
+4. tone（基调）：从 热血/深沉/轻松/黑暗/治愈/史诗/悬疑紧张/浪漫/幽默/冷峻 中选择，可多选，用逗号分隔
 5. chapter_word_count（每章字数）：从 2000/3000/5000/8000/10000 中选择一个数字
 6. total_chapters（总章节数）：从 30/50/100/150 中选择一个数字
 7. protagonist（主角）：描述主角的性格、目标、背景（3-5句话）
-8. antagonist（反派）：描述反派的动机、背景和与主角的矛盾（2-3句话）
-9. world_setting（世界观）：描述故事发生的世界、时代、社会规则（3-5句话）
-10. society_structure（社会结构）：描述社会的组织形式、权力结构、价值观（2-3句话）
-11. style（风格）：从 优美/平实/诗意/幽默/冷峻 中选择
-12. pacing（节奏）：从 快节奏/中等节奏/慢热型/起伏型 中选择
+8. protagonist_name（主角姓名）：主角的中文姓名，须为全名（姓+名），无叠字、无谐音梗、无生僻字、无负能量寓意，2-4个字
+9. antagonist（反派）：描述反派的动机、背景和与主角的矛盾（2-3句话）
+10. world_setting（世界观）：描述故事发生的世界、时代、社会规则（3-5句话）
+11. society_structure（社会结构）：描述社会的组织形式、权力结构、价值观（2-3句话）
+12. style（风格）：从 优美/平实/诗意/幽默/冷峻 中选择，可多选，用逗号分隔
+13. pacing（节奏）：从 快节奏/中等节奏/慢热型/起伏型 中选择，可多选，用逗号分隔
+14. romance_type（恋爱关系/CP）：从 无CP/单CP/多CP/暧昧向/暗恋 中选择
 
 请输出 JSON 格式，只包含需要补全的字段。
 """
