@@ -1,0 +1,64 @@
+# CozyWriter 修复计划
+
+> 状态：执行中
+> 制定时间：2026-09-24
+> 依据：项目评估报告（已逐条读码核实）
+
+## Phase 0 · 安全网与仓库整理
+
+- [x] 0.1 建工作分支 `fix/core-blockers`
+- [x] 0.2 新增 `.gitattributes` 统一行尾，`git add --renormalize` 单独提交
+- [x] 0.3 按模块拆分提交现有 2 个月成果
+
+## Phase 1 · 5 个 Blocker（恢复主流程）
+
+- [x] 1.1 B1 异步任务丢 `project_id`：`generate.py` / `review.py` / `full_review.py` 改用 `_project_id=`
+- [x] 1.2 B2 Bootstrap 写入 project 0：`projects.py` create 路径补 `_project_id`（含 `inspirations.py`）
+- [x] 1.3 B3 问卷 AI 补全返回 None：`creative_questionnaire.py` 修正 `return` 缩进 + `or {}` 兜底
+- [x] 1.4 B4 全文评审读 `Theme.name`：`full_review.py` 改 `t.title`
+- [x] 1.5 B5 Step9 后处理崩溃：`chapter_pipeline.py` 循环后 `post_data or {}` + 类型校验
+
+## Phase 2 · 前端拦截级问题
+
+- [x] 2.1 B7 单章生成 422：`novel_editor.js` body 补 `project_id`
+- [ ] 2.2 B8 导出 404：前端接 `POST /api/export/chapters` + blob 下载（决策：保留完整功能）
+- [ ] 2.3 B9 大纲路由冲突：`OutlineNode` 迁到 `/outline-nodes`（待决策）
+- [ ] 2.4 前端字段错位：`global_settings` 模型选择器、`script_editor` 保存/生成、`questionnaire` 保存、`project_settings` 字段、plot 字段
+
+## Phase 3 · 剧本子系统补全
+
+- [ ] 3.1 `plan_bootstrap_stages` 传 `project_type`（projects.py ×2、creative_questionnaire.py ×1）
+- [ ] 3.2 `commit_bootstrap` 增加 Screenplay 落库分支
+- [ ] 3.3 `script_pipeline` JSON 兜底 / 修订 role / 弧光读取 / 分镜去重
+- [ ] 3.4 剧本 rerun 的 `locked` 按 `project_type` 构造
+
+## Phase 4 · 稳定性与数据安全
+
+- [ ] 4.1 Step4 补 `max_tokens`（长章截断）
+- [ ] 4.2 Step8 空文本保护（避免覆盖正文）
+- [ ] 4.3 迁移缺口：`init_db` 集成通用迁移；`migrate_project_ids` 补新列；`migrate.py` DateTime 默认值引号
+- [ ] 4.4 开启 `PRAGMA foreign_keys=ON`（先清理孤儿数据）
+- [ ] 4.5 Bootstrap 失败不误删角色；`user_filled` 透传下游
+- [ ] 4.6 Provider 一致性：Anthropic temperature、失败用量记录、DeepSeek 余额查询默认关、init/超参补 deepseek
+- [ ] 4.7 `chapters.py:114` 修正无效 import
+
+## Phase 5 · 工程与文档
+
+- [ ] 5.1 `AGENTS.md` 增补已知坏损链路
+- [ ] 5.2 `README.md` / `ARCHITECTURE.md` 标注或更新
+- [ ] 5.3 Windows 侧跑通 3 个 Python 测试脚本
+- [ ] 5.4 清理死代码
+
+## 验证策略
+
+1. 本机：`python3 -m py_compile`（全量）+ `node --check`（全量）
+2. 本机：`node tests/test_spa_components.js`
+3. Windows：`tests/test_frontend_routes.py`、`test_script_api.py`、`test_script_post_process.py`
+4. 手动冒烟：建项目 → 引导补全落库 → 单章生成 → 评审 → 导出 → 建剧本 → 场景生成 → 分镜
+
+## 待决策
+
+1. 导出方案（推荐前端接 POST，保留重新分章/打包）
+2. 大纲路由归属（推荐 OutlineNode 迁 `/outline-nodes`）
+3. 行尾规范化范围（已在 Phase 0 全库执行）
+4. 旧库处理（数据修复脚本 vs 允许重置）
