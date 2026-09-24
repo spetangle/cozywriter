@@ -312,7 +312,8 @@ def _async_full_review_task(task_id: str, project_id: str):
                 system_prompt=system_prompt,
                 max_tokens=2048,
                 temperature=0.3,
-                task_type="full_review_batch"
+                task_type="full_review_batch",
+                project_id=project_id,
             )
             
             result = _parse_review_json(raw)

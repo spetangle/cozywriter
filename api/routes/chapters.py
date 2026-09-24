@@ -595,6 +595,7 @@ def _async_pipeline_task(task_id: str, req: PipelineRequest):
             revision_threshold=req.revision_threshold,
             progress_cb=_on_progress,
             guide=req.guide,
+            task_id=task_id,
         )
 
         # 收尾：把完整 stages 列表 + 终态写进 task.result

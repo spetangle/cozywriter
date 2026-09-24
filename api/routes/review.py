@@ -77,6 +77,7 @@ def _do_review(project_id: str, chapter_id: int | None, session_type: str, db: S
             max_tokens=role.max_tokens,
             temperature=role.temperature,
             task_type=f"review_{session_type}",  # 入 log 时按 review 类型分类
+            project_id=project_id,
         )
         duration_ms = (time.time() - start) * 1000
         log_llm_call(llm.provider_name, getattr(llm, "model", "unknown"), "review", duration_ms, True)

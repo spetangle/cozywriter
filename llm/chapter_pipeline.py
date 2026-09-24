@@ -21,12 +21,70 @@ import re
 import time
 import traceback
 from typing import Any, Callable, Optional
+from datetime import datetime
 
 from logger import logger
 
 from llm.factory import LLMFactory
 from llm.roles import get_role, ROLES, build_ai_removal_instruction
 from rag.retrieval import RetrievalService
+
+
+class PipelineCancelledError(Exception):
+    """流水线取消异常 - 当任务被用户取消时抛出"""
+    pass
+
+# 角色名称到中文的映射
+ROLE_NAME_CN = {
+    "writing": "正文生成",
+    "chapter_outline_gen": "章节细纲生成",
+    "outline_reviewer": "细纲评审",
+    "review": "正文评审",
+    "revision": "章节修订",
+    "revision_decider": "修订决策",
+    "post_chapter": "章节后处理",
+    "foreshadow_updater": "伏笔更新",
+    "golden_3_checker": "黄金三章检查",
+    "chapter_director": "章节导演",
+    "event_signature_extractor": "事件签名提取",
+    "compressor": "内容压缩",
+    "expander": "内容扩写",
+}
+
+
+def calculate_max_tokens(target_word_count: int, max_word_count: int, 
+                          char_to_token_ratio: float = 1.5, safety_factor: float = 1.2,
+                          min_tokens: int = 2048, max_tokens_limit: int = 8192) -> int:
+    """
+    根据目标字数精准计算 max_tokens 参数
+    
+    Args:
+        target_word_count: 目标字数
+        max_word_count: 最大允许字数（用于计算上限）
+        char_to_token_ratio: 中文字符与 token 的换算比例，DeepSeek v4 约为 1:1.5
+        safety_factor: 安全系数，用于应对标点、空格等额外开销
+        min_tokens: 最小 token 数，防止计算结果过小
+        max_tokens_limit: 最大 token 数，防止超过模型上下文限制
+    
+    Returns:
+        计算后的 max_tokens 值
+    
+    计算公式：max_tokens = max(min_tokens, min(max_word_count × char_to_token_ratio × safety_factor, max_tokens_limit))
+    
+    示例：
+        目标字数 3000，最大字数 3500
+        max_tokens = 3500 × 1.5 × 1.2 = 6300
+    """
+    calculated_max_tokens = int(max_word_count * char_to_token_ratio * safety_factor)
+    result = max(min_tokens, min(calculated_max_tokens, max_tokens_limit))
+    
+    logger.info(
+        f"[calculate_max_tokens] 字数控制: 目标字数={target_word_count}, "
+        f"最大字数={max_word_count}, 计算token={calculated_max_tokens}, "
+        f"实际max_tokens={result}"
+    )
+    
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -485,48 +543,82 @@ def _find_existing_character(db, project_id: int, name: str) -> "Character | Non
     return None
 
 
-def _call_llm(role_name: str, ctx: dict, user_msg: str, provider: str | None = None, db=None) -> str:
+def _call_llm(role_name: str, ctx: dict, user_msg: str, provider: str | None = None, db=None, project_id: str | None = None, task_id: str | None = None) -> str:
     """通用 LLM 调用 helper"""
     role = ROLES.get(role_name)
     if role is None:
         raise ValueError(f"Unknown role: {role_name}")
     system = role.build_system(ctx)
-    user = role.build_user({**ctx, "context": user_msg})
+    # 同时提供 context 和 prompt 占位符，兼容不同角色模板
+    user = role.build_user({**ctx, "context": user_msg, "prompt": user_msg})
     llm = LLMFactory.create(provider=provider, db=db)
+    # 对于写作和修订等不需要 JSON 输出的任务，强制设置 use_json=False
+    use_json = role_name not in ("writing", "revision", "post_chapter")
+    from llm.usage_tracker import generate_llm_call_id
+    llm_call_id = generate_llm_call_id(task_id)
     return llm.generate(
         prompt=user,
         system_prompt=system,
         max_tokens=role.max_tokens,
         temperature=role.temperature,
-        task_type=f"chapter_pipeline_{role_name}",  # 入 log 时按 role 分类
+        task_type=f"chapter_pipeline_{role_name}",
+        use_json=use_json,
+        project_id=project_id,
+        task_id=task_id,
+        llm_call_id=llm_call_id,
     )
 
 
-def _call_llm_with_fingerprint(role_name: str, ctx: dict, user_msg: str, 
-                                provider: str | None = None, db=None, 
-                                task_id: str = "", max_retries: int = 3) -> dict:
-    """通用 LLM 调用 helper，返回包含指纹信息的结果"""
+def _call_llm_with_fingerprint(role_name: str, ctx: dict, user_msg: str,
+                                provider: str | None = None, db=None,
+                                task_id: str = "", max_retries: int = 3,
+                                max_tokens: int | None = None,
+                                temperature: float | None = None,
+                                top_p: float | None = None,
+                                project_id: str | None = None) -> dict:
+    """通用 LLM 调用 helper，返回包含指纹信息的结果
+    
+    Args:
+        role_name: 角色名称
+        ctx: 上下文变量
+        user_msg: 用户消息
+        provider: LLM 服务商
+        db: 数据库连接
+        task_id: 任务ID
+        max_retries: 最大重试次数
+        max_tokens: 自定义 max_tokens（优先使用，否则使用角色默认值）
+        temperature: 自定义温度参数（优先使用，否则使用角色默认值）
+        top_p: 自定义 top_p 参数（优先使用，否则使用角色默认值）
+    """
     role = ROLES.get(role_name)
     if role is None:
         raise ValueError(f"Unknown role: {role_name}")
     system = role.build_system(ctx)
-    user = role.build_user({**ctx, "context": user_msg})
+    # 同时提供 context 和 prompt 占位符，兼容不同角色模板
+    user = role.build_user({**ctx, "context": user_msg, "prompt": user_msg})
     llm = LLMFactory.create(provider=provider, db=db)
     
+    effective_max_tokens = max_tokens if max_tokens is not None else role.max_tokens
+    effective_temperature = temperature if temperature is not None else role.temperature
+    effective_top_p = top_p if top_p is not None else (role.top_p if hasattr(role, "top_p") else 1.0)
+    
     hyperparams = {
-        "max_tokens": role.max_tokens,
-        "temperature": role.temperature,
-        "top_p": role.top_p if hasattr(role, "top_p") else 1.0,
+        "max_tokens": effective_max_tokens,
+        "temperature": effective_temperature,
+        "top_p": effective_top_p,
         "frequency_penalty": role.frequency_penalty if hasattr(role, "frequency_penalty") else 0.0,
         "presence_penalty": role.presence_penalty if hasattr(role, "presence_penalty") else 0.0,
     }
     
     fingerprint = {
         "task_id": task_id,
+        "llm_call_id": "",
         "role_name": role_name,
+        "role_name_cn": ROLE_NAME_CN.get(role_name, role_name),
         "provider": llm.provider_name,
         "model": getattr(llm, "model", ""),
         "timestamp": time.time(),
+        "timestamp_str": datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S"),
         "request": {
             "system_prompt": system,
             "user_prompt": user,
@@ -540,6 +632,7 @@ def _call_llm_with_fingerprint(role_name: str, ctx: dict, user_msg: str,
     
     last_exception = None
     total_duration_ms = 0
+    from llm.usage_tracker import generate_llm_call_id
     
     for attempt in range(1, max_retries + 1):
         t0 = time.time()
@@ -548,13 +641,32 @@ def _call_llm_with_fingerprint(role_name: str, ctx: dict, user_msg: str,
         try:
             logger.info(f"[LLM] 调用开始: role={role_name}, attempt={attempt}/{max_retries}, task_id={task_id[:10] if task_id else 'None'}")
             
+            # 对于写作和修订等不需要 JSON 输出的任务，强制设置 use_json=False
+            use_json = role_name not in ("writing", "revision", "post_chapter")
+            
+            # 每次尝试生成唯一的 llm_call_id
+            llm_call_id = generate_llm_call_id(task_id)
+            
             response_text = llm.generate(
                 prompt=user,
                 system_prompt=system,
-                max_tokens=role.max_tokens,
-                temperature=role.temperature,
+                max_tokens=effective_max_tokens,
+                temperature=effective_temperature,
+                top_p=effective_top_p,
                 task_type=f"chapter_pipeline_{role_name}",
+                use_json=use_json,
+                project_id=project_id,
+                task_id=task_id,
+                llm_call_id=llm_call_id,
             )
+            
+            # 检查任务是否已取消（LLM 调用完成后）
+            if task_id:
+                from api.tasks import get_task
+                task = get_task(task_id)
+                if task is not None and task.status == "cancelled":
+                    logger.info(f"[LLM] Task {task_id} cancelled during LLM call, stopping")
+                    raise PipelineCancelledError(f"Task {task_id} cancelled during LLM call")
             
             attempt_duration_ms = (time.time() - t0) * 1000
             total_duration_ms += attempt_duration_ms
@@ -565,6 +677,7 @@ def _call_llm_with_fingerprint(role_name: str, ctx: dict, user_msg: str,
                 "text": response_text,
                 "success": True,
             }
+            fingerprint["llm_call_id"] = llm_call_id
             fingerprint["duration_ms"] = total_duration_ms
             fingerprint["retry_attempts"] = attempt - 1
             
@@ -572,6 +685,10 @@ def _call_llm_with_fingerprint(role_name: str, ctx: dict, user_msg: str,
                 "text": response_text,
                 "fingerprint": fingerprint,
             }
+            
+        except PipelineCancelledError:
+            # 取消异常直接抛出，不重试
+            raise
             
         except Exception as e:
             attempt_duration_ms = (time.time() - t0) * 1000
@@ -586,8 +703,8 @@ def _call_llm_with_fingerprint(role_name: str, ctx: dict, user_msg: str,
             fingerprint["retry_errors"].append(error_info)
             
             if attempt < max_retries:
-                logger.warning(f"[LLM] 调用失败 (第{attempt}/{max_retries}次): role={role_name}, error={e}, 将在5秒后重试...")
-                time.sleep(5)
+                logger.warning(f"[LLM] 调用失败 (第{attempt}/{max_retries}次): role={role_name}, error={e}, 将在2秒后重试...")
+                time.sleep(2)
             else:
                 logger.error(f"[LLM] 调用失败 (全部{max_retries}次重试均失败): role={role_name}, task_id={task_id}, error={e}")
                 logger.error(f"[LLM] 最后一次请求信息: provider={llm.provider_name}, model={getattr(llm, 'model', '')}")
@@ -937,6 +1054,8 @@ def generate_chapter_outline(db, project_id: int, chapter_id: int, provider: str
     ).first()
 
     outline_ctx = {
+        "chapter_num": (prep["chapter_outline"] or {}).get("order", 0) + 1,
+        "chapter_title": (prep["chapter_outline"] or {}).get("title", ""),
         "chapter_position": (prep["chapter_outline"] or {}).get("position", "发展"),
         "pacing": (prep["chapter_outline"] or {}).get("pacing", "平稳"),
         "key_content": (prep["chapter_outline"] or {}).get("key_content", ""),
@@ -944,10 +1063,14 @@ def generate_chapter_outline(db, project_id: int, chapter_id: int, provider: str
         "prep_info": _format_prep_for_llm(prep),
         "previous_events": prep.get("previous_event_signatures_text", "（暂无，这是首章）"),
         "target_word_count": prep["project_meta"]["target_word_count"],
+        "word_count_range": f"{prep['project_meta']['min_words']}~{prep['project_meta']['max_words']} 字",
+        "themes": prep.get("themes", "（暂无主旨）"),
+        "structure": json.dumps(prep.get("project_structure", {}), ensure_ascii=False, indent=2),
+        "plotlines": json.dumps(prep.get("project_plot_lines", []), ensure_ascii=False, indent=2),
         "guide": guide,
     }
 
-    raw = _call_llm("chapter_outline_gen", outline_ctx, "", provider)
+    raw = _call_llm("chapter_outline_gen", outline_ctx, "", provider, project_id=project_id)
     try:
         return _parse_json(raw)
     except (json.JSONDecodeError, ValueError) as e:
@@ -1084,6 +1207,7 @@ def review_chapter_outline(outline: dict, prep_info: dict, provider: str | None 
 def generate_chapter_text(
     db, project_id: int, chapter_id: int,
     final_outline: dict, provider: str | None = None,
+    task_id: str = "",
 ) -> str:
     """按最终细纲生成章节正文"""
     from storage.models import Project
@@ -1091,39 +1215,56 @@ def generate_chapter_text(
     project = db.query(Project).filter(Project.id == project_id).first()
     prep = build_chapter_prep_info(db, project_id, chapter_id)
 
+    # 计算自然段数量范围
+    min_words = prep["project_meta"]["min_words"]
+    max_words = prep["project_meta"]["max_words"]
+    target_word_count = prep["project_meta"]["target_word_count"]
+    min_paragraphs = int(min_words / 80)
+    max_paragraphs = int(max_words / 80)
+    
+    # 构建字数锁定协议
+    word_count_protocol = (
+        f"【字数锁定协议】\n"
+        f"本章目标字数：{target_word_count}字（±10%浮动）。\n"
+        f"请按以下密度生成：写出{min_paragraphs}~{max_paragraphs}个自然段。平均每段包含65~80个汉字（约3~5句）。\n"
+        f"自检机制：生成结束后，请自动在心里估算段落数。若不足{min_paragraphs}段，请扩充环境描写；若超过{max_paragraphs}段，请合并冗余短句。只输出最终正文，不要输出你的计算过程。\n\n"
+    )
+
     # 用现有的 writing role，但拼更厚的 context
     writing_ctx = {
         "writing_style": project.writing_style or "平实",
         "ai_removal_instruction": build_ai_removal_instruction(project.ai味去除程度) if project.ai味去除程度 else "",
         "themes": prep["themes"],
         "characters": "\n".join(prep["characters"]) or "（无）",
-        "character_arcs": "（参见上文 character 段）",
+        "character_arcs": "（参见上文 弧光 段）",
         "world": prep["project_outline_text"] or "（无项目大纲）",
         "foreshadowings": prep["active_foreshadowings"],
         "chapters": prep["prev_chapters_summary"],
-        "target_word_count": prep["project_meta"]["target_word_count"],
-        "word_count_range": f"{prep['project_meta']['min_words']}~{prep['project_meta']['max_words']} 字",
+        "previous_events": prep.get("previous_event_signatures_text", "") or "（暂无已发生事件）",
+        "target_word_count": target_word_count,
+        "word_count_range": f"{min_words}~{max_words} 字",
+        "prompt": "（本章为全新生成，无续写内容）",
     }
 
-    system = ROLES["writing"].build_system(writing_ctx)
-
-    # user：拼细纲 + 准备信息 + 上章结尾
+    # user：拼细纲 + 准备信息 + 上章结尾 + 字数锁定协议
     user_msg = (
         f"【本章细纲（严格遵循）】\n{json.dumps(final_outline, ensure_ascii=False, indent=2)}\n\n"
         f"【上章结尾（衔接用）】\n{prep['prev_chapter_ending']}\n\n"
         f"【登场人物】\n" + "\n".join(prep["characters"]) + "\n\n"
-        f"【目标字数】{prep['project_meta']['target_word_count']} 字\n\n"
-        f"请按细纲生成正文，**不要偏离细纲**。\n\n【重要约束】：请务必在生成完毕后检查字数，确保最终输出严格在{prep['project_meta']['min_words']}~{prep['project_meta']['max_words']}字之间，不要超出或过少。"
+        f"【目标字数】{target_word_count} 字\n\n"
+        f"{word_count_protocol}"
+        f"请按细纲生成正文，**不要偏离细纲**。\n\n【重要约束】：请务必在生成完毕后检查字数，确保最终输出严格在{min_words}~{max_words}字之间，不要超出或过少。"
     )
 
-    llm = LLMFactory.create(provider=provider)
-    return llm.generate(
-        prompt=user_msg,
-        system_prompt=system,
-        max_tokens=ROLES["writing"].max_tokens,
-        temperature=ROLES["writing"].temperature,
-        task_type="chapter_pipeline_writing",  # 入 log 时分类
+    # 精准控制 max_tokens：根据目标字数动态计算
+    max_tokens = calculate_max_tokens(
+        target_word_count=target_word_count,
+        max_word_count=max_words,
     )
+    
+    # 使用 _call_llm_with_fingerprint 获取完整的指纹信息
+    result = _call_llm_with_fingerprint("writing", writing_ctx, user_msg, provider, db, task_id, max_tokens=max_tokens, project_id=project_id)
+    return result["text"]
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1133,12 +1274,17 @@ def generate_chapter_text(
 def adjust_word_count(
     content: str, target: int, min_w: int, max_w: int,
     outline: dict, provider: str | None = None,
+    task_id: str = "", fingerprints: list | None = None,
 ) -> str:
     """根据目标字数调整正文（过多缩写 / 过少扩写）
 
     流程日志：
     - 调整前：当前字数 / 目标字数 / 计划动作（缩写 or 扩写）/ 偏差
     - 调整后：调整前字数 → 调整后字数（净增/减 + 是否落进 min~max 区间）
+    
+    调整策略：
+    - 最多进行 2 次调整
+    - 若三次（初始生成 + 2 次调整）均不达标，则选择字数最接近目标字数的保留
     """
     actual = _count_chinese_chars(content)
     if min_w <= actual <= max_w:
@@ -1161,6 +1307,9 @@ def adjust_word_count(
         f"动作={action}, 预计需调整={delta}字 (偏差={actual - target:+d}字)"
     )
 
+    # 保存所有尝试的内容，用于最终选择
+    attempts = [(actual, content)]
+    
     ctx = {
         "target_word_count": target,
         "current_word_count": actual,
@@ -1169,60 +1318,131 @@ def adjust_word_count(
         "outline": json.dumps(outline, ensure_ascii=False, indent=2) if isinstance(outline, dict) else str(outline),
         "content": content[:6000],  # 截断避免超长
     }
+    
     try:
         t0 = time.time()
         role_name = "compressor" if actual > max_w else "expander"
         target_key = "compressed_text" if actual > max_w else "expanded_text"
         
-        # 带重试机制的调用
         new_content = content
         claimed_count = None
-        for attempt in range(3):
-            try:
-                result = _call_llm_with_fingerprint(role_name, ctx, "", provider)
-                
-                try:
-                    data = _parse_json(result["text"])
-                    new_content = data.get(target_key, content)
-                    claimed_count = data.get("final_word_count")
-                    break
-                except (json.JSONDecodeError, ValueError):
-                    pass
-                
-                if attempt < 2:
-                    logger.warning(f"[adjust_word_count] 第{attempt+1}次尝试: 返回内容不是有效JSON，5秒后重试...")
-                    time.sleep(5)
-                else:
-                    logger.error(f"[adjust_word_count] 3次重试均失败，返回内容不是有效JSON，使用原内容")
-            except Exception as e:
-                logger.error(f"[adjust_word_count] LLM调用失败: {e}")
-                if attempt < 2:
-                    time.sleep(5)
-                else:
-                    logger.error(f"[adjust_word_count] 3次重试均失败，使用原内容")
+        max_adjust_attempts = 2  # 最多进行 2 次调整
         
+        # 获取角色对象，用于读取默认参数
+        role = ROLES.get(role_name)
+        if role is None:
+            logger.error(f"[WordAdjust] 未知角色: {role_name}")
+            return content
+        
+        for adjust_round in range(1, max_adjust_attempts + 1):
+            logger.info(f"[WordAdjust] 第 {adjust_round} 次调整开始...")
+            
+            # 增加随机性：每次调整使用不同的 temperature 和 top_p
+            # 避免 LLM 返回相同结果（缓存命中）
+            adjust_temperature = role.temperature
+            adjust_top_p = getattr(role, "top_p", 1.0)
+            
+            if adjust_round > 1:
+                # 第二次及以后调整，增加随机性
+                adjust_temperature = min(role.temperature + 0.2, 1.0)
+                adjust_top_p = min(getattr(role, "top_p", 1.0) + 0.1, 1.0)
+                logger.info(f"[WordAdjust] 第 {adjust_round} 次调整：增加随机性，temperature={adjust_temperature:.2f}, top_p={adjust_top_p:.2f}")
+            
+            # 根据目标字数计算 max_tokens（1 token ≈ 0.75 个中文汉字）
+            # 预留 20% 的缓冲空间，确保 LLM 有足够的输出空间
+            target_tokens = int(max_w * 1.3)
+            
+            # 带重试机制的调用（每次调整内部最多重试 3 次）
+            for attempt in range(3):
+                try:
+                    result = _call_llm_with_fingerprint(
+                        role_name, ctx, "", provider, None, task_id,
+                        max_tokens=target_tokens,
+                        temperature=adjust_temperature,
+                        top_p=adjust_top_p,
+                    )
+                    
+                    # 保存指纹信息
+                    if fingerprints is not None:
+                        fingerprints.append(result["fingerprint"])
+                    
+                    try:
+                        data = _parse_json(result["text"])
+                        new_content = data.get(target_key, content)
+                        claimed_count = data.get("final_word_count")
+                        break
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    
+                    if attempt < 2:
+                        logger.warning(f"[adjust_word_count] 第{adjust_round}次调整-第{attempt+1}次尝试: 返回内容不是有效JSON，响应前200字符: {result['text'][:200]}, 5秒后重试...")
+                        time.sleep(5)
+                    else:
+                        logger.error(f"[adjust_word_count] 第{adjust_round}次调整-3次重试均失败，返回内容不是有效JSON，响应前500字符: {result['text'][:500]}, 使用原内容")
+                except Exception as e:
+                    logger.error(f"[adjust_word_count] 第{adjust_round}次调整-LLM调用失败: {e}")
+                    if attempt < 2:
+                        time.sleep(5)
+                    else:
+                        logger.error(f"[adjust_word_count] 第{adjust_round}次调整-3次重试均失败，使用原内容")
+            
+            # 检查调整结果
+            new_actual = _count_chinese_chars(new_content)
+            in_range = min_w <= new_actual <= max_w
+            
+            # 保存本次尝试的内容
+            attempts.append((new_actual, new_content))
+            
+            # 验证 LLM 自报字数与实际字数差距过大时报警
+            claimed_str = ""
+            if claimed_count is not None:
+                try:
+                    claimed_int = int(claimed_count)
+                    diff = abs(claimed_int - new_actual)
+                    if diff > 100:  # 偏差 > 100 字说明 LLM 自报不准
+                        claimed_str = f", LLM自报={claimed_int}字 (差{diff}字 ⚠️ 不准)"
+                    else:
+                        claimed_str = f", LLM自报={claimed_int}字 ✓"
+                except (ValueError, TypeError):
+                    pass
+            
+            logger.info(
+                f"[WordAdjust] 第 {adjust_round} 次调整完成: 调整前={attempts[adjust_round-1][0]}字 → 调整后={new_actual}字 "
+                f"(净{'减' if new_actual < attempts[adjust_round-1][0] else '增'}{abs(attempts[adjust_round-1][0] - new_actual)}字{claimed_str}), "
+                f"{'✅ 已落进目标区间' if in_range else f'⚠️ 仍未落进区间 {min_w}~{max_w}'}"
+            )
+            
+            if in_range:
+                # 调整成功，直接返回
+                duration_ms = (time.time() - t0) * 1000
+                logger.info(f"[WordAdjust] 调整成功，共尝试 {adjust_round} 次，用时 {duration_ms:.0f}ms")
+                return new_content
+            
+            # 更新上下文，准备下一次调整
+            ctx["current_word_count"] = new_actual
+            ctx["content"] = new_content[:6000]
+        
+        # ── 所有调整尝试均未达标 ──
+        # 从所有尝试（初始 + 2 次调整）中选择字数最接近目标的
         duration_ms = (time.time() - t0) * 1000
-        new_actual = _count_chinese_chars(new_content)
-        in_range = min_w <= new_actual <= max_w
-        # 验证 LLM 自报字数与实际字数差距过大时报警
-        claimed_str = ""
-        if claimed_count is not None:
-            try:
-                claimed_int = int(claimed_count)
-                diff = abs(claimed_int - new_actual)
-                if diff > 100:  # 偏差 > 100 字说明 LLM 自报不准
-                    claimed_str = f", LLM自报={claimed_int}字 (差{diff}字 ⚠️ 不准)"
-                else:
-                    claimed_str = f", LLM自报={claimed_int}字 ✓"
-            except (ValueError, TypeError):
-                pass
+        logger.warning(f"[WordAdjust] 所有 {max_adjust_attempts} 次调整均未达标，将从 {len(attempts)} 份内容中选择最接近目标的")
+        
+        best_index = 0
+        best_diff = float('inf')
+        for i, (act, cnt) in enumerate(attempts):
+            diff = abs(act - target)
+            logger.info(f"[WordAdjust] 候选 {i+1}: {act}字, 与目标偏差 {diff}字")
+            if diff < best_diff:
+                best_diff = diff
+                best_index = i
+        
+        best_actual, best_content = attempts[best_index]
         logger.info(
-            f"[WordAdjust] 调整完成: 调整前={actual}字 → 调整后={new_actual}字 "
-            f"(净{'减' if new_actual < actual else '增'}{abs(actual - new_actual)}字, "
-            f"用时={duration_ms:.0f}ms{claimed_str}), "
-            f"{'✅ 已落进目标区间' if in_range else f'⚠️ 仍未落进区间 {min_w}~{max_w}'}"
+            f"[WordAdjust] 最终选择: 候选 {best_index + 1}, "
+            f"{best_actual}字 (与目标偏差 {best_diff}字), 用时 {duration_ms:.0f}ms"
         )
-        return new_content
+        return best_content
+        
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning(
             f"[WordAdjust] 调整失败: JSON parse error={e}, "
@@ -1236,7 +1456,8 @@ def adjust_word_count(
 # ═══════════════════════════════════════════════════════════════
 
 def review_chapter_text(
-    db, project_id: int, chapter_id: int, content: str, provider: str | None = None,
+    db, project_id: int, chapter_id: int, content: str, outline: dict | None = None,
+    provider: str | None = None, task_id: str | None = None, fingerprints: dict | None = None,
 ) -> dict:
     """8 维度评审
 
@@ -1248,23 +1469,25 @@ def review_chapter_text(
     ctx = {
         "title": project.title if project else "",
         "content": content[:8000],
+        "outline": json.dumps(outline, ensure_ascii=False, indent=2) if outline else "（无细纲）",
     }
     
     # 带重试机制的调用
     for attempt in range(3):
         try:
-            result = _call_llm_with_fingerprint("review", ctx, "", provider)
+            result = _call_llm_with_fingerprint("review", ctx, "", provider, project_id=project_id)
             
             try:
-                return _parse_json(result["text"])
+                parsed = _parse_json(result["text"])
+                return parsed
             except (json.JSONDecodeError, ValueError):
                 pass
             
             if attempt < 2:
-                logger.warning(f"[review_chapter_text] 第{attempt+1}次尝试: 返回内容不是有效JSON，5秒后重试...")
+                logger.warning(f"[review_chapter_text] 第{attempt+1}次尝试: 返回内容不是有效JSON，响应前200字符: {result['text'][:200]}, 5秒后重试...")
                 time.sleep(5)
             else:
-                logger.error("[review_chapter_text] 3次重试均失败，返回内容不是有效JSON，使用5分兜底")
+                logger.error(f"[review_chapter_text] 3次重试均失败，返回内容不是有效JSON，响应前500字符: {result['text'][:500]}, 使用5分兜底")
                 return {
                     "scores": {
                         "consistency": 5, "pacing": 5, "style": 5, "ai_removal": 5,
@@ -1293,7 +1516,7 @@ def review_chapter_text(
 # Step 7: 修订决策
 # ═══════════════════════════════════════════════════════════════
 
-def decide_revision(review_data: dict, outline: dict, content: str, provider: str | None = None) -> dict:
+def decide_revision(review_data: dict, outline: dict, content: str, provider: str | None = None, task_id: str | None = None, fingerprints: dict | None = None) -> dict:
     """根据评审分决定是否自动修订
 
     决策依据：综合分（满分 100），由 8 维度加权求和得出。
@@ -1317,15 +1540,16 @@ def decide_revision(review_data: dict, outline: dict, content: str, provider: st
             result = _call_llm_with_fingerprint("revision_decider", ctx, "", provider)
             
             try:
-                return _parse_json(result["text"])
+                parsed = _parse_json(result["text"])
+                return parsed
             except (json.JSONDecodeError, ValueError):
                 pass
             
             if attempt < 2:
-                logger.warning(f"[decide_revision] 第{attempt+1}次尝试: 返回内容不是有效JSON，5秒后重试...")
+                logger.warning(f"[decide_revision] 第{attempt+1}次尝试: 返回内容不是有效JSON，响应前200字符: {result['text'][:200]}, 5秒后重试...")
                 time.sleep(5)
             else:
-                logger.error("[decide_revision] 3次重试均失败，返回内容不是有效JSON，默认不修订")
+                logger.error(f"[decide_revision] 3次重试均失败，返回内容不是有效JSON，响应前500字符: {result['text'][:500]}, 默认不修订")
                 return {
                     "decision": "pass",
                     "focus_areas": [],
@@ -1347,26 +1571,39 @@ def decide_revision(review_data: dict, outline: dict, content: str, provider: st
 def revise_chapter_text(
     content: str, focus_areas: list, outline: dict,
     review_data: dict, provider: str | None = None,
+    task_id: str | None = None, fingerprints: dict | None = None,
 ) -> str:
     """调用现有 revision role 修订"""
     ctx = {
         "critique": review_data.get("critique", ""),
         "suggestions": "\n".join(review_data.get("suggestions", [])),
+        "content": content[:6000],
     }
-    system = ROLES["revision"].build_system(ctx)
-    user = (
+    
+    user_msg = (
         f"原文：\n{content[:6000]}\n\n"
         f"重点关注：{', '.join(focus_areas or [])}\n\n"
         f"请按评审意见修订。"
     )
-    llm = LLMFactory.create(provider=provider)
-    return llm.generate(
-        prompt=user,
-        system_prompt=system,
-        max_tokens=ROLES["revision"].max_tokens,
-        temperature=ROLES["revision"].temperature,
-        task_type="chapter_pipeline_revision",  # 入 log 时分类
-    )
+    
+    result = _call_llm_with_fingerprint("revision", ctx, user_msg, provider, None, task_id)
+    
+    # 解析返回内容：如果是 JSON 格式，提取 revised_text 字段
+    text = result["text"].strip()
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+            if "revised_text" in parsed:
+                text = parsed["revised_text"]
+            elif "text" in parsed:
+                text = parsed["text"]
+        except (json.JSONDecodeError, ValueError):
+            pass
+    
+    if fingerprints is not None:
+        fingerprints.append(result["fingerprint"])
+    
+    return text
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1422,7 +1659,7 @@ def run_post_chapter_processing(
         post_data = None
         for attempt in range(3):
             try:
-                llm_result = _call_llm_with_fingerprint("post_chapter", ctx, "", provider)
+                llm_result = _call_llm_with_fingerprint("post_chapter", ctx, "", provider, project_id=project_id)
                 
                 try:
                     post_data = _parse_json(llm_result["text"])
@@ -1537,7 +1774,7 @@ def run_post_chapter_processing(
         "active_foreshadowings": fores_text,
     }
     try:
-        raw = _call_llm("foreshadow_updater", ctx, "", provider)
+        raw = _call_llm("foreshadow_updater", ctx, "", provider, project_id=project_id)
         fore_data = _parse_json(raw)
     except Exception as e:
         logger.warning(f"[ForeshadowUpdate] LLM failed: {e}")
@@ -1617,7 +1854,7 @@ def run_post_chapter_processing(
             "chapter_num": chapter.order + 1,
             "content": (content or chapter.content or "")[:6000],
         }
-        sig_raw = _call_llm("event_signature_extractor", sig_ctx, "", provider)
+        sig_raw = _call_llm("event_signature_extractor", sig_ctx, "", provider, project_id=project_id)
         sig_data = _parse_json(sig_raw)
         sig = (sig_data.get("signature") or "").strip()[:500]
         if sig:
@@ -1665,7 +1902,7 @@ def run_golden_3_check(db, project_id: int, provider: str | None = None) -> dict
         "themes": "\n".join([f"- [{t.theme_type}] {t.title}: {t.description}" for t in themes]),
     }
     try:
-        raw = _call_llm("golden_3_checker", ctx, "", provider)
+        raw = _call_llm("golden_3_checker", ctx, "", provider, project_id=project_id)
         return _parse_json(raw)
     except Exception as e:
         logger.warning(f"[Golden3] LLM failed: {e}")
@@ -1710,7 +1947,7 @@ def run_quick_consistency_check(
     }
     user = f"【近 5 章正文】\n{content[:8000]}"
     try:
-        raw = _call_llm("consistency", ctx, user, provider)
+        raw = _call_llm("consistency", ctx, user, provider, project_id=project_id)
         data = _parse_json(raw)
         return {
             "has_issues": bool(data.get("issues")),
@@ -1964,6 +2201,13 @@ def run_chapter_generation_pipeline(
 
     def _run_stage(name: str, fn) -> tuple[Any, float]:
         nonlocal completed_weight
+        # 检查任务是否已取消
+        if task_id:
+            from api.tasks import get_task
+            task = get_task(task_id)
+            if task is not None and task.status == "cancelled":
+                raise PipelineCancelledError(f"Task {task_id} cancelled before stage {name}")
+        
         t0 = time.time()
         meta = next((m for m in PIPELINE_STAGES_META if m["id"] == name), None)
         label = meta["label"] if meta else name
@@ -1974,6 +2218,13 @@ def run_chapter_generation_pipeline(
             "started_at": t0,
         })
         try:
+            # 在执行阶段前再次检查取消状态
+            if task_id:
+                from api.tasks import get_task
+                task = get_task(task_id)
+                if task is not None and task.status == "cancelled":
+                    raise PipelineCancelledError(f"Task {task_id} cancelled during stage {name}")
+            
             result = fn()
             duration_ms = (time.time() - t0) * 1000
             stages[name] = {"status": "completed", "duration_ms": duration_ms, "data": result}
@@ -1996,6 +2247,8 @@ def run_chapter_generation_pipeline(
                     notify_info["score"] = result["overall_score"]
             _notify(name, "completed", notify_info)
             return result, duration_ms
+        except PipelineCancelledError:
+            raise
         except Exception as e:
             duration_ms = (time.time() - t0) * 1000
             tb = traceback.format_exc()
@@ -2027,6 +2280,8 @@ def run_chapter_generation_pipeline(
             ).first()
 
             outline_ctx = {
+                "chapter_num": (prep["chapter_outline"] or {}).get("order", 0) + 1,
+                "chapter_title": (prep["chapter_outline"] or {}).get("title", ""),
                 "chapter_position": (prep["chapter_outline"] or {}).get("position", "发展"),
                 "pacing": (prep["chapter_outline"] or {}).get("pacing", "平稳"),
                 "key_content": (prep["chapter_outline"] or {}).get("key_content", ""),
@@ -2034,24 +2289,41 @@ def run_chapter_generation_pipeline(
                 "prep_info": _format_prep_for_llm(prep),
                 "previous_events": prep.get("previous_event_signatures_text", "（暂无，这是首章）"),
                 "target_word_count": prep["project_meta"]["target_word_count"],
+                "word_count_range": f"{prep['project_meta']['min_words']}~{prep['project_meta']['max_words']} 字",
+                "themes": prep.get("themes", "（暂无主旨）"),
+                "structure": json.dumps(prep.get("project_structure", {}), ensure_ascii=False, indent=2),
+                "plotlines": json.dumps(prep.get("project_plot_lines", []), ensure_ascii=False, indent=2),
                 "guide": guide,
             }
 
             for attempt in range(3):
                 try:
-                    result = _call_llm_with_fingerprint("chapter_outline_gen", outline_ctx, "", provider, db, task_id)
+                    result = _call_llm_with_fingerprint("chapter_outline_gen", outline_ctx, "", provider, db, task_id, project_id=project_id)
                     fingerprints.append(result["fingerprint"])
                     
+                    text = result["text"].strip()
+                    
+                    # 空响应：直接进入降级，不浪费重试次数
+                    if not text:
+                        logger.warning(f"[generate_chapter_outline] 第{attempt+1}次尝试: LLM返回空响应，尝试简化prompt重试...")
+                        if attempt < 2:
+                            time.sleep(2)
+                        continue
+                    
                     try:
-                        parsed = _parse_json(result["text"])
+                        parsed = _parse_json(text)
                         if isinstance(parsed, dict) and parsed.get("key_content"):
                             return parsed
-                    except (json.JSONDecodeError, ValueError):
-                        pass
+                    except (json.JSONDecodeError, ValueError) as e:
+                        logger.warning(f"[generate_chapter_outline] 第{attempt+1}次尝试: JSON解析失败({e})，重试中...")
+                        if attempt < 2:
+                            time.sleep(2)
+                        continue
                     
+                    # 解析成功但 key_content 为空，也算无效
                     if attempt < 2:
-                        logger.warning(f"[generate_chapter_outline] 第{attempt+1}次尝试: 返回内容不是有效JSON，5秒后重试...")
-                        time.sleep(5)
+                        logger.warning(f"[generate_chapter_outline] 第{attempt+1}次尝试: 解析成功但关键字段缺失，重试中...")
+                        time.sleep(2)
                     else:
                         logger.error("[generate_chapter_outline] 3次重试均失败，尝试从不完整JSON中提取字段")
                         
@@ -2076,8 +2348,14 @@ def run_chapter_generation_pipeline(
                         }
                         
                         import re as _re
-                        text = result["text"]
-                        text = text.replace("```json", "").replace("```", "")
+                        raw_text = result["text"]
+                        
+                        # 空响应时直接返回默认值，不浪费时间跑正则
+                        if not raw_text.strip():
+                            logger.error("[generate_chapter_outline] LLM返回空响应，使用默认空细纲")
+                            return partial_outline
+                        
+                        text = raw_text.replace("```json", "").replace("```", "")
                         
                         key_patterns = [
                             ("key_content", r'"key_content"\s*:\s*"([^"]*?)"'),
@@ -2197,31 +2475,51 @@ def run_chapter_generation_pipeline(
             prep = stages["1_prep"]
             final_outline = stages["2_outline_gen"]
 
+            # 计算自然段数量范围
+            min_words = prep["project_meta"]["min_words"]
+            max_words = prep["project_meta"]["max_words"]
+            target_word_count = prep["project_meta"]["target_word_count"]
+            min_paragraphs = int(min_words / 80)
+            max_paragraphs = int(max_words / 80)
+            
+            # 构建字数锁定协议
+            word_count_protocol = (
+                f"【字数锁定协议】\n"
+                f"本章目标字数：{target_word_count}字（±10%浮动）。\n"
+                f"请按以下密度生成：写出{min_paragraphs}~{max_paragraphs}个自然段。平均每段包含65~80个汉字（约3~5句）。\n"
+                f"自检机制：生成结束后，请自动在心里估算段落数。若不足{min_paragraphs}段，请扩充环境描写；若超过{max_paragraphs}段，请合并冗余短句。只输出最终正文，不要输出你的计算过程。\n\n"
+            )
+
             writing_ctx = {
                 "writing_style": project.writing_style or "平实",
                 "ai_removal_instruction": build_ai_removal_instruction(project.ai味去除程度) if project.ai味去除程度 else "",
                 "themes": prep["themes"],
                 "characters": "\n".join(prep["characters"]) or "（无）",
-                "character_arcs": "（参见上文 character 段）",
+                "character_arcs": "（参见上文 弧光 段）",
                 "world": prep["project_outline_text"] or "（无项目大纲）",
                 "foreshadowings": prep["active_foreshadowings"],
                 "chapters": prep["prev_chapters_summary"],
-                "target_word_count": prep["project_meta"]["target_word_count"],
-                "word_count_range": f"{prep['project_meta']['min_words']}~{prep['project_meta']['max_words']} 字",
+                "previous_events": prep.get("previous_event_signatures_text", "") or "（暂无已发生事件）",
+                "target_word_count": target_word_count,
+                "word_count_range": f"{min_words}~{max_words} 字",
+                "min_paragraphs": min_paragraphs,
+                "max_paragraphs": max_paragraphs,
+                "prompt": "（本章为全新生成，无续写内容）",
             }
 
             user_msg = (
                 f"【本章细纲（严格遵循）】\n{json.dumps(final_outline, ensure_ascii=False, indent=2)}\n\n"
                 f"【上章结尾（衔接用）】\n{prep['prev_chapter_ending']}\n\n"
                 f"【登场人物】\n" + "\n".join(prep["characters"]) + "\n\n"
-                f"【目标字数】{prep['project_meta']['target_word_count']} 字\n\n"
-                f"请按细纲生成正文，**不要偏离细纲**。\n\n【重要约束】：请务必在生成完毕后检查字数，确保最终输出严格在{prep['project_meta']['min_words']}~{prep['project_meta']['max_words']}字之间，不要超出或过少。"
+                f"【目标字数】{target_word_count} 字\n\n"
+                f"{word_count_protocol}"
+                f"请按细纲生成正文，**不要偏离细纲**。\n\n【重要约束】：请务必在生成完毕后检查字数，确保最终输出严格在{min_words}~{max_words}字之间，不要超出或过少。"
             )
 
             # LLM调用失败自动重试3次（间隔5秒），内容过短也重试
             for attempt in range(3):
                 try:
-                    result = _call_llm_with_fingerprint("writing", writing_ctx, user_msg, provider, db, task_id)
+                    result = _call_llm_with_fingerprint("writing", writing_ctx, user_msg, provider, db, task_id, project_id=project_id)
                     fingerprints.append(result["fingerprint"])
                     text = result["text"].strip()
                     
@@ -2250,6 +2548,8 @@ def run_chapter_generation_pipeline(
                 meta["max_words"],
                 stages["2_outline_gen"],
                 provider,
+                task_id=task_id,
+                fingerprints=fingerprints,
             )
         stages["5_word_adjust"], _ = _run_stage("5_word_adjust", _adjust)
 
@@ -2257,29 +2557,58 @@ def run_chapter_generation_pipeline(
         stages["6_review"], _ = _run_stage(
             "6_review",
             lambda: review_chapter_text(
-                db, project_id, chapter_id, stages["5_word_adjust"], provider,
+                db, project_id, chapter_id, stages["5_word_adjust"],
+                stages.get("2_outline_gen"), provider,
             ),
         )
 
         # Step 7: 修订决策
         def _decide():
-            decision = decide_revision(
-                stages["6_review"],
-                stages["2_outline_gen"],
-                stages["5_word_adjust"],
-                provider,
-            )
-            if decision.get("decision") == "revise" and auto_revise:
+            max_revisions = 2
+            current_text = stages["5_word_adjust"]
+            current_review = stages["6_review"]
+            revision_count = 0
+            was_revised = False
+            
+            while revision_count < max_revisions:
+                decision = decide_revision(
+                    current_review,
+                    stages["2_outline_gen"],
+                    current_text,
+                    provider,
+                    task_id=task_id,
+                    fingerprints=fingerprints,
+                )
+                
+                if decision.get("decision") != "revise" or not auto_revise:
+                    break
+                
                 revised = revise_chapter_text(
-                    stages["5_word_adjust"],
+                    current_text,
                     decision.get("focus_areas", []),
                     stages["2_outline_gen"],
-                    stages["6_review"],
+                    current_review,
                     provider,
+                    task_id=task_id,
+                    fingerprints=fingerprints,
                 )
-                # 修订后重审（可选）
-                return {"decision": decision, "revised_text": revised, "was_revised": True}
-            return {"decision": decision, "revised_text": stages["5_word_adjust"], "was_revised": False}
+                
+                current_text = revised
+                revision_count += 1
+                was_revised = True
+                
+                current_review = review_chapter_text(
+                    db, project_id, chapter_id, current_text, stages.get("2_outline_gen"),
+                    provider, task_id, fingerprints,
+                )
+            
+            return {
+                "decision": decision,
+                "revised_text": current_text,
+                "was_revised": was_revised,
+                "revision_count": revision_count,
+                "final_review": current_review,
+            }
         stages["7_revise"], _ = _run_stage("7_revise", _decide)
 
         # Step 8: 保存（确保指纹信息始终保存）
@@ -2415,8 +2744,15 @@ def run_chapter_generation_pipeline(
             # 修复：stage id 应对齐 PIPELINE_STAGES_META ("6_review")
             # 之前误写为 "7_review"，导致评审报告从未入库 → 前端"章节评分/评审报告"为空
             # 综合分改用 llm.scoring.calculate_overall_score：8 维度加权求和，满分 100
-            review_raw = stages.get("6_review", {})
-            review_data = review_raw.get("data", review_raw) if isinstance(review_raw, dict) else {}
+            # 优先使用修订后的最终评审结果
+            revise_result = stages.get("7_revise", {})
+            if isinstance(revise_result, dict) and revise_result.get("final_review"):
+                review_data = revise_result["final_review"]
+                logger.info(f"[Pipeline] using post-revision review for chapter {chapter_id}")
+            else:
+                review_raw = stages.get("6_review", {})
+                review_data = review_raw.get("data", review_raw) if isinstance(review_raw, dict) else {}
+            
             if isinstance(review_data, dict):
                 scores = review_data.get("scores", {})
                 overall = calculate_overall_score(scores)  # 0-100 加权综合分
@@ -2455,6 +2791,31 @@ def run_chapter_generation_pipeline(
             "total_duration_ms": total_ms,
         }
 
+    except PipelineCancelledError as e:
+        logger.info(f"[Pipeline] cancelled: {e}")
+        # 保存已收集的指纹信息
+        try:
+            chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
+            if chapter:
+                chapter.fingerprint = {
+                    "task_id": task_id,
+                    "timestamp": time.time(),
+                    "total_duration_ms": (time.time() - start_time) * 1000,
+                    "llm_calls": fingerprints,
+                    "error": "任务已取消",
+                }
+                db.commit()
+            logger.info(f"[Pipeline] saved partial fingerprint for chapter {chapter_id} after cancellation")
+        except Exception as save_err:
+            logger.error(f"[Pipeline] failed to save fingerprint after cancellation: {save_err}")
+        
+        return {
+            "status": "cancelled",
+            "stages": stages,
+            "error": str(e),
+            "total_duration_ms": (time.time() - start_time) * 1000,
+        }
+    
     except Exception as e:
         logger.error(f"[Pipeline] failed: {e}")
         # 即使失败也要保存已收集的指纹信息
@@ -2541,6 +2902,7 @@ def run_chapter_revise(
     db, project_id: int, chapter_id: int, provider: str | None = None,
     progress_cb: Optional[Callable[[str, str, dict], None]] = None,
     task_id: str = "",
+    fingerprints: list | None = None,
 ) -> dict:
     """
     章节修订：根据已生成的细纲和评审报告，由LLM重新生成正文。
@@ -2676,17 +3038,27 @@ def run_chapter_revise(
             logger.info(f"[Revise] review_data keys: {list(review_data.keys()) if isinstance(review_data, dict) else type(review_data)}")
 
             # 使用 writing 角色生成正文
+            min_words = prep["project_meta"]["min_words"]
+            max_words = prep["project_meta"]["max_words"]
+            target_word_count = prep["project_meta"]["target_word_count"]
+            min_paragraphs = int(min_words / 80)
+            max_paragraphs = int(max_words / 80)
+            
             writing_ctx = {
                 "writing_style": project.writing_style or "平实",
                 "ai_removal_instruction": build_ai_removal_instruction(project.ai味去除程度) if project.ai味去除程度 else "",
                 "themes": prep["themes"],
                 "characters": "\n".join(prep["characters"]) or "（无）",
-                "character_arcs": "（参见上文 character 段）",
+                "character_arcs": "（参见上文 弧光 段）",
                 "world": prep["project_outline_text"] or "（无项目大纲）",
                 "foreshadowings": prep["active_foreshadowings"],
                 "chapters": prep["prev_chapters_summary"],
-                "target_word_count": prep["project_meta"]["target_word_count"],
-                "word_count_range": f"{prep['project_meta']['min_words']}~{prep['project_meta']['max_words']} 字",
+                "previous_events": prep.get("previous_event_signatures_text", "") or "（暂无已发生事件）",
+                "target_word_count": target_word_count,
+                "word_count_range": f"{min_words}~{max_words} 字",
+                "min_paragraphs": min_paragraphs,
+                "max_paragraphs": max_paragraphs,
+                "prompt": "（本章为修订生成，无续写内容）",
             }
 
             system = ROLES["writing"].build_system(writing_ctx)
@@ -2699,24 +3071,47 @@ def run_chapter_revise(
             # 序列化细纲数据
             outline_text = json.dumps(outline_data, ensure_ascii=False, indent=2) if isinstance(outline_data, dict) else str(outline_data) if outline_data else "（无细纲）"
 
+            # 计算自然段数量范围
+            min_words = prep["project_meta"]["min_words"]
+            max_words = prep["project_meta"]["max_words"]
+            target_word_count = prep["project_meta"]["target_word_count"]
+            min_paragraphs = int(min_words / 80)
+            max_paragraphs = int(max_words / 80)
+            
+            # 构建字数锁定协议
+            word_count_protocol = (
+                f"【字数锁定协议】\n"
+                f"本章目标字数：{target_word_count}字（±10%浮动）。\n"
+                f"请按以下密度生成：写出{min_paragraphs}~{max_paragraphs}个自然段。平均每段包含65~80个汉字（约3~5句）。\n"
+                f"自检机制：生成结束后，请自动在心里估算段落数。若不足{min_paragraphs}段，请扩充环境描写；若超过{max_paragraphs}段，请合并冗余短句。只输出最终正文，不要输出你的计算过程。\n\n"
+            )
+
             user_msg = (
                 f"【本章细纲（严格遵循）】\n{outline_text}\n\n"
                 f"【评审意见】\n{critique or '（无评审意见）'}\n\n"
                 f"【修改建议】\n{suggestion_text}\n\n"
                 f"【上章结尾（衔接用）】\n{prep.get('prev_chapter_ending', '')}\n\n"
                 f"【登场人物】\n" + "\n".join(prep.get("characters", [])[:5]) + "\n\n"
+                f"{word_count_protocol}"
                 f"请根据以上信息重新生成本章正文。"
             )
 
             logger.info(f"[Revise] user_msg preview: {user_msg[:200]}...")
 
+            # 精准控制 max_tokens：根据目标字数动态计算
+            max_tokens = calculate_max_tokens(
+                target_word_count=prep["project_meta"]["target_word_count"],
+                max_word_count=prep["project_meta"]["max_words"],
+            )
+
             llm = LLMFactory.create(provider=provider, db=db)
             raw = llm.generate(
                 prompt=user_msg,
                 system_prompt=system,
-                max_tokens=ROLES["writing"].max_tokens,
+                max_tokens=max_tokens,
                 temperature=ROLES["writing"].temperature,
                 task_type="chapter_pipeline_revise_content",
+                use_json=False,
             )
             return raw
 
@@ -2746,6 +3141,8 @@ def run_chapter_revise(
                 meta["max_words"],
                 outline_data,
                 provider,
+                task_id=task_id,
+                fingerprints=fingerprints,
             )
 
         stages["5_adjust"], _ = _run_stage("5_adjust", _adjust)
@@ -2761,8 +3158,16 @@ def run_chapter_revise(
                 final_content = adj_result
             if not isinstance(final_content, str):
                 final_content = str(final_content)
+            
+            # 获取outline数据
+            outline_result = stages.get("1_get_outline")
+            if isinstance(outline_result, dict):
+                outline_data = outline_result.get("data", outline_result)
+            else:
+                outline_data = outline_result
+                
             return review_chapter_text(
-                db, project_id, chapter_id, final_content, provider,
+                db, project_id, chapter_id, final_content, outline_data, provider,
             )
 
         stages["6_review"], _ = _run_stage("6_review", _review)

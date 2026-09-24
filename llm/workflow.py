@@ -528,10 +528,347 @@ STAGE_PROMPTS = {
 
 
 # ═══════════════════════════════════════════════════════════════
+# 剧本（script）Bootstrap Stage DAG
+#
+# 与小说 stage 平级但 ID 前缀不同（script_stage_*），因此 _run_single_stage /
+# rerun_stage 可以只查合并后的 ALL_STAGE_DEFS，无需按项目类型分支；
+# 只有 plan_bootstrap_stages（要遍历某一套定义）和 commit_bootstrap
+# （落库目标不同：Screenplay 而非 Chapter）需要分支。
+# ═══════════════════════════════════════════════════════════════
+
+SCRIPT_STAGE_DEFS = {
+    "script_stage_1_base": {
+        "name": "剧本基础外推",
+        "description": "推导幕数 / 场景总数 / 预计时长",
+        "needs_llm": True,
+        "depends_on": [],
+        "outputs": ["total_acts", "total_scenes", "est_duration_minutes"],
+        "max_tokens": 1024,
+        "temperature": 0.3,
+    },
+    "script_stage_2a_theme": {
+        "name": "核心主旨 + 基调",
+        "description": "生成剧本核心主题与基调",
+        "needs_llm_if_missing": ["theme", "tone"],
+        "depends_on": ["script_stage_1_base"],
+        "outputs": ["theme", "tone"],
+        "max_tokens": 1024,
+        "temperature": 0.5,
+    },
+    "script_stage_2b_style": {
+        "name": "影像风格 + 节奏",
+        "description": "生成视觉风格与叙事节奏偏好",
+        "needs_llm_if_missing": ["style", "pacing"],
+        "depends_on": ["script_stage_1_base"],
+        "outputs": ["style", "pacing"],
+        "max_tokens": 1024,
+        "temperature": 0.5,
+    },
+    "script_stage_2c_world": {
+        "name": "世界观 / 时代背景",
+        "description": "生成世界观条目（按 category 分类）",
+        "needs_llm_if_missing": ["premise"],
+        "depends_on": ["script_stage_1_base"],
+        "outputs": ["premise"],
+        "max_tokens": 2048,
+        "temperature": 0.5,
+    },
+    "script_stage_3a_protagonist": {
+        "name": "主角设计（含外貌）",
+        "description": "主角设定 + 详细外貌（appearance）",
+        "needs_llm_if_missing": ["protagonist"],
+        "depends_on": ["script_stage_2a_theme", "script_stage_2b_style", "script_stage_2c_world"],
+        "outputs": ["protagonist"],
+        "max_tokens": 3072,
+        "temperature": 0.6,
+    },
+    "script_stage_3b_antagonist": {
+        "name": "反派/对手设计（含外貌）",
+        "description": "反派设定 + 详细外貌",
+        "needs_llm_if_missing": ["antagonist"],
+        "depends_on": ["script_stage_2a_theme", "script_stage_2b_style", "script_stage_2c_world"],
+        "outputs": ["antagonist"],
+        "max_tokens": 3072,
+        "temperature": 0.6,
+    },
+    "script_stage_3c_supporting": {
+        "name": "配角群像（含外貌）+ 关系",
+        "description": "配角设定 + 外貌 + CharacterRelation[]",
+        "needs_llm_if_missing": ["supporting"],
+        "depends_on": ["script_stage_3a_protagonist", "script_stage_3b_antagonist"],
+        "outputs": ["supporting"],
+        "max_tokens": 4096,
+        "temperature": 0.6,
+    },
+    "script_stage_3d_arcs": {
+        "name": "角色弧光 + 外貌变化规划",
+        "description": "所有角色的弧光（CharacterArc[]）与造型变化节点",
+        "depends_on": ["script_stage_3a_protagonist", "script_stage_3b_antagonist", "script_stage_3c_supporting"],
+        "outputs": ["arcs"],
+        "max_tokens": 2048,
+        "temperature": 0.5,
+    },
+    "script_stage_4a_outline": {
+        "name": "剧本大纲（幕结构 + 场景序列）",
+        "description": "acts + scenes[]，scenes 将落库为 Screenplay 行",
+        "depends_on": ["script_stage_3d_arcs"],
+        "outputs": ["acts", "scenes"],
+        "max_tokens": 8192,
+        "temperature": 0.6,
+    },
+    "script_stage_4b_foreshadow": {
+        "name": "伏笔 / 视觉母题规划",
+        "description": "Foreshadowing[]（按场景号埋设与回收）",
+        "depends_on": ["script_stage_4a_outline"],
+        "outputs": ["foreshadowings"],
+        "max_tokens": 2048,
+        "temperature": 0.5,
+    },
+}
+
+
+# 剧本角色 stage 共用的外貌 JSON schema 片段
+_SCRIPT_APPEARANCE_SCHEMA = {
+    "age_range": "年龄区间，如 25-30岁",
+    "height": "身高，如 175cm",
+    "build": "体型，如 匀称偏瘦",
+    "face": "面部特征：脸型、五官特点",
+    "hair": "发型发色",
+    "eyes": "眼睛特征：颜色、形状、神态",
+    "skin": "肤色",
+    "clothing": "常着服饰，符合身份与时代",
+    "accessories": "标志性配饰",
+    "other": "其他特征：疤痕、纹身、习惯性动作等",
+}
+
+_SCRIPT_CHARACTER_TASK_RULES = (
+    "外貌要求（用于分镜与造型，必须逐项填写，不得留空）：\n"
+    "  age_range / height / build / face / hair / eyes / skin / clothing / accessories / other\n"
+    "外貌必须与角色身份、所处时代、剧本风格协调，且具备镜头辨识度"
+    "（例如标志性配饰或体态特征，便于观众一眼认出）。\n"
+)
+
+SCRIPT_STAGE_PROMPTS = {
+    "script_stage_1_base": {
+        "task": (
+            "根据用户提供的必填信息，推导剧本的基础结构参数。\n"
+            "要求：\n"
+            "1. total_acts：幕数。电影通常 3 幕；短剧按集数可 1 幕；舞台剧 2-3 幕；电视剧按集规划\n"
+            "2. total_scenes：场景总数。参考：电影 40-70；短剧（单集）8-15；舞台剧 10-20；"
+            "电视剧（单集）15-25\n"
+            "3. est_duration_minutes：预计总时长（分钟）。电影 90-120；短剧单集 3-5；"
+            "电视剧单集 40-50；舞台剧 90-150\n"
+            "4. 若【硬约束】中已给出场景数或时长，必须原样采用\n"
+        ),
+        "json_schema": {
+            "total_acts": 3,
+            "total_scenes": 50,
+            "est_duration_minutes": 105,
+            "rationale": "推导理由（1-2 句话）",
+        },
+    },
+    "script_stage_2a_theme": {
+        "task": (
+            "根据题材和一句话故事，生成：\n"
+            "1. theme：核心主题（一句话，15 字内）\n"
+            "2. tone：基调（必须从 热血/治愈/黑暗/轻松/史诗/悬疑紧张/浪漫/幽默/冷峻 中选一个）\n"
+        ),
+        "json_schema": {"theme": "...", "tone": "..."},
+    },
+    "script_stage_2b_style": {
+        "task": (
+            "根据题材和基调推荐剧本的影像风格与叙事节奏：\n"
+            "1. style：影像风格（必须从 写实/风格化/诗意/冷峻/华丽 中选一个）\n"
+            "2. pacing：节奏（必须从 快节奏/中等节奏/慢热型/起伏型 中选一个，禁止使用英文）\n"
+        ),
+        "json_schema": {"style": "...", "pacing": "..."},
+    },
+    "script_stage_2c_world": {
+        "task": (
+            "根据题材构建剧本的世界观 / 时代背景，输出 4-6 个分类条目。\n"
+            "category 必须是以下之一：地理 / 历史 / 势力 / 规则 / 社会 / 技术\n"
+            "侧重可拍性：写清空间环境、光线氛围、时代质感等能落到美术与置景的信息。\n"
+            "tags 为该条目的标签数组（2-4 个关键词）。\n"
+        ),
+        "json_schema": {
+            "world_entries": [
+                {"category": "地理", "title": "...", "content": "...", "tags": ["..."]},
+                {"category": "社会", "title": "...", "content": "...", "tags": ["..."]},
+            ]
+        },
+    },
+    "script_stage_3a_protagonist": {
+        "task": (
+            "根据题材 + 主旨 + 世界观，设计剧本主角。\n"
+            + _SCRIPT_CHARACTER_TASK_RULES
+            + "profile 需包含 personality / background / motivation / speech_style。\n"
+        ),
+        "json_schema": {
+            "characters": [{
+                "name": "全名（姓+名）",
+                "role": "主角",
+                "description": "1-2 句综合描述",
+                "profile": {
+                    "personality": "...", "background": "...",
+                    "motivation": "...", "speech_style": "...",
+                },
+                "appearance": _SCRIPT_APPEARANCE_SCHEMA,
+            }]
+        },
+    },
+    "script_stage_3b_antagonist": {
+        "task": (
+            "根据题材 + 主旨 + 主角设定，设计与之对立的反派或对手。\n"
+            "反派需有自洽的动机，不是纯粹的恶。\n"
+            + _SCRIPT_CHARACTER_TASK_RULES
+        ),
+        "json_schema": {
+            "characters": [{
+                "name": "全名（姓+名）",
+                "role": "反派",
+                "description": "1-2 句综合描述",
+                "profile": {
+                    "personality": "...", "background": "...",
+                    "motivation": "...", "speech_style": "...",
+                },
+                "appearance": _SCRIPT_APPEARANCE_SCHEMA,
+            }]
+        },
+    },
+    "script_stage_3c_supporting": {
+        "task": (
+            "设计 2-4 个配角，并给出角色之间的关系。\n"
+            "每个配角都要服务于主线：或推动情节、或映衬主角、或提供信息。\n"
+            + _SCRIPT_CHARACTER_TASK_RULES
+            + "relations 描述角色两两之间的关系（from / to 用角色姓名）。\n"
+        ),
+        "json_schema": {
+            "characters": [{
+                "name": "全名（姓+名）",
+                "role": "配角",
+                "description": "1-2 句综合描述",
+                "profile": {
+                    "personality": "...", "background": "...",
+                    "motivation": "...", "speech_style": "...",
+                },
+                "appearance": _SCRIPT_APPEARANCE_SCHEMA,
+            }],
+            "relations": [{
+                "from": "角色A", "to": "角色B", "type": "关系类型",
+                "description": "关系说明", "strength": 5,
+            }],
+        },
+    },
+    "script_stage_3d_arcs": {
+        "task": (
+            "为每个已设计的角色规划弧光，并标出造型/外貌的变化节点。\n"
+            "要求：\n"
+            "1. arc_type：成长/堕落/转变/觉醒/坚守 之一\n"
+            "2. start_state / end_state：起点与终点的心理或处境状态\n"
+            "3. key_behavior：体现该弧光的关键行为\n"
+            "4. appearance_shifts：外貌/造型随剧情的变化规划"
+            "（例如「中期换素服、剪短发以示落魄」），用于后续场景保持造型一致性\n"
+        ),
+        "json_schema": {
+            "arcs": [{
+                "character_name": "角色名（必须与前序 stage 完全一致）",
+                "arc_type": "成长",
+                "start_state": "...",
+                "end_state": "...",
+                "key_behavior": "...",
+                "appearance_shifts": ["..."],
+            }]
+        },
+    },
+    "script_stage_4a_outline": {
+        "task": (
+            "输出剧本的幕结构与完整场景序列。\n"
+            "要求：\n"
+            "1. acts：每幕的目标、转折点与情绪走向\n"
+            "2. scenes：按叙事顺序排列的场景列表，数量须与 total_scenes 相符\n"
+            "3. 每个场景的字段将直接落库为 Screenplay 行，务必规范：\n"
+            "   - scene_number：从 1 开始连续递增，不得重复或跳号\n"
+            "   - act：所属幕，如「第一幕」\n"
+            "   - scene_type：对话场景/动作场景/情感场景/悬疑场景/战斗场景/过渡场景 之一\n"
+            "   - location：具体可置景的地点\n"
+            "   - time_of_day：白天/夜晚/黄昏/清晨/深夜 之一\n"
+            "   - characters_present：出场角色姓名数组，必须使用已设计角色的原名\n"
+            "   - synopsis：该场景要完成的叙事任务（2-3 句），不要写成正文\n"
+            "4. 场景之间须有因果推进，避免流水账；注意内外景交替以控制拍摄成本\n"
+        ),
+        "json_schema": {
+            "outline_text": "整体故事梗概（200-400 字）",
+            "acts": [{"act": "第一幕", "goal": "...", "turning_point": "...", "emotion": "..."}],
+            "pacing_notes": "节奏说明",
+            "scenes": [{
+                "scene_number": 1,
+                "title": "场景标题（4-10 字）",
+                "act": "第一幕",
+                "scene_type": "对话场景",
+                "location": "...",
+                "time_of_day": "白天",
+                "characters_present": ["角色A"],
+                "synopsis": "该场景的叙事任务",
+            }],
+        },
+    },
+    "script_stage_4b_foreshadow": {
+        "task": (
+            "规划剧本的伏笔与视觉母题。\n"
+            "剧本伏笔优先使用可视化手段（道具、构图、色彩、重复出现的动作或台词），"
+            "而非依赖旁白或内心独白。\n"
+            "要求：\n"
+            "1. suggested_plant_scene：建议埋设的场景号\n"
+            "2. suggested_resolve_scene：建议回收的场景号（贯穿全片的写 0 表示结局）\n"
+            "3. importance：high / medium / low\n"
+            "4. visual_motif：该伏笔对应的视觉呈现方式\n"
+        ),
+        "json_schema": {
+            "foreshadowings": [{
+                "title": "...",
+                "content": "...",
+                "type": "短伏笔|中伏笔|长伏笔",
+                "suggested_plant_scene": 1,
+                "suggested_resolve_scene": 20,
+                "importance": "high|medium|low",
+                "visual_motif": "视觉呈现方式",
+                "connection_to_mainline": "与主线的关联说明",
+            }]
+        },
+    },
+}
+
+
+# 合并查表：stage ID 全局唯一（script_ 前缀区分），
+# 因此按 ID 查定义/提示词的地方无需知道项目类型
+ALL_STAGE_DEFS = {**STAGE_DEFS, **SCRIPT_STAGE_DEFS}
+ALL_STAGE_PROMPTS = {**STAGE_PROMPTS, **SCRIPT_STAGE_PROMPTS}
+
+
+def stage_defs_for(project_type: str | None) -> dict:
+    """按项目类型返回对应的 stage 定义表"""
+    return SCRIPT_STAGE_DEFS if project_type == "script" else STAGE_DEFS
+
+
+def resolve_project_type(project_id, db) -> str:
+    """读取项目类型；查不到时按 novel 处理（向后兼容旧数据）"""
+    if db is None or not project_id:
+        return "novel"
+    try:
+        from storage.models import Project
+        project = db.query(Project).filter(Project.id == project_id).first()
+        return (getattr(project, "project_type", None) or "novel") if project else "novel"
+    except Exception as e:
+        logger.warning(f"[Bootstrap] 读取 project_type 失败，按 novel 处理: {e}")
+        return "novel"
+
+
+# ═══════════════════════════════════════════════════════════════
 # 规划：根据用户已填字段动态裁剪 stage
 # ═══════════════════════════════════════════════════════════════
 
-def plan_bootstrap_stages(required: dict, user_filled: dict) -> list[dict]:
+def plan_bootstrap_stages(required: dict, user_filled: dict,
+                          project_type: str = "novel") -> list[dict]:
     """
     根据 4 必填 + 用户已填选填，裁剪 stage 计划
 
@@ -542,7 +879,7 @@ def plan_bootstrap_stages(required: dict, user_filled: dict) -> list[dict]:
         ]
     """
     stages = []
-    for stage_id, defn in STAGE_DEFS.items():
+    for stage_id, defn in stage_defs_for(project_type).items():
         if "needs_llm_if_missing" in defn:
             # 任一目标字段未填则需要 LLM
             needs = any(
@@ -599,18 +936,31 @@ def run_bootstrap_sync(run_id: int, user_input: dict, db=None) -> dict:
             "ts": time.time(),
         }
 
-        # 提权 4 必填为 locked
+        # 项目类型决定 locked 里放哪些硬约束（剧本没有"章节字数"概念）
+        project_type = resolve_project_type(run.project_id, db)
+        stage_results["_meta"]["project_type"] = project_type
+
         locked = {
             "title": user_input.get("title", ""),
-            "chapter_word_count": user_input.get("chapter_word_count", 0),
             "genre": user_input.get("genre", ""),
             "description": user_input.get("description", ""),
+            "project_type": project_type,
         }
-
-        # 如果用户指定了预计总章节数（> 0），也作为硬约束传入 LLM
-        user_total_chapters = user_input.get("total_chapters", 0)
-        if user_total_chapters and int(user_total_chapters) > 0:
-            locked["total_chapters"] = int(user_total_chapters)
+        if project_type == "script":
+            locked["script_format"] = user_input.get("script_format") or "movie"
+            episodes = user_input.get("script_episode_count") or 0
+            if episodes and int(episodes) > 0:
+                locked["script_episode_count"] = int(episodes)
+            # 用户指定了场景总数则作为硬约束
+            user_total_scenes = user_input.get("total_scenes", 0)
+            if user_total_scenes and int(user_total_scenes) > 0:
+                locked["total_scenes"] = int(user_total_scenes)
+        else:
+            locked["chapter_word_count"] = user_input.get("chapter_word_count", 0)
+            # 如果用户指定了预计总章节数（> 0），也作为硬约束传入 LLM
+            user_total_chapters = user_input.get("total_chapters", 0)
+            if user_total_chapters and int(user_total_chapters) > 0:
+                locked["total_chapters"] = int(user_total_chapters)
 
         # 用户已填的选填
         user_filled = {
@@ -777,8 +1127,8 @@ def run_bootstrap_sync(run_id: int, user_input: dict, db=None) -> dict:
 def _run_single_stage(stage_id: str, locked: dict, user_filled: dict,
                       prev_outputs: dict, db=None, project_id: int | None = None) -> dict:
     """单个 stage 的 LLM 调用 + JSON 解析"""
-    defn = STAGE_DEFS[stage_id]
-    prompt_def = STAGE_PROMPTS[stage_id]
+    defn = ALL_STAGE_DEFS[stage_id]
+    prompt_def = ALL_STAGE_PROMPTS[stage_id]
 
     # stage_4a_chapter_outlines 注入"已写正文 vs 仅大纲"状态
     task_description = prompt_def["task"]
@@ -815,6 +1165,7 @@ def _run_single_stage(stage_id: str, locked: dict, user_filled: dict,
         max_tokens=role.max_tokens,
         temperature=role.temperature,
         task_type=stage_id,  # 入 log 时按 stage 分类（stage_1_base / stage_2a_theme / ...）
+        project_id=project_id,
     )
 
     result = _parse_json(response)
@@ -873,9 +1224,9 @@ def _validate_and_fix_character_names(
         f"[Character name check] 发现无效角色名({stage_id}): {invalid_names},"
         f"重新生成中..."
     )
-    
-    defn = STAGE_DEFS[stage_id]
-    prompt_def = STAGE_PROMPTS[stage_id]
+
+    defn = ALL_STAGE_DEFS[stage_id]
+    prompt_def = ALL_STAGE_PROMPTS[stage_id]
     
     task_description = prompt_def["task"]
     if stage_id == "stage_4a_chapter_outlines" and db is not None:
@@ -913,6 +1264,7 @@ def _validate_and_fix_character_names(
             max_tokens=role.max_tokens,
             temperature=role.temperature,
             task_type=f"{stage_id}_refix",
+            project_id=project_id,
         )
         fixed_result = _parse_json(response)
         logger.info(f"[Character name check] 重新生成成功({stage_id})")
@@ -1187,12 +1539,17 @@ def _continue_chapter_outlines_if_needed(
                 "只输出 chapter_outlines 字段的 JSON,不要其他内容。"
             )
             llm = LLMFactory.create(db=db)
+            # 从上下文推导 project_id 用于 token 用量统计
+            project_id = (locked.get("project_id") or locked.get("_project_id")) if isinstance(locked, dict) else None
+            if not project_id and isinstance(prev_outputs, dict):
+                project_id = prev_outputs.get("_project_id") or prev_outputs.get("project_id")
             response = llm.generate(
                 prompt=user_prompt,
                 system_prompt=continue_system,
                 max_tokens=dynamic_max_tokens,  # 动态调整
                 temperature=0.6,
                 task_type=f"stage_4a_outline_continue_{loop_idx}",
+                project_id=project_id,
             )
             parsed = _parse_json(response)
             new_outlines = parsed.get("chapter_outlines", []) if isinstance(parsed, dict) else []
@@ -1577,6 +1934,7 @@ def extend_outline_chapters(
                 max_tokens=4096,
                 temperature=0.6,
                 task_type="extend_outline_architecture",
+                project_id=project_id,
             )
             parsed = _parse_json(response)
             if isinstance(parsed, dict):
@@ -1970,11 +2328,13 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
                     # 多个配角：用 LLM 一次性解析
                     structured = _parse_user_filled_character(
                         user_text, role_default, role_label_zh, db=db,
+                        project_id=project_id,
                     )
                     chars = [structured] if structured else []
                 else:
                     structured = _parse_user_filled_character(
                         user_text, role_default, role_label_zh, db=db,
+                        project_id=project_id,
                     )
                     chars = [structured] if structured else []
             else:
@@ -2200,6 +2560,7 @@ def _extract_characters(data: dict, stage_id: str, role_default: str) -> list[di
 
 def _parse_user_filled_character(
     user_text: str, role_default: str, role_label_zh: str, db=None,
+    project_id: int | None = None,
 ) -> dict | None:
     """用 LLM 把用户填写的自由文本解析成结构化角色字段（与 stage_3a/3b 输出 schema 一致）。
 
@@ -2255,6 +2616,7 @@ def _parse_user_filled_character(
             max_tokens=1024,
             temperature=0.2,
             task_type="bootstrap_parse_user_character",
+            project_id=project_id,
         )
         # 复用 workflow 内部的宽松 JSON 解析
         result = _parse_json(response)
@@ -2461,10 +2823,10 @@ def rerun_stage(run_id: int, stage_id: str, db) -> dict:
     if not run:
         return {"status": "failed", "error": "Run not found"}
 
-    if stage_id not in STAGE_DEFS:
+    if stage_id not in ALL_STAGE_DEFS:
         return {"status": "failed", "error": f"Unknown stage: {stage_id}"}
 
-    stage_def = STAGE_DEFS[stage_id]
+    stage_def = ALL_STAGE_DEFS[stage_id]
     stage_results = dict(run.stage_results or {})
 
     # 检查依赖
@@ -2691,7 +3053,7 @@ def rerun_all_failed_stages(run_id: int, db, only_failed: bool = True, force_all
         db.commit()
 
         for sid in targets:
-            stage_def = STAGE_DEFS.get(sid)
+            stage_def = ALL_STAGE_DEFS.get(sid)
             if not stage_def:
                 continue
 

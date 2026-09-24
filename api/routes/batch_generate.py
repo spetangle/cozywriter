@@ -71,6 +71,7 @@ def _async_batch_pipeline_task(
     """
     批量生成异步任务：按顺序创建章节 → 串行运行 9 步流水线 → 后处理。
     每章完成后更新 task 进度，让前端能实时看到当前执行到第几章。
+    支持取消：每章生成前检查任务状态，若已取消则提前退出。
     """
     from storage.database import SessionLocal
     from storage.models import Chapter
@@ -106,8 +107,16 @@ def _async_batch_pipeline_task(
             task.progress = 1
 
         failed_chapters = []
+        cancelled = False
 
         for idx, chapter_order in enumerate(range(start_order, end_order + 1)):
+            # 检查任务是否已被取消
+            task = get_task(task_id)
+            if task is not None and task.status == "cancelled":
+                logger.info(f"[BatchGen] Task {task_id} cancelled, stopping batch generation at chapter {idx}")
+                cancelled = True
+                break
+
             chapter_num = chapter_order + 1  # 1-based 显示序号
 
             # 更新当前章节信息
@@ -165,7 +174,7 @@ def _async_batch_pipeline_task(
             def _make_progress_cb(ch_order):
                 def _on_progress(stage_id: str, status: str, info: dict):
                     t = get_task(task_id)
-                    if t is None:
+                    if t is None or t.status == "cancelled":
                         return
                     r = dict(t.result or {})
                     stages = dict(r.get("current_pipeline_stages") or {})
@@ -184,6 +193,13 @@ def _async_batch_pipeline_task(
 
             # 3) 运行完整 9 步流水线
             try:
+                # 在流水线运行前再次检查取消状态
+                task = get_task(task_id)
+                if task is not None and task.status == "cancelled":
+                    cancelled = True
+                    logger.info(f"[BatchGen] Task {task_id} cancelled before pipeline, stopping")
+                    break
+
                 pipeline_result = run_chapter_generation_pipeline(
                     db=db,
                     project_id=req.project_id,
@@ -195,6 +211,22 @@ def _async_batch_pipeline_task(
                     guide=req.guide,
                     task_id=task_id,
                 )
+
+                # 检查流水线完成后任务是否已被取消
+                task = get_task(task_id)
+                if task is not None and task.status == "cancelled":
+                    cancelled = True
+                    logger.info(f"[BatchGen] Task {task_id} cancelled during pipeline, stopping after chapter {chapter_num}")
+                    # 标记当前章节为已取消
+                    r = dict(task.result or {})
+                    cs = dict(r.get("chapters_status") or {})
+                    ch_status = dict(cs.get(str(chapter_num), {}))
+                    ch_status["status"] = "cancelled"
+                    ch_status["error"] = "任务已取消"
+                    cs[str(chapter_num)] = ch_status
+                    r["chapters_status"] = cs
+                    task.result = r
+                    break
 
                 # 标记章节完成
                 if task is not None:
@@ -219,6 +251,22 @@ def _async_batch_pipeline_task(
                 )
 
             except Exception as e:
+                # 检查是否是因为取消导致的异常
+                task = get_task(task_id)
+                if task is not None and task.status == "cancelled":
+                    cancelled = True
+                    logger.info(f"[BatchGen] Task {task_id} cancelled, stopping at chapter {chapter_num}")
+                    r = dict(task.result or {})
+                    cs = dict(r.get("chapters_status") or {})
+                    ch_status = dict(cs.get(str(chapter_num), {}))
+                    ch_status["status"] = "cancelled"
+                    ch_status["error"] = "任务已取消"
+                    cs[str(chapter_num)] = ch_status
+                    r["chapters_status"] = cs
+                    r["completed_chapters"] = idx + 1
+                    task.result = r
+                    break
+
                 logger.error(f"[BatchGen] Chapter {chapter_num} failed: {e}")
                 failed_chapters.append(chapter_num)
                 if task is not None:
@@ -236,21 +284,31 @@ def _async_batch_pipeline_task(
         # 批量任务完成
         if task is not None:
             r = dict(task.result or {})
-            r["status"] = "completed" if not failed_chapters else "completed_with_errors"
+            if cancelled:
+                r["status"] = "cancelled"
+                task.status = "cancelled"
+                task.error = "用户取消"
+            else:
+                r["status"] = "completed" if not failed_chapters else "completed_with_errors"
+                task.status = "completed"
             r["failed_chapters"] = failed_chapters
             task.result = r
             task.progress = 100
-            task.status = "completed"
             task.completed_at = time.time()
 
-        logger.info(
-            f"[BatchGen] Batch done: {total_chapters - len(failed_chapters)}/{total_chapters} succeeded"
-        )
+        if cancelled:
+            logger.info(
+                f"[BatchGen] Batch cancelled: {total_chapters - len(failed_chapters)} chapters completed before cancellation"
+            )
+        else:
+            logger.info(
+                f"[BatchGen] Batch done: {total_chapters - len(failed_chapters)}/{total_chapters} succeeded"
+            )
 
     except Exception as e:
         logger.error(f"[BatchGen] Batch task failed: {e}")
         task = get_task(task_id)
-        if task is not None:
+        if task is not None and task.status != "cancelled":
             task.status = "failed"
             task.error = str(e)
             task.completed_at = time.time()

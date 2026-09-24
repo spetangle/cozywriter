@@ -6,6 +6,7 @@ from storage.database import get_db
 from storage.models import Project, Chapter
 from llm.factory import LLMFactory
 from llm.roles import get_role, build_ai_removal_instruction, ROLES
+from llm.chapter_pipeline import build_chapter_prep_info
 from rag.retrieval import RetrievalService
 from api.tasks import submit_llm_task, get_task, Task
 from logger import logger, log_llm_call, log_llm_request
@@ -85,6 +86,14 @@ def _do_generate(
     ai_instruction = build_ai_removal_instruction(project.ai味去除程度)
 
     # 构建 context 变量
+    previous_events_text = ""
+    if chapter_id:
+        try:
+            prep = build_chapter_prep_info(db, project_id, chapter_id)
+            previous_events_text = prep.get("previous_event_signatures_text", "")
+        except Exception as e:
+            logger.warning(f"[Generate] build_chapter_prep_info failed: {e}")
+    
     ctx = {
         "writing_style": project.writing_style or "平实",
         "ai_removal_instruction": ai_instruction,
@@ -94,6 +103,7 @@ def _do_generate(
         "world": context.get("world_context", ""),
         "foreshadowings": context.get("foreshadowings_context", ""),
         "chapters": context.get("chapters_context", ""),
+        "previous_events": previous_events_text or "（暂无已发生事件）",
         "target_word_count": project.target_word_count or 3000,
         "word_count_range": f"{project.word_count_min or 2700}～{project.word_count_max or 3300}",
     }
@@ -114,6 +124,7 @@ def _do_generate(
             max_tokens=role.max_tokens,
             temperature=role.temperature,
             task_type=f"generate_{mode}",  # 入 log 时按 mode 分类（continue/polish/expand）
+            project_id=project.id,
         )
         duration_ms = (time.time() - start) * 1000
         log_llm_call(llm.provider_name, llm.model, f"generate_{mode}", duration_ms, True)

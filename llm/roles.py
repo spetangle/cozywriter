@@ -10,6 +10,8 @@ LLM Roles - 不同任务类型的专属 System Prompt 模板
 
 from typing import Optional
 
+from logger import logger
+
 
 class Role:
     """LLM Role 基类"""
@@ -30,19 +32,80 @@ class Role:
         self.temperature = temperature
         self.timeout = timeout
 
+    def _check_placeholders(self, template: str, context: dict, template_name: str) -> list:
+        """检查模板中未被替换的占位符
+        
+        注意：跳过 JSON 格式的示例输出（如 {"scores": {...}}），这些不是占位符
+        """
+        import re
+        # 匹配独立的占位符（前后是空格、换行、冒号等边界字符）
+        # 避免匹配 JSON 格式中的花括号
+        placeholders = re.findall(r"(?:^|[^\"\'])\{(\w+)\}(?:$|[^\"\'])", template)
+        # 去重
+        placeholders = list(set(placeholders))
+        missing = [p for p in placeholders if p not in context]
+        
+        if missing:
+            logger.warning(f"[{template_name}] 模板中存在未提供的占位符: {missing}")
+            logger.warning(f"[{template_name}] 当前上下文键: {list(context.keys())}")
+        
+        return missing
+
     def build_system(self, context: dict) -> str:
         """渲染 system prompt，支持变量插值"""
+        self._check_placeholders(self.system_prompt, context, "build_system")
+        
         try:
-            return self.system_prompt.format(**context)
-        except KeyError:
-            return self.system_prompt
+            rendered = self.system_prompt.format(**context)
+        except KeyError as e:
+            logger.error(f"[build_system] 缺少必要的上下文键: {e}, 当前上下文: {list(context.keys())}")
+            filled_context = {**context}
+            import re
+            placeholders = re.findall(r"\{(\w+)\}", self.system_prompt)
+            for p in placeholders:
+                if p not in filled_context:
+                    filled_context[p] = f"（{p} 未提供）"
+            try:
+                rendered = self.system_prompt.format(**filled_context)
+            except Exception:
+                rendered = self.system_prompt
+        
+        self._verify_rendered(rendered, self.system_prompt, "system_prompt")
+        return rendered
+
+    def _verify_rendered(self, rendered: str, template: str, template_name: str):
+        """验证渲染后的内容是否还包含未替换的占位符"""
+        import re
+        remaining_placeholders = re.findall(r"\{(\w+)\}", rendered)
+        
+        if remaining_placeholders:
+            logger.error(f"[{template_name}] 渲染后仍存在未替换的占位符: {remaining_placeholders}")
+            logger.error(f"[{template_name}] 原始模板前500字: {template[:500]}")
+            logger.error(f"[{template_name}] 渲染后前500字: {rendered[:500]}")
+        else:
+            logger.debug(f"[{template_name}] 占位符检查通过，所有占位符已正确替换")
 
     def build_user(self, context: dict) -> str:
         """渲染 user prompt"""
+        self._check_placeholders(self.user_prompt_template, context, "build_user")
+        
         try:
-            return self.user_prompt_template.format(**context)
-        except KeyError:
-            return self.user_prompt_template
+            rendered = self.user_prompt_template.format(**context)
+        except KeyError as e:
+            logger.error(f"[build_user] 缺少必要的上下文键: {e}, 当前上下文: {list(context.keys())}")
+            filled_context = {**context}
+            import re
+            placeholders = re.findall(r"\{(\w+)\}", self.user_prompt_template)
+            for p in placeholders:
+                if p not in filled_context:
+                    filled_context[p] = f"（{p} 未提供）"
+            try:
+                rendered = self.user_prompt_template.format(**filled_context)
+            except Exception:
+                rendered = self.user_prompt_template
+        
+        self._verify_rendered(rendered, self.user_prompt_template, "user_prompt")
+        return rendered
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -50,6 +113,9 @@ class Role:
 # ═══════════════════════════════════════════════════════════════
 
 STYLE_SYSTEM = """你是一位专业的小说作家，文字功底深厚，擅长多种写作风格。
+
+【语言要求】
+使用标准中文写作，所有对话、描述、叙述均使用中文。禁止使用英文单词或短语（除非是专有名词且无法用中文表达）。
 
 【写作风格】
 {writing_style}
@@ -81,6 +147,11 @@ STYLE_SYSTEM = """你是一位专业的小说作家，文字功底深厚，擅�
 【字数要求】
 目标字数：{target_word_count} 字
 允许范围：{word_count_range}
+
+【字数锁定协议】
+本章目标字数：{target_word_count}字（±10%浮动）。
+请按以下密度生成：写出{min_paragraphs}~{max_paragraphs}个自然段。平均每段包含65~80个汉字（约3~5句）。
+自检机制：生成结束后，请自动在心里估算段落数。若不足{min_paragraphs}段，请扩充环境描写；若超过{max_paragraphs}段，请合并冗余短句。只输出最终正文，不要输出你的计算过程。
 
 【写作要求】
 1. 严格遵循上述角色设定，保持人物性格一致
@@ -159,8 +230,18 @@ ROLE_POLISH = Role(
 
 REVIEW_SYSTEM = """你是一位专业的小说评审专家，对小说进行多维度客观评审。
 
+【语言要求】
+所有输出内容均使用中文，禁止使用英文单词或短语。
+
+【细纲一致性检查】
+如果提供了细纲（outline），必须重点检查正文与细纲的一致性：
+- 角色是否与细纲一致（角色名、身份、关系）
+- 核心情节是否与细纲一致（关键事件、冲突点）
+- 场景是否与细纲一致（地点、时间、环境）
+- 如果正文与细纲严重偏离，consistency 维度必须给出低分（≤3分）
+
 评审维度（每项 0-10 分）：
-1. 一致性（consistency）：人物性格、物品、能力、资源是否前后一致，有无矛盾
+1. 一致性（consistency）：人物性格、物品、能力、资源是否前后一致，有无矛盾；正文与细纲是否一致
 2. 节奏（pacing）：情节推进是否流畅，高潮与铺垫是否合理
 3. 文笔风格（style）：文字表达能力，修辞运用，场景描写
 4. 去AI味（ai_removal）：文本是否过于模板化、机械化，缺乏人文感
@@ -170,8 +251,8 @@ REVIEW_SYSTEM = """你是一位专业的小说评审专家，对小说进行多�
 8. 主旨契合（thematic）：是否符合小说核心主旨
 
 请以JSON格式输出评审结果，只输出JSON，不要有其他内容：
-{
-  "scores": {
+{{
+  "scores": {{
     "consistency": 8.5,
     "pacing": 7.0,
     "style": 8.0,
@@ -180,12 +261,15 @@ REVIEW_SYSTEM = """你是一位专业的小说评审专家，对小说进行多�
     "foreshadowing": 7.5,
     "character_arc": 8.0,
     "thematic": 8.5
-  },
+  }},
   "critique": "详细评审意见，说明各维度的优缺点...",
   "suggestions": ["具体修改建议1", "具体修改建议2"]
-}"""
+}}"""
 
 REVIEW_USER = """【小说标题】：{title}
+【细纲】（如有）：
+{outline}
+
 【正文】（字数供参考）：
 {content}
 
@@ -252,6 +336,9 @@ ROLE_CONSISTENCY = Role(
 # ═══════════════════════════════════════════════════════════════
 
 OUTLINE_SYSTEM = """你是一位专业的小说架构师，擅长规划小说结构和章节安排。
+
+【语言要求】
+所有输出内容均使用中文，禁止使用英文单词或短语。
 
 【小说核心主旨】
 {themes}
@@ -397,6 +484,9 @@ def _format_prev(prev: dict) -> str:
 
 PLOT_SYSTEM = """你是一位专业的小说架构师，擅长设计小说大纲和剧情结构。
 
+【语言要求】
+所有输出内容均使用中文，禁止使用英文单词或短语。
+
 【小说标题】
 {title}
 
@@ -541,29 +631,29 @@ CHAPTER_OUTLINE_GEN_SYSTEM = """你是一位专业的小说架构师，擅长按
   "max_word_count": 5000,
 
 ═══════════════════════════════════════════════════════════════
-【四阶段结构】（保存到 qi_cheng_zhuan_he JSON 列）
+【四阶段结构】（保存到 起承转合 JSON 列）
 ═══════════════════════════════════════════════════════════════
-  "qi_cheng_zhuan_he": {{
-    "qi": {{
+  "起承转合": {{
+    "起": {{
       "summary": "起阶段内容概述",
       "word_count": 预估字数,
       "hook": "开篇钩子（吸引读者的悬念/冲突）",
       "beats": ["节拍1", "节拍2"]
     }},
-    "cheng": {{
+    "承": {{
       "summary": "承阶段内容概述",
       "word_count": 预估字数,
       "escalation": "张力升级方式",
       "beats": ["节拍1", "节拍2"]
     }},
-    "zhuan": {{
+    "转": {{
       "summary": "转阶段内容概述",
       "word_count": 预估字数,
       "turning_point": "核心转折/反转点",
       "climax": "高潮描述",
       "beats": ["节拍1", "节拍2", "节拍3"]
     }},
-    "he": {{
+    "合": {{
       "summary": "合阶段内容概述",
       "word_count": 预估字数,
       "resolution": "收束方式",
@@ -608,6 +698,9 @@ ROLE_CHAPTER_OUTLINE_GEN = Role(
 
 # 9.3 细纲评审（关键：只过滤严重性漏洞）
 OUTLINE_REVIEW_SYSTEM = """你是一位细纲评审专家，专门审查小说章节细纲的**严重性漏洞**。
+
+【语言要求】
+所有输出内容均使用中文，禁止使用英文单词或短语。
 
 【严重性问题】(score=high)
 - 角色行为与已确认的人物弧光严重冲突
@@ -666,6 +759,9 @@ ROLE_OUTLINE_REVIEWER = Role(
 # 9.4 缩写（字数过多时）
 COMPRESS_SYSTEM = """你是小说缩写专家。
 
+【语言要求】
+所有输出内容均使用中文，禁止使用英文单词或短语。
+
 【目标字数】{target_word_count}
 【当前字数】{current_word_count}
 【允许字数范围】{min_words} ~ {max_words} 字（最终输出必须落在这个区间内）
@@ -698,6 +794,9 @@ ROLE_COMPRESSOR = Role(
 
 # 9.5 扩写（字数过少时）
 EXPAND_SYSTEM = """你是小说扩写专家。
+
+【语言要求】
+所有输出内容均使用中文，禁止使用英文单词或短语。
 
 【目标字数】{target_word_count}
 【当前字数】{current_word_count}
@@ -735,8 +834,8 @@ REVISION_DECISION_SYSTEM = """你是质量决策系统。
 【章节评审 8 维度分数】
 {scores}
 
-【总评均分】{avg_score}
-【修订阈值】6.5 (低于此分必须修订；6.5-7.0 看情况；7.0+ 不修订)
+【加权综合分】{overall_score} / 100
+【修订阈值】70 (低于此分必须修订；70-80 看情况；80+ 不修订)
 
 【章节细纲】(保持一致)
 {outline}
@@ -762,6 +861,9 @@ ROLE_REVISION_DECIDER = Role(
 
 # 9.7 角色弧光 + 关系更新（章节后处理）
 POST_CHAPTER_SYSTEM = """你是小说剧情推演系统。根据刚写完的章节，更新人物状态和关系。
+
+【语言要求】
+所有输出内容均使用中文，禁止使用英文单词或短语。
 
 【本章正文】
 {content}
@@ -1017,14 +1119,15 @@ def get_role(name: str) -> Role:
 # ─── 辅助：生成去 AI 味指令 ───
 
 def build_ai_removal_instruction(level: int) -> str:
-    """根据去AI味强度生成对应指令"""
-    if level <= 2:
-        return "允许适度的模板化表达，效率优先。"
-    elif level <= 4:
-        return "减少机械化的连接词使用，避免过于工整的句式。"
-    elif level <= 6:
-        return "适当变化句式长度，减少短句的使用，增加对话的自然感，减少过度完美的修辞。"
-    elif level <= 8:
-        return "刻意打破模板化表达，增加口语化、个性化的叙述方式。"
-    else:
-        return "强烈要求去除AI味，文字要有手工感和个性，避免完美无缺的机械感。用词要有温度。"
+    """去AI味指令 - 统一为最高一级，不再分等级"""
+    return (
+        "去掉写作中的AI味，严格遵循以下写作技巧：\n"
+        "1. 拒绝总结与说教：严禁使用\"总而言之\"\"这不禁让人思考\"等过渡句，直接呈现情节。\n"
+        "2. 克制修饰：禁止连续堆砌形容词，改用动作或环境烘托情绪。\n"
+        "3. 潜台词对话：对话需包含言外之意，通过动作、停顿暗示真实情绪，禁止\"完美逻辑\"的书面语。\n"
+        "4. 细节呈现：禁止上帝视角解说（如\"他很孤独\"），必须通过具体动作和物品呈现。\n"
+        "5. 感官锚点：每段至少包含1个非视觉感官细节（气味、触感、温度等）。\n"
+        "6. 不完美瑕疵：加入符合现实的细节（如口误、物品混乱、天气与情绪的反常搭配）。\n"
+        "7. 节奏呼吸感：长短句交错，关键情节用短句制造张力，日常描写用长句铺陈。\n"
+        "8. 语言指纹：赋予角色专属的语言习惯和知识盲区。"
+    )
