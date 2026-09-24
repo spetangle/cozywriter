@@ -15,11 +15,11 @@ build/
 # 注意：data/ 本身（目录）需要保留，递归忽略其内容用 data/**
 data/**
 !data/.gitkeep
-data/models/             # embedding 模型文件 (~400MB)
-data/chroma/             # ChromaDB 向量库
-data/logs/               # 日志文件
-data/*.db                # SQLite 主数据库
-*.log                    # 全局日志
+
+# 日志：根目录 server.log 及任意位置 *.log
+# （勿在规则后写行内注释，gitignore 不支持，会导致规则失效）
+*.log
+server.log
 
 # Environment - 真实 API Key 等敏感信息
 .env
@@ -31,6 +31,12 @@ data/*.db                # SQLite 主数据库
 .idea/
 *.swp
 *.swo
+
+# 本地 AI 助手开发产物 / 缓存（非项目代码，含历史前后端备份）
+.codebuddy/
+.workbuddy/
+.trae/
+.claude/
 
 # OS
 .DS_Store
