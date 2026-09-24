@@ -36,11 +36,18 @@ def render_column_for_add(col) -> str:
             except Exception:
                 arg = None
         if arg is not None:
+            import datetime as _dt
             if isinstance(arg, (dict, list)):
                 import json
                 parts.append(f"DEFAULT '{json.dumps(arg, ensure_ascii=False)}'")
             elif isinstance(arg, str):
                 parts.append(f"DEFAULT '{arg.replace(chr(39), chr(39)*2)}'")
+            elif isinstance(arg, (_dt.datetime, _dt.date, _dt.time)):
+                # ALTER TABLE ADD COLUMN 不接受 Python datetime 字面量；
+                # CURRENT_TIMESTAMP 是 SQLite 允许的常量默认值。
+                parts.append("DEFAULT CURRENT_TIMESTAMP")
+            elif isinstance(arg, bool):
+                parts.append(f"DEFAULT {1 if arg else 0}")
             else:
                 parts.append(f"DEFAULT {arg}")
     elif not col.nullable and col.name not in ("id",):
@@ -50,17 +57,28 @@ def render_column_for_add(col) -> str:
     # Server default（datetime.utcnow 等）
     if default is None and col.server_default is not None:
         sd = str(col.server_default.arg)
+        # server_default 可能是 SQL 片段（如 CURRENT_TIMESTAMP）或字符串字面量。
+        if sd and not (sd.startswith("'") or sd.startswith('"') or sd.isidentifier()
+                       or sd.isdigit() or "(" in sd):
+            sd = f"'{sd}'"
         parts.append(f"DEFAULT {sd}")
 
-    if not col.nullable:
+    # ADD COLUMN 只有在已有默认值时才能安全加 NOT NULL；否则会直接失败。
+    if not col.nullable and any(p.startswith("DEFAULT") for p in parts):
         parts.append("NOT NULL")
 
     return " ".join(parts)
 
 
-def main():
-    insp = inspect(engine)
-    sqlite_path = engine.url.database
+def apply_migrations(db_engine=None):
+    """对已有库补 ORM 新列/新表。
+
+    返回 {"added": int, "created": int, "errors": [...]}。启动时调用应捕获
+    异常，避免迁移失败阻止服务启动；手动执行 `python migrate.py` 时仍会打印详情。
+    """
+    db_engine = db_engine or engine
+    insp = inspect(db_engine)
+    sqlite_path = db_engine.url.database
     conn = sqlite3.connect(sqlite_path)
 
     total_added = 0
@@ -71,7 +89,7 @@ def main():
             tname = table.name
             if not insp.has_table(tname):
                 print(f"[新表] {tname} 不存在，创建中...")
-                table.create(engine, checkfirst=True)
+                table.create(db_engine, checkfirst=True)
                 print(f"  ✓ {tname} 创建成功")
                 total_created += 1
 
@@ -99,8 +117,13 @@ def main():
                     raise
         conn.commit()
         print(f"\n迁移完成: 新增 {total_added} 列, 创建 {total_created} 张新表。")
+        return {"added": total_added, "created": total_created, "errors": []}
     finally:
         conn.close()
+
+
+def main():
+    return apply_migrations(engine)
 
 
 if __name__ == "__main__":

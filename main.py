@@ -43,6 +43,8 @@ async def lifespan(app: FastAPI):
                 missing.append("OPENAI_API_KEY")
             elif provider == "minimax" and not settings.minimax_api_key:
                 missing.append("MINIMAX_API_KEY（去 https://platform.minimaxi.com/user-center/basic-information/interface-key 申请）")
+            elif provider == "deepseek" and not getattr(settings, "deepseek_api_key", ""):
+                missing.append("DEEPSEEK_API_KEY（去 https://platform.deepseek.com/ 申请）")
             elif provider == "ollama":
                 # ollama 不需要 API key，但需要本地服务
                 pass

@@ -83,7 +83,8 @@ class DeepSeekProvider(LLMProvider):
         model: str | None = None,
         base_url: str | None = None,
         use_json_output: bool = None,
-        check_balance: bool = True,
+        # 余额查询会额外发一次网络请求，默认关闭；需要时显式开启。
+        check_balance: bool = False,
     ):
         self.api_key = api_key or settings.deepseek_api_key
         self.model = model or getattr(settings, "deepseek_model", None) or self.DEFAULT_MODEL

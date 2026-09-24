@@ -455,16 +455,26 @@ async def fuse_inspiration_to_project(
 def _run_bootstrap_task(task_id: str, run_id: int, user_input: dict):
     """以灵感为种子创建项目后的 bootstrap workflow 异步任务"""
     from storage.database import SessionLocal
-    from llm.workflow import run_bootstrap_sync
+    from llm.workflow import run_bootstrap_sync, commit_bootstrap
     from api.tasks import get_task
 
     db = SessionLocal()
     try:
         task = get_task(task_id)
         result = run_bootstrap_sync(run_id, user_input, db=db)
+        commit_result = None
+        if result["status"] == "completed" and user_input.get("auto_commit", True):
+            commit_result = commit_bootstrap(user_input.get("_project_id", ""), run_id, db)
+        workflow_ok = result["status"] == "completed"
+        commit_ok = commit_result is None or commit_result.get("status") == "committed"
         if task:
-            task.status = "completed" if "fail" not in result["status"] else "failed"
-            task.result = {"run_id": run_id, "workflow_status": result["status"]}
+            task.status = "completed" if workflow_ok and commit_ok else "failed"
+            task.result = {
+                "run_id": run_id,
+                "workflow_status": result["status"],
+                "commit": commit_result,
+            }
+            task.progress = 100
         return result
     finally:
         db.close()

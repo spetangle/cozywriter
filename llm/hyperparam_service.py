@@ -56,6 +56,11 @@ class HyperparamService:
         {"provider": "mimo", "task_type": "generate_character", "name": "角色生成", "description": "生成人物设定", "temperature": 0.85, "top_p": 0.9, "max_tokens": 2048},
         {"provider": "mimo", "task_type": "generate_chapter_text", "name": "正文生成", "description": "生成小说正文", "temperature": 0.8, "top_p": 0.9, "max_tokens": 8192},
         {"provider": "mimo", "task_type": "default", "name": "默认配置", "description": "通用默认配置", "temperature": 0.7, "top_p": 0.9, "max_tokens": 4096},
+
+        # ========== DeepSeek ==========
+        {"provider": "deepseek", "task_type": "generate_character", "name": "角色生成", "description": "生成人物设定", "temperature": 0.85, "top_p": 0.9, "max_tokens": 2048},
+        {"provider": "deepseek", "task_type": "generate_chapter_text", "name": "正文生成", "description": "生成小说正文", "temperature": 0.8, "top_p": 0.9, "max_tokens": 8192},
+        {"provider": "deepseek", "task_type": "default", "name": "默认配置", "description": "通用默认配置", "temperature": 0.7, "top_p": 0.9, "max_tokens": 4096},
     ]
 
     @classmethod

@@ -1630,12 +1630,13 @@ def run_post_chapter_processing(
     chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
     if not chapter:
         return result
-    
-    # 确保 content 不为 None
-    if not chapter.content:
-        logger.warning(f"[PostChapter] chapter {chapter_id} has no content, skipping LLM calls")
-        chapter.content = ""
-        db.commit()
+
+    # 空正文没有可分析的剧情，直接跳过全部 LLM/角色/伏笔写入，避免污染数据。
+    chapter_content = content if isinstance(content, str) and content.strip() else (chapter.content or "")
+    if not chapter_content.strip():
+        logger.warning(f"[PostChapter] chapter {chapter_id} has no content, skipping post-processing")
+        return result
+
     chars = db.query(Character).filter(Character.project_id == project_id).all()
     current_state = "\n".join(
         [f"- {c.name}: 描述={c.description or ''}, profile={json.dumps(c.profile, ensure_ascii=False)}"
@@ -1651,7 +1652,7 @@ def run_post_chapter_processing(
     ) or "（暂无关系）"
 
     ctx = {
-        "content": (chapter.content or "")[:8000],
+        "content": chapter_content[:8000],
         "current_state": current_state,
         "current_relations": current_relations,
     }
@@ -2520,10 +2521,19 @@ def run_chapter_generation_pipeline(
                 f"请按细纲生成正文，**不要偏离细纲**。\n\n【重要约束】：请务必在生成完毕后检查字数，确保最终输出严格在{min_words}~{max_words}字之间，不要超出或过少。"
             )
 
+            # 按目标字数动态计算 max_tokens，避免长章节被 role 默认 4096 截断
+            max_tokens = calculate_max_tokens(
+                target_word_count=target_word_count,
+                max_word_count=max_words,
+            )
+
             # LLM调用失败自动重试3次（间隔5秒），内容过短也重试
             for attempt in range(3):
                 try:
-                    result = _call_llm_with_fingerprint("writing", writing_ctx, user_msg, provider, db, task_id, project_id=project_id)
+                    result = _call_llm_with_fingerprint(
+                        "writing", writing_ctx, user_msg, provider, db, task_id,
+                        max_tokens=max_tokens, project_id=project_id,
+                    )
                     fingerprints.append(result["fingerprint"])
                     text = result["text"].strip()
                     
@@ -2615,29 +2625,30 @@ def run_chapter_generation_pipeline(
             }
         stages["7_revise"], _ = _run_stage("7_revise", _decide)
 
-        # Step 8: 保存（确保指纹信息始终保存）
+        # Step 8: 保存（空文本不得覆盖已有正文）
         def _save():
             chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
             if not chapter:
                 raise ValueError("Chapter not found")
             final_text = stages["7_revise"]["revised_text"]
+            if not isinstance(final_text, str) or not final_text.strip():
+                # 抛出让 _run_stage 把本阶段标 failed；外层不会提交空正文，
+                # 旧正文因此保持不变。
+                raise ValueError("final chapter text is empty, refuse to overwrite existing content")
             chapter.content = final_text
             chapter.word_count = _count_chinese_chars(final_text)
-            # 保存章节指纹信息（即使正文为空也要保存）
             chapter.fingerprint = {
                 "task_id": task_id,
                 "timestamp": time.time(),
                 "total_duration_ms": (time.time() - start_time) * 1000,
                 "llm_calls": fingerprints,
             }
-            # 备份版本（仅当正文非空时）
-            if final_text and final_text.strip():
-                version = ChapterVersion(
-                    chapter_id=chapter_id,
-                    content=final_text,
-                    version_num=_next_version_num(db, chapter_id),
-                )
-                db.add(version)
+            version = ChapterVersion(
+                chapter_id=chapter_id,
+                content=final_text,
+                version_num=_next_version_num(db, chapter_id),
+            )
+            db.add(version)
             db.commit()
             return final_text
         final_text, _ = _run_stage("8_save", _save)
@@ -2797,6 +2808,10 @@ def run_chapter_generation_pipeline(
 
     except PipelineCancelledError as e:
         logger.info(f"[Pipeline] cancelled: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
         # 保存已收集的指纹信息
         try:
             chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
@@ -2822,6 +2837,11 @@ def run_chapter_generation_pipeline(
     
     except Exception as e:
         logger.error(f"[Pipeline] failed: {e}")
+        # 失败时先回滚，避免把未提交的脏状态连同指纹一起提交。
+        try:
+            db.rollback()
+        except Exception:
+            pass
         # 即使失败也要保存已收集的指纹信息
         try:
             chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
@@ -2980,8 +3000,9 @@ def run_chapter_revise(
                     "plot_advance": outline.plot_advance or "",
                     "conflicts": outline.conflicts or [],
                     "highlights": outline.highlights or [],
-                    "foreshadows": outline.foreshadows or [],
-                    "character_changes": outline.character_changes or [],
+                    "foreshadow_ids": outline.foreshadow_ids or [],
+                    "foreshadow_notes": outline.foreshadow_notes or "",
+                    "character_ids": outline.character_ids or [],
                 }
             return {}
 
@@ -3206,7 +3227,9 @@ def run_chapter_revise(
             
             if not isinstance(final_content, str):
                 final_content = str(final_content)
-            
+            if not final_content.strip():
+                raise ValueError("revised chapter text is empty, refuse to overwrite existing content")
+
             chapter.content = final_content
             chapter.word_count = _count_chinese_chars(final_content)
             db.commit()
@@ -3216,7 +3239,11 @@ def run_chapter_revise(
 
         # Step 8: 后处理
         def _post_process():
-            return run_post_chapter_processing(db, project_id, chapter_id, provider)
+            return run_post_chapter_processing(
+                db, project_id, chapter_id,
+                content=chapter.content or "",
+                provider=provider,
+            )
 
         stages["8_post"], _ = _run_stage("8_post", _post_process)
 

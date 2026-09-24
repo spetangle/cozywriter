@@ -1,5 +1,5 @@
 """数据库初始化"""
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, Session
 from config import settings
 from pathlib import Path
@@ -16,6 +16,21 @@ engine = create_engine(
     connect_args={"check_same_thread": False} if "sqlite" in settings.database_url else {},
     echo=False,
 )
+
+
+if "sqlite" in settings.database_url:
+    @event.listens_for(engine, "connect")
+    def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
+        """SQLite 的外键约束默认关闭，且是连接级开关。
+
+        项目里 CharacterRelation 等使用 passive_deletes / ondelete=CASCADE，
+        不打开该 PRAGMA 时级联删除不会生效，容易留下孤儿行。
+        """
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -48,6 +63,15 @@ def init_db():
             logger.info(f"[DB migrate] 问卷新字段添加成功")
     except Exception as e:
         logger.warning(f"[DB migrate] 添加问卷字段失败: {e}")
+    # 通用 ORM 迁移：给旧表补新增列（create_all 不会补列）
+    try:
+        from migrate import apply_migrations
+        migration_result = apply_migrations(engine)
+        if migration_result.get("added") or migration_result.get("created"):
+            logger.info(f"[DB migrate] 通用迁移完成: {migration_result}")
+    except Exception as e:
+        logger.warning(f"[DB migrate] 通用迁移失败: {e}")
+
     # 初始化 LLM 超参数配置
     try:
         from llm.hyperparam_service import HyperparamService

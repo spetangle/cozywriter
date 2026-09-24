@@ -8,9 +8,11 @@ from openai import OpenAI
 
 
 class OpenAIProvider(LLMProvider):
-    def __init__(self, api_key: str | None = None, model: str = "gpt-4o"):
+    def __init__(self, api_key: str | None = None, model: str = "gpt-4o",
+                 base_url: str | None = None):
         self.api_key = api_key or settings.openai_api_key
         self.model = model
+        self.base_url = base_url
         self._client = None
 
     @property
@@ -19,7 +21,10 @@ class OpenAIProvider(LLMProvider):
 
     def _get_client(self) -> OpenAI:
         if self._client is None:
-            self._client = OpenAI(api_key=self.api_key)
+            client_kwargs = {"api_key": self.api_key}
+            if self.base_url:
+                client_kwargs["base_url"] = self.base_url
+            self._client = OpenAI(**client_kwargs)
         return self._client
 
     def generate(

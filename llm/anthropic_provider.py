@@ -8,9 +8,11 @@ import anthropic
 
 
 class AnthropicProvider(LLMProvider):
-    def __init__(self, api_key: str | None = None, model: str = "claude-sonnet-4-20250514"):
+    def __init__(self, api_key: str | None = None, model: str = "claude-sonnet-4-20250514",
+                 base_url: str | None = None):
         self.api_key = api_key or settings.anthropic_api_key
         self.model = model
+        self.base_url = base_url
         self._client = None
 
     @property
@@ -19,7 +21,10 @@ class AnthropicProvider(LLMProvider):
 
     def _get_client(self) -> anthropic.Anthropic:
         if self._client is None:
-            self._client = anthropic.Anthropic(api_key=self.api_key)
+            client_kwargs = {"api_key": self.api_key}
+            if self.base_url:
+                client_kwargs["base_url"] = self.base_url
+            self._client = anthropic.Anthropic(**client_kwargs)
         return self._client
 
     def generate(
@@ -46,12 +51,19 @@ class AnthropicProvider(LLMProvider):
         )
         t0 = time.time()
         try:
-            response = client.messages.create(
-                model=self.model,
-                system=system_prompt,
-                messages=messages,
-                max_tokens=max_tokens,
-            )
+            request_kwargs = {
+                "model": self.model,
+                "system": system_prompt,
+                "messages": messages,
+                "max_tokens": max_tokens,
+            }
+            temperature = kwargs.get("temperature")
+            if temperature is not None:
+                request_kwargs["temperature"] = temperature
+            top_p = kwargs.get("top_p")
+            if top_p is not None:
+                request_kwargs["top_p"] = top_p
+            response = client.messages.create(**request_kwargs)
             duration_ms = (time.time() - t0) * 1000
             # 提取文本（多 block 拼接）
             text = "".join(

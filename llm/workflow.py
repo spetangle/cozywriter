@@ -1051,12 +1051,9 @@ def run_bootstrap_sync(run_id: int, user_input: dict, db=None) -> dict:
             )
             db.commit()
             try:
-                # 收集已完成的 stage 产物
-                prev_outputs = {
-                    sid: stage_results[sid].get("data", {})
-                    for sid in completed_set
-                    if sid in stage_results and "data" in stage_results[sid]
-                }
+                # 收集所有前置 stage 产物；user_filled 的 user_values 也要
+                # 传给下游，否则 LLM 看不到用户手填的主题/角色/世界观。
+                prev_outputs = _collect_prev_outputs(run, stage_id, stage_results)
 
                 result = _run_single_stage(
                     stage_id=stage_id,
@@ -2225,6 +2222,9 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
         return {"status": "failed", "error": "Run not found"}
     if str(run.project_id) != str(project_id):
         return {"status": "failed", "error": "Run does not belong to project"}
+    if run.status == "failed":
+        # 失败的 run 可能只有部分 stage 产物；直接提交会先删旧数据再写半成品。
+        return {"status": "failed", "error": "Run failed, refusing to commit"}
 
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -2234,13 +2234,21 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
     if (getattr(project, "project_type", None) or "novel") == "script":
         return _commit_script_bootstrap(project, run, results, db)
 
+    def _stage_ready(stage_id: str) -> bool:
+        return results.get(stage_id, {}).get("status") in ("ok", "user_filled")
+
     try:
-        # ── 清理旧数据（重新生成时全量覆盖）──
-        # 这些表没有级联删除，需要手动清理
-        db.query(Theme).filter(Theme.project_id == project_id).delete()
-        db.query(WorldEntry).filter(WorldEntry.project_id == project_id).delete()
-        db.query(ProjectOutline).filter(ProjectOutline.project_id == project_id).delete()
-        db.query(Foreshadowing).filter(Foreshadowing.project_id == project_id).delete()
+        # ── 清理旧数据（只清理本次确实产出了新数据的表）──
+        # partial run 可能只成功了一部分 stage；无条件删除会把没重生成的
+        # 旧设定也一起清掉，因此这里按 stage 状态逐表清理。
+        if _stage_ready("stage_2a_theme"):
+            db.query(Theme).filter(Theme.project_id == project_id).delete()
+        if _stage_ready("stage_2c_world"):
+            db.query(WorldEntry).filter(WorldEntry.project_id == project_id).delete()
+        if _stage_ready("stage_4a_outline") or _stage_ready("stage_4a_chapter_outlines"):
+            db.query(ProjectOutline).filter(ProjectOutline.project_id == project_id).delete()
+        if _stage_ready("stage_4b_foreshadow"):
+            db.query(Foreshadowing).filter(Foreshadowing.project_id == project_id).delete()
 
         # ── Stage 1: 更新 Project 基础参数 ──
         if results.get("stage_1_base", {}).get("status") == "ok":
@@ -2333,12 +2341,21 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
         from llm.chapter_pipeline import _find_existing_character
         char_map = {}  # name → id
         
-        # 重新生成角色时，先删除同项目下所有旧角色（确保完全重新生成）
-        # 这是为了处理用户修改角色名称后重新生成的场景
-        existing_chars = db.query(Character).filter(Character.project_id == project_id).all()
-        for ec in existing_chars:
-            db.delete(ec)
-        db.flush()
+        # 只有本次确实要重生成角色时才删除旧角色；partial run 不应误删。
+        char_stage_ids = ("stage_3a_protagonist", "stage_3b_antagonist", "stage_3c_supporting")
+        if any(_stage_ready(sid) for sid in char_stage_ids):
+            # 外键 enforcement 未开启时 passive_deletes 不会生效，显式清掉
+            # 关系/弧光，避免角色 ID 复用后指向错误记录。
+            db.query(CharacterRelation).filter(
+                CharacterRelation.project_id == project_id
+            ).delete(synchronize_session="fetch")
+            db.query(CharacterArc).filter(
+                CharacterArc.project_id == project_id
+            ).delete(synchronize_session="fetch")
+            existing_chars = db.query(Character).filter(Character.project_id == project_id).all()
+            for ec in existing_chars:
+                db.delete(ec)
+            db.flush()
         for stage_id, role_default, role_label_zh in [
             ("stage_3a_protagonist", "主角", "主角"),
             ("stage_3b_antagonist", "反派", "反派"),
@@ -2490,7 +2507,7 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
                 outline_row = db.query(ProjectOutline).filter(ProjectOutline.id == outline_id).first()
                 if outline_row:
                     outline_row.chapter_outlines = chapter_outlines_total
-                    db.commit()
+                    db.flush()
             else:
                 # 兼容：只跑了 4a_chapter_outlines 没跑 4a_outline
                 # 把 chapter_outlines 写到一个临时 ProjectOutline(架构字段留空)

@@ -110,36 +110,54 @@ async def create_chapter(project_id: str, data: ChapterCreate, db: Session = Dep
     bootstrap_title = None
     bootstrap_outline_fields = None
     try:
-        from storage.models import WorkflowRun, ChapterOutline
-        from llm.workflow import _commit_bootstrap_results  # noqa: F401  仅确保模块加载
+        from storage.models import WorkflowRun, ChapterOutline, ProjectOutline
         latest_run = (
             db.query(WorkflowRun)
             .filter(WorkflowRun.project_id == project_id)
             .order_by(WorkflowRun.created_at.desc())
             .first()
         )
-        if latest_run:
-            outline_data = (latest_run.stage_results or {}).get("stage_4a_outline", {}).get("data", {})
-            chap_list = outline_data.get("chapter_outlines", []) if isinstance(outline_data, dict) else []
-            # 按 chapter_num == order+1 匹配
-            target_chap = next(
-                (c for c in chap_list if c.get("chapter_num") == data.order + 1),
-                None,
-            )
-            if target_chap:
-                t = (target_chap.get("title") or "").strip()
-                if t and not re.match(r'^第\s*[0-9一二三四五六七八九十百千]+\s*章\s*$', t):
-                    bootstrap_title = t
-                bootstrap_outline_fields = {
-                    "chapter_position": target_chap.get("chapter_position", ""),
-                    "pacing": target_chap.get("pacing", "平稳"),
-                    "key_content": target_chap.get("key_content", ""),
-                    "plot_advance": target_chap.get("plot_advance", ""),
-                    "highlights": target_chap.get("highlights", []),
-                    "target_word_count": target_chap.get("target_word_count", project.target_word_count or 3000),
-                }
+
+        chap_list = []
+        # 新版：commit 后章节细纲落在 ProjectOutline.chapter_outlines
+        project_outline = (
+            db.query(ProjectOutline)
+            .filter(ProjectOutline.project_id == project_id)
+            .first()
+        )
+        if project_outline and project_outline.chapter_outlines:
+            chap_list = list(project_outline.chapter_outlines)
+
+        # 兼容未 commit 的 run：stage_4a_chapter_outlines 是拆分后的来源
+        if not chap_list and latest_run:
+            stage_results = latest_run.stage_results or {}
+            extra_data = stage_results.get("stage_4a_chapter_outlines", {}).get("data", {})
+            if isinstance(extra_data, dict) and extra_data.get("chapter_outlines"):
+                chap_list = list(extra_data["chapter_outlines"])
+            # 最后兼容旧版：stage_4a_outline 内嵌 chapter_outlines
+            if not chap_list:
+                legacy_data = stage_results.get("stage_4a_outline", {}).get("data", {})
+                if isinstance(legacy_data, dict):
+                    chap_list = list(legacy_data.get("chapter_outlines", []) or [])
+
+        target_chap = next(
+            (c for c in chap_list if isinstance(c, dict) and c.get("chapter_num") == data.order + 1),
+            None,
+        )
+        if target_chap:
+            t = (target_chap.get("title") or "").strip()
+            if t and not re.match(r'^第\s*[0-9一二三四五六七八九十百千]+\s*章\s*$', t):
+                bootstrap_title = t
+            bootstrap_outline_fields = {
+                "chapter_position": target_chap.get("chapter_position", ""),
+                "pacing": target_chap.get("pacing", "平稳"),
+                "key_content": target_chap.get("key_content", ""),
+                "plot_advance": target_chap.get("plot_advance", ""),
+                "highlights": target_chap.get("highlights", []),
+                "target_word_count": target_chap.get("target_word_count", project.target_word_count or 3000),
+            }
     except Exception as e:
-        logger.debug(f"[create_chapter] bootstrap outline lookup failed: {e}")
+        logger.warning(f"[create_chapter] bootstrap outline lookup failed: {e}")
 
     # 如果 bootstrap 没生成标题，就用调用方传入的（前端默认「第 N 章」）
     final_title = bootstrap_title or data.title

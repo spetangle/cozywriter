@@ -40,13 +40,17 @@
 
 ## Phase 4 · 稳定性与数据安全
 
-- [ ] 4.1 Step4 补 `max_tokens`（长章截断）
-- [ ] 4.2 Step8 空文本保护（避免覆盖正文）
-- [ ] 4.3 迁移缺口：`init_db` 集成通用迁移；`migrate_project_ids` 补新列；`migrate.py` DateTime 默认值引号
-- [ ] 4.4 开启 `PRAGMA foreign_keys=ON`（先清理孤儿数据）
-- [ ] 4.5 Bootstrap 失败不误删角色；`user_filled` 透传下游
-- [ ] 4.6 Provider 一致性：Anthropic temperature、失败用量记录、DeepSeek 余额查询默认关、init/超参补 deepseek
-- [ ] 4.7 `chapters.py:114` 修正无效 import
+- [x] 4.1 Step4 补 `max_tokens`（长章截断）：主流程与独立函数一致使用 `calculate_max_tokens`
+- [x] 4.2 Step8 空文本保护（避免覆盖正文）：空文本抛错不提交；失败/取消先 rollback；后处理空正文直接返回；修订分支字段与位置参数修正
+- [~] 4.3 迁移缺口：`init_db` 集成通用迁移；`migrate.py` DateTime/CURRENT_TIMESTAMP 与 NOT NULL 处理已修
+  - 待办：`migrate_project_ids.py` 仍硬编码旧 schema（缺 project_type/script_format/script_episode_count、漏 full_review_sessions），重建表仍可能丢外键/唯一约束/索引
+- [x] 4.4 开启 `PRAGMA foreign_keys=ON`（每个 SQLite 连接注册 connect 事件；bootstrap 删除角色前显式清关系/弧光）
+- [~] 4.5 Bootstrap 失败不误删角色；`user_filled` 透传下游
+  - 已修：拒绝 failed run commit；按 stage 状态条件清理；prev_outputs 包含 user_filled；灵感建项目走自动 commit；移除中间 commit
+  - 待办：`protagonist_name` 等问卷预创建字段仍未进入 stage 输出契约
+- [~] 4.6 Provider 一致性：Anthropic temperature/top_p + base_url、OpenAI base_url、DeepSeek 余额查询默认关、init/main/超参补 deepseek
+  - 待办：MiniMax/MiMo 专用异常分支仍未记录失败用量
+- [x] 4.7 `chapters.py` 修正无效 import，并优先读 `ProjectOutline.chapter_outlines` / `stage_4a_chapter_outlines`，兼容旧 `stage_4a_outline`
 
 ## Phase 5 · 工程与文档
 
@@ -59,7 +63,7 @@
 
 1. 本机：`python3 -m py_compile`（全量）+ `node --check`（全量）
 2. 本机：`node tests/test_spa_components.js`
-3. Windows：`tests/test_frontend_routes.py`、`test_script_api.py`、`test_script_post_process.py`
+3. Windows：`tests/test_frontend_routes.py`、`test_script_api.py`、`test_script_post_process.py`、`test_script_bootstrap.py`
 4. 手动冒烟：建项目 → 引导补全落库 → 单章生成 → 评审 → 导出 → 建剧本 → 场景生成 → 分镜
 
 ## 决策记录
