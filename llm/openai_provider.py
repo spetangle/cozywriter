@@ -3,6 +3,7 @@ import time
 from llm.base import LLMProvider
 from config import settings
 from logger import logger, log_llm_payload
+from llm.usage_tracker import record_llm_usage, extract_usage_from_openai_response
 from openai import OpenAI
 
 
@@ -29,6 +30,9 @@ class OpenAIProvider(LLMProvider):
     ) -> str:
         client = self._get_client()
         task_type = kwargs.get("task_type", "generate")
+        llm_call_id = kwargs.get("llm_call_id")
+        task_id = kwargs.get("task_id")
+        project_id = kwargs.get("project_id")
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -75,6 +79,12 @@ class OpenAIProvider(LLMProvider):
                     ),
                 },
             )
+            usage = extract_usage_from_openai_response(response)
+            record_llm_usage(
+                provider=self.provider_name, model=self.model, task_type=task_type,
+                duration_ms=duration_ms, success=True, project_id=project_id,
+                task_id=task_id, llm_call_id=llm_call_id, **usage,
+            )
             return text
         except Exception as e:
             duration_ms = (time.time() - t0) * 1000
@@ -92,6 +102,11 @@ class OpenAIProvider(LLMProvider):
                 duration_ms=duration_ms,
                 success=False,
                 error=str(e),
+            )
+            record_llm_usage(
+                provider=self.provider_name, model=self.model, task_type=task_type,
+                duration_ms=duration_ms, success=False, error=str(e), project_id=project_id,
+                task_id=task_id, llm_call_id=llm_call_id,
             )
             raise
 

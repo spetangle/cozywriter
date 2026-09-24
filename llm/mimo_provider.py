@@ -21,6 +21,7 @@ import time
 from llm.base import LLMProvider
 from config import settings
 from logger import logger, log_llm_payload
+from llm.usage_tracker import record_llm_usage, extract_usage_from_anthropic_response
 import anthropic
 
 
@@ -82,6 +83,9 @@ class MimoProvider(LLMProvider):
         max_tokens = kwargs.get("max_tokens") or self._recommended_max_tokens()
         temperature = kwargs.get("temperature", 1.0)
         task_type = kwargs.get("task_type", "generate")
+        llm_call_id = kwargs.get("llm_call_id")
+        task_id = kwargs.get("task_id")
+        project_id = kwargs.get("project_id")
         messages = [{"role": "user", "content": prompt}]
 
         # 日志：记录完整 prompt（之前只截断 80 字会导致请求信息不全）
@@ -157,6 +161,12 @@ class MimoProvider(LLMProvider):
                     ],
                 },
             )
+            usage = extract_usage_from_anthropic_response(response)
+            record_llm_usage(
+                provider=self.provider_name, model=self.model, task_type=task_type,
+                duration_ms=duration_ms, success=True, project_id=project_id,
+                task_id=task_id, llm_call_id=llm_call_id, **usage,
+            )
             return text
         except anthropic.AuthenticationError as e:
             logger.error(f"[LLM:mimo] 401 鉴权失败: {e}")
@@ -213,6 +223,11 @@ class MimoProvider(LLMProvider):
                 duration_ms=duration_ms,
                 success=False,
                 error=str(e),
+            )
+            record_llm_usage(
+                provider=self.provider_name, model=self.model, task_type=task_type,
+                duration_ms=duration_ms, success=False, error=str(e), project_id=project_id,
+                task_id=task_id, llm_call_id=llm_call_id,
             )
             raise
 

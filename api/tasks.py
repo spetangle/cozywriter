@@ -173,12 +173,17 @@ def _run_task_from_queue(task: Task, fn: Callable, args: tuple, kwargs: dict):
                 task.completed_at = time.time()
                 logger.warning(f"[Task {task_id}] TIMEOUT after {int(timeout_seconds)}s")
                 return
-            
+
+            # 内部函数可能已设置终态（如 pipeline 失败时 status="failed", result=错误详情）
+            # 仅在内部函数未设置时才用默认值，避免覆盖内部函数的状态判定
+            if task.status == "running":
+                task.status = "completed"
+            if task.result is None and result is not None:
+                task.result = result
             task.progress = 100
-            task.status = "completed"
-            task.result = result
-            task.completed_at = time.time()
-            logger.info(f"[Task {task_id}] DONE duration={task.duration_s:.1f}s")
+            if task.completed_at is None:
+                task.completed_at = time.time()
+            logger.info(f"[Task {task_id}] DONE duration={task.duration_s:.1f}s status={task.status}")
         
         except Exception as e:
             if task.status != "cancelled":
@@ -313,16 +318,20 @@ def _refresh_inmem_task_from_run(run_id: int) -> int:
 
 
 def terminate_all_tasks() -> dict:
-    """终止所有 pending/running 任务
+    """终止所有 pending/running/queued 任务
     Returns:
         {"terminated": int, "skipped": int, "total": int}
     """
+    # 按项目分组处理 queued 任务，以便在取消后启动队列中的下一个任务
+    queued_projects = set()
     with _tasks_lock:
         to_terminate = [
             t for t in _tasks.values()
-            if t.status in ("pending", "running")
+            if t.status in ("pending", "running", "queued")
         ]
         for t in to_terminate:
+            if t.status == "queued":
+                queued_projects.add(t.project_id)
             t.status = "cancelled"
             t.error = "用户终止"
             t.completed_at = time.time()
@@ -335,6 +344,11 @@ def terminate_all_tasks() -> dict:
         if t.run_id:
             _sync_db_run_cancelled(t.run_id, "用户终止")
 
+    # 处理因取消 queued 任务而产生的队列空缺
+    for project_id in queued_projects:
+        if not has_running_task(project_id):
+            _process_project_queue(project_id, "")
+
     logger.info(f"[Task] terminate-all: terminated={terminated} skipped={skipped} total={total}")
     return {
         "terminated": terminated,
@@ -344,12 +358,14 @@ def terminate_all_tasks() -> dict:
 
 
 def terminate_task(task_id: str) -> bool:
-    """终止单个任务"""
+    """终止单个任务（支持 pending/running/queued 状态）"""
+    was_queued = False
     with _tasks_lock:
         t = _tasks.get(task_id)
         if not t:
             return False
-        if t.status in ("pending", "running"):
+        if t.status in ("pending", "running", "queued"):
+            was_queued = t.status == "queued"
             t.status = "cancelled"
             t.error = "用户终止"
             t.completed_at = time.time()
@@ -357,10 +373,20 @@ def terminate_task(task_id: str) -> bool:
         else:
             return False
 
+    # 如果是 queued 状态，需要检查是否需要启动队列中的下一个任务
+    # 注意：queued 状态的任务没有获取项目锁，所以不需要释放锁
+    # 但如果没有其他任务正在运行，应该启动队列中的下一个任务
+    if was_queued:
+        # 检查是否还有其他任务正在运行（持有锁）
+        has_running = has_running_task(t.project_id)
+        if not has_running:
+            # 没有任务在运行，启动队列中的下一个任务
+            _process_project_queue(t.project_id, "")
+
     # DB 同步（在锁外做，避免锁内做 IO）
     if run_id:
         _sync_db_run_cancelled(run_id, "用户终止")
-    logger.info(f"[Task {task_id}] terminated by user (run_id={run_id})")
+    logger.info(f"[Task {task_id}] terminated by user (run_id={run_id}, was_queued={was_queued})")
     return True
 
 
@@ -426,13 +452,18 @@ def run_task_async(task_id: str, fn: Callable, *args, **kwargs):
                 )
                 return
 
+            # 内部函数可能已设置终态（如 pipeline 失败时 status="failed", result=错误详情）
+            # 仅在内部函数未设置时才用默认值，避免覆盖内部函数的状态判定
+            if task.status == "running":
+                task.status = "completed"
+            if task.result is None and result is not None:
+                task.result = result
             task.progress = 100
-            task.status = "completed"
-            task.result = result
-            task.completed_at = time.time()
+            if task.completed_at is None:
+                task.completed_at = time.time()
             logger.info(
                 f"[Task {task_id}] DONE duration={task.duration_s:.1f}s "
-                f"project={task.project_id} run={task.run_id}"
+                f"project={task.project_id} run={task.run_id} status={task.status}"
             )
 
         except Exception as e:

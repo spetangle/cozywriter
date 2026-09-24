@@ -30,6 +30,7 @@ class ConfigStatusResponse(BaseModel):
     ollama_configured: bool
     minimax_configured: bool
     mimo_configured: bool
+    deepseek_configured: bool
     default_provider: str
     # 当前激活的 provider 实际使用的模型名（用于前端工具栏展示）
     current_model: str = ""
@@ -80,6 +81,7 @@ async def get_config_status(db: Session = Depends(get_db)):
         "ollama": lambda e: e.get("OLLAMA_MODEL", "llama3.1"),
         "minimax": lambda e: e.get("MINIMAX_MODEL", "MiniMax-Text-01"),
         "mimo": lambda e: e.get("MIMO_MODEL", "mimo-vl-7b"),
+        "deepseek": lambda e: e.get("DEEPSEEK_MODEL", "deepseek-chat-v4-flash"),
     }
     resolver = default_models.get(default_provider.lower())
     current_model = resolver(env_vars) if resolver else ""
@@ -90,6 +92,7 @@ async def get_config_status(db: Session = Depends(get_db)):
         ollama_configured=bool(env_vars.get("OLLAMA_BASE_URL", "")),
         minimax_configured=bool(env_vars.get("MINIMAX_API_KEY", "")),
         mimo_configured=bool(env_vars.get("MIMO_API_KEY", "")),
+        deepseek_configured=bool(env_vars.get("DEEPSEEK_API_KEY", "")),
         default_provider=default_provider,
         current_model=current_model,
     )
@@ -129,6 +132,15 @@ async def save_provider(req: SaveProviderRequest, db: Session = Depends(get_db))
         if req.model:
             updates["MIMO_MODEL"] = req.model
         _save_env(updates)
+    elif provider == "deepseek":
+        if not req.api_key:
+            raise HTTPException(status_code=400, detail="DEEPSEEK_API_KEY is required")
+        updates = {"DEEPSEEK_API_KEY": req.api_key}
+        if req.base_url:
+            updates["DEEPSEEK_BASE_URL"] = req.base_url
+        if req.model:
+            updates["DEEPSEEK_MODEL"] = req.model
+        _save_env(updates)
     else:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {req.provider}")
 
@@ -143,7 +155,7 @@ async def save_provider(req: SaveProviderRequest, db: Session = Depends(get_db))
 async def set_default_provider(req: SetDefaultProviderRequest, db: Session = Depends(get_db)):
     """单独修改默认 LLM 供应商（不改 API Key）"""
     provider = req.provider.lower()
-    available = {"anthropic", "openai", "ollama", "minimax", "mimo"}
+    available = {"anthropic", "openai", "ollama", "minimax", "mimo", "deepseek"}
     if provider not in available:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {req.provider}")
     SystemSetting.set(db, SystemSetting.KEY_DEFAULT_LLM_PROVIDER, provider)

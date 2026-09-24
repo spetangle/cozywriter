@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     mimo_api_key: str = ""
     mimo_model: str = "mimo-v2.5-pro"
     mimo_base_url: str = "https://token-plan-cn.xiaomimimo.com/anthropic"
+    # DeepSeek 配置
+    deepseek_api_key: str = ""
+    deepseek_model: str = "deepseek-chat"
+    deepseek_base_url: str = "https://api.deepseek.com/v1"
     # 默认 LLM Provider（值为空字符串时，由 LLMFactory 从数据库 SystemSetting 读取回退）
     default_llm_provider: str = ""
 

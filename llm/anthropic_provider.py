@@ -3,6 +3,7 @@ import time
 from llm.base import LLMProvider
 from config import settings
 from logger import logger, log_llm_payload
+from llm.usage_tracker import record_llm_usage, extract_usage_from_anthropic_response
 import anthropic
 
 
@@ -31,6 +32,9 @@ class AnthropicProvider(LLMProvider):
         max_tokens = kwargs.get("max_tokens", 4096)
         # task_type 透传：调用方可在 kwargs 里指定（如 "stage_1_base"），方便 log 分类
         task_type = kwargs.get("task_type", "generate")
+        llm_call_id = kwargs.get("llm_call_id")
+        task_id = kwargs.get("task_id")
+        project_id = kwargs.get("project_id")
         messages = [{"role": "user", "content": prompt}]
 
         # 记录完整 prompt 到 INFO 日志（之前只截断 80 字会导致请求信息不全）
@@ -80,6 +84,12 @@ class AnthropicProvider(LLMProvider):
                     ],
                 },
             )
+            usage = extract_usage_from_anthropic_response(response)
+            record_llm_usage(
+                provider=self.provider_name, model=self.model, task_type=task_type,
+                duration_ms=duration_ms, success=True, project_id=project_id,
+                task_id=task_id, llm_call_id=llm_call_id, **usage,
+            )
             return text
         except Exception as e:
             duration_ms = (time.time() - t0) * 1000
@@ -95,6 +105,11 @@ class AnthropicProvider(LLMProvider):
                 duration_ms=duration_ms,
                 success=False,
                 error=str(e),
+            )
+            record_llm_usage(
+                provider=self.provider_name, model=self.model, task_type=task_type,
+                duration_ms=duration_ms, success=False, error=str(e), project_id=project_id,
+                task_id=task_id, llm_call_id=llm_call_id,
             )
             raise
 

@@ -3,6 +3,7 @@ import time
 from llm.base import LLMProvider
 from config import settings
 from logger import logger, log_llm_payload
+from llm.usage_tracker import record_llm_usage
 import httpx
 
 
@@ -33,6 +34,9 @@ class OllamaProvider(LLMProvider):
     ) -> str:
         client = self._get_client()
         task_type = kwargs.get("task_type", "generate")
+        llm_call_id = kwargs.get("llm_call_id")
+        task_id = kwargs.get("task_id")
+        project_id = kwargs.get("project_id")
 
         # Ollama 的 /api/generate 协议把 system+user 拼成单个 prompt
         # （不像 Anthropic 有独立 system 字段），所以 system_prompt 拼到前面，
@@ -62,7 +66,12 @@ class OllamaProvider(LLMProvider):
             response = client.post("/api/generate", json=payload)
             duration_ms = (time.time() - t0) * 1000
             response.raise_for_status()
-            text = response.json().get("response", "")
+            resp_json = response.json()
+            text = resp_json.get("response", "")
+
+            # Ollama 返回 eval_count / prompt_eval_count 等 token 统计
+            input_tokens = resp_json.get("prompt_eval_count", 0) or 0
+            output_tokens = resp_json.get("eval_count", 0) or 0
             # 响应预览：压缩空白后不超 300 字符，避免 log 一行被拆成多行
             response_preview = text if len(text) <= 300 else text[:300] + "..."
             response_preview_oneline = " ".join(response_preview.split())
@@ -81,6 +90,12 @@ class OllamaProvider(LLMProvider):
                 duration_ms=duration_ms,
                 success=True,
                 extra={"base_url": self.base_url},
+            )
+            record_llm_usage(
+                provider=self.provider_name, model=self.model, task_type=task_type,
+                input_tokens=input_tokens, output_tokens=output_tokens,
+                duration_ms=duration_ms, success=True, project_id=project_id,
+                task_id=task_id, llm_call_id=llm_call_id,
             )
             return text
         except Exception as e:
@@ -101,7 +116,33 @@ class OllamaProvider(LLMProvider):
                 error=str(e),
                 extra={"base_url": self.base_url},
             )
+            record_llm_usage(
+                provider=self.provider_name, model=self.model, task_type=task_type,
+                duration_ms=duration_ms, success=False, error=str(e), project_id=project_id,
+                task_id=task_id, llm_call_id=llm_call_id,
+            )
             raise
+
+    def list_models(self) -> list[dict]:
+        """获取本地 Ollama 已安装的模型列表"""
+        client = self._get_client()
+        try:
+            response = client.get("/api/tags")
+            response.raise_for_status()
+            data = response.json()
+            models = data.get("models", [])
+            return [
+                {
+                    "id": m.get("name", ""),
+                    "name": m.get("name", ""),
+                    "size": m.get("size", 0),
+                    "modified_at": m.get("modified_at", ""),
+                }
+                for m in models
+            ]
+        except Exception as e:
+            logger.error(f"[LLM:ollama] 模型列表获取失败: {e}")
+            return []
 
     def get_context_window(self) -> int:
         # Ollama 默认 context window，取决于模型配置

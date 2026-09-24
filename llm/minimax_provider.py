@@ -19,6 +19,7 @@
   M2.x 系列无法关闭（SDK 仍接受该参数，模型会忽略）。
 - 响应：content 是块数组 [{type:text, text:"..."}, {type:thinking, thinking:"..."}, ...]
   → 只提取 type=text 的块拼接，跳过 thinking/tool_use 等
+- 模型列表：GET /v1/models
 
 为什么用 Anthropic SDK 而不是直接 httpx：
 - 官方 Anthropic SDK 天然支持 base_url 切换和 Authorization/x-api-key 双认证
@@ -26,9 +27,11 @@
 - 代码量少一半，错误处理更稳（SDK 内置重试 / 超时 / 类型化异常）
 """
 import time
+import httpx
 from llm.base import LLMProvider
 from config import settings
 from logger import logger, log_llm_payload
+from llm.usage_tracker import record_llm_usage, extract_usage_from_anthropic_response
 import anthropic
 
 
@@ -96,6 +99,9 @@ class MiniMaxProvider(LLMProvider):
         temperature = kwargs.get("temperature", 1.0)
         # task_type 透传（调用方可在 kwargs 里指定，如 "stage_1_base"）
         task_type = kwargs.get("task_type", "generate")
+        llm_call_id = kwargs.get("llm_call_id")
+        task_id = kwargs.get("task_id")
+        project_id = kwargs.get("project_id")
         messages = [{"role": "user", "content": prompt}]
 
         # 日志：记录完整 prompt（之前只截断 80 字会导致请求信息不全）
@@ -174,6 +180,12 @@ class MiniMaxProvider(LLMProvider):
                         getattr(b, "type", "?") for b in (response.content or [])
                     ],
                 },
+            )
+            usage = extract_usage_from_anthropic_response(response)
+            record_llm_usage(
+                provider=self.provider_name, model=self.model, task_type=task_type,
+                duration_ms=duration_ms, success=True, project_id=project_id,
+                task_id=task_id, llm_call_id=llm_call_id, **usage,
             )
             return text
         except anthropic.AuthenticationError as e:
@@ -269,7 +281,38 @@ class MiniMaxProvider(LLMProvider):
                 success=False,
                 error=str(e),
             )
+            record_llm_usage(
+                provider=self.provider_name, model=self.model, task_type=task_type,
+                duration_ms=duration_ms, success=False, error=str(e), project_id=project_id,
+                task_id=task_id, llm_call_id=llm_call_id,
+            )
             raise
+
+    def list_models(self) -> list[dict]:
+        """获取可用模型列表
+
+        API: GET /v1/models
+        返回格式：{"data": [{"id": "MiniMax-M2.7", "name": "MiniMax-M2.7", ...}, ...]}
+        """
+        if not self.api_key:
+            return []
+
+        try:
+            with httpx.Client(
+                timeout=30.0,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+            ) as http_client:
+                url = f"{self.base_url}/v1/models"
+                response = http_client.get(url)
+                response.raise_for_status()
+                data = response.json()
+                return data.get("data", [])
+        except Exception as e:
+            logger.error(f"[LLM:minimax] 模型列表获取失败: {e}")
+            return []
 
     def get_context_window(self) -> int:
         return self.CONTEXT_WINDOW
