@@ -64,7 +64,18 @@ def main():
     conn = sqlite3.connect(sqlite_path)
 
     total_added = 0
+    total_created = 0
     try:
+        # 1. 创建不存在的新表
+        for table in Base.metadata.sorted_tables:
+            tname = table.name
+            if not insp.has_table(tname):
+                print(f"[新表] {tname} 不存在，创建中...")
+                table.create(engine, checkfirst=True)
+                print(f"  ✓ {tname} 创建成功")
+                total_created += 1
+
+        # 2. 给已有表补缺失列
         for table in Base.metadata.sorted_tables:
             tname = table.name
             if not insp.has_table(tname):
@@ -87,7 +98,7 @@ def main():
                     print(f"  ! {col.name} 失败: {e}")
                     raise
         conn.commit()
-        print(f"\n迁移完成，新增 {total_added} 列。")
+        print(f"\n迁移完成: 新增 {total_added} 列, 创建 {total_created} 张新表。")
     finally:
         conn.close()
 

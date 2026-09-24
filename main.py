@@ -13,7 +13,8 @@ from api.routes import (
     worldbuilding, outline, generate, theme, review,
     consistency, outline_detail, tasks, inspirations,
     creative_questionnaire, workflow, genres, providers,
-    plot_points, llm_hyperparams,
+    plot_points, llm_hyperparams, token_usage,
+    screenplays, properties, storyboards,
 )
 from api.routes import full_review
 from api.routes.chapters import pipeline_router
@@ -164,6 +165,10 @@ app.include_router(export.router)              # 导出正文
 app.include_router(providers.router)           # 服务商 CRUD
 app.include_router(plot_points.router)         # 剧情追踪
 app.include_router(llm_hyperparams.router)     # LLM 超参数配置
+app.include_router(token_usage.router)         # Token 用量统计
+app.include_router(screenplays.router)         # 剧本场景
+app.include_router(properties.router)           # 道具
+app.include_router(storyboards.router)          # 分镜稿 CRUD
 
 # 旧版灵感 API 兼容路由：/api/projects/{pid}/inspirations → 转发到 /api/inspirations
 # （保留项目内旧版右侧面板可用）
@@ -244,7 +249,12 @@ data_dir.mkdir(exist_ok=True)
 @app.get("/")
 async def root():
     """返回前端入口"""
-    return FileResponse("web/index.html")
+    from fastapi.responses import FileResponse
+    return FileResponse("web/index.html", headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    })
 
 
 # 挂载静态文件

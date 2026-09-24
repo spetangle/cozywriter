@@ -4,4 +4,5 @@ from api.routes import (
     worldbuilding, outline, generate, theme, review,
     consistency, outline_detail, tasks, inspirations,
     creative_questionnaire, providers, llm_hyperparams,
+    screenplays, properties, storyboards, token_usage,
 )

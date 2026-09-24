@@ -6,16 +6,13 @@ from storage.models.base import Base, generate_project_id
 
 
 class Project(Base):
-    """小说项目"""
+    """项目（小说 / 剧本）"""
     __tablename__ = "projects"
 
-    # ID: 8 位 hex 字符串（不再是自增 int）
-    # 老项目迁移时由 migrate_project_ids 脚本批量转成 hex
-    # 新项目通过 default=generate_project_id 自动生成
     id = Column(String(32), primary_key=True, default=generate_project_id)
     title = Column(String(255), nullable=False)
     description = Column(Text, default="")
-    genre = Column(String(200), default="")  # 题材（逗号分隔）
+    genre = Column(String(200), default="")
     word_count = Column(Integer, default=0)
     writing_style = Column(String(50), default="平实")
     ai味去除程度 = Column(Integer, default=7)
@@ -25,6 +22,13 @@ class Project(Base):
     total_chapters = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # 项目类型：novel=小说, script=剧本
+    project_type = Column(String(20), default="novel", index=True)
+    # 剧本格式：movie / short_drama / stage_play / tv_series
+    script_format = Column(String(30), default="movie")
+    # 集数（仅 tv_series 使用）
+    script_episode_count = Column(Integer, default=1)
 
     # Relationships (cross-file, resolved by __init__.py)
     chapters = relationship("Chapter", back_populates="project", cascade="all, delete-orphan")
@@ -40,4 +44,8 @@ class Project(Base):
     inspirations = relationship("Inspiration", back_populates="project", cascade="all, delete-orphan")
     workflow_runs = relationship("WorkflowRun", back_populates="project", cascade="all, delete-orphan")
     plot_points = relationship("PlotPoint", back_populates="project", cascade="all, delete-orphan")
+    # 剧本相关
+    screenplays = relationship("Screenplay", back_populates="project", cascade="all, delete-orphan")
+    storyboards = relationship("Storyboard", back_populates="project", cascade="all, delete-orphan")
+    properties = relationship("Property", back_populates="project", cascade="all, delete-orphan")
 

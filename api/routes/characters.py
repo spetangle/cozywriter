@@ -1,4 +1,6 @@
 """角色管理 API"""
+import time
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -20,6 +22,8 @@ class CharacterCreate(BaseModel):
     profile: dict = {}
     description: str = ""
     avatar: str = ""
+    appearance: dict = {}
+    appearance_changes: list = []
 
 
 class CharacterUpdate(BaseModel):
@@ -28,6 +32,8 @@ class CharacterUpdate(BaseModel):
     profile: dict | None = None
     description: str | None = None
     avatar: str | None = None
+    appearance: dict | None = None
+    appearance_changes: list | None = None
 
 
 class CharacterResponse(BaseModel):
@@ -38,6 +44,8 @@ class CharacterResponse(BaseModel):
     profile: dict
     description: str
     avatar: str
+    appearance: dict = {}
+    appearance_changes: list = []
     created_at: datetime
     updated_at: datetime
 
@@ -68,6 +76,8 @@ async def create_character(project_id: str, data: CharacterCreate, db: Session =
         profile=data.profile,
         description=data.description,
         avatar=data.avatar,
+        appearance=data.appearance,
+        appearance_changes=data.appearance_changes,
     )
     db.add(character)
     db.commit()
@@ -106,6 +116,10 @@ async def update_character(
         character.description = data.description
     if data.avatar is not None:
         character.avatar = data.avatar
+    if data.appearance is not None:
+        character.appearance = data.appearance
+    if data.appearance_changes is not None:
+        character.appearance_changes = data.appearance_changes
 
     db.commit()
     db.refresh(character)
@@ -168,6 +182,90 @@ async def delete_character(project_id: str, character_id: int, db: Session = Dep
         pass
 
     return {"status": "ok"}
+
+
+@router.post("/{character_id}/generate-appearance")
+async def generate_appearance(project_id: str, character_id: int, db: Session = Depends(get_db)):
+    """AI 生成角色外貌草稿（异步任务）
+
+    只返回生成结果，不直接落库 —— 前端填入草稿供用户审阅/修改后，
+    再通过 PUT /characters/{id} 的 appearance 字段保存。
+    """
+    from api.tasks import submit_llm_task
+
+    character = (
+        db.query(Character)
+        .filter(Character.id == character_id, Character.project_id == project_id)
+        .first()
+    )
+    if not character:
+        raise HTTPException(status_code=404, detail="角色不存在")
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    def _async_appearance_task(task_id: str, _project_id: str, _character_id: int, _ctx: dict):
+        from storage.database import SessionLocal
+        from llm.script_pipeline import _call_llm, _parse_json
+        from storage.models import Character as _Character
+
+        _db = SessionLocal()
+        try:
+            from api.tasks import get_task
+            task = get_task(task_id)
+            if not task:
+                return
+
+            raw = _call_llm(
+                "script_appearance_gen", _ctx,
+                f"请为角色「{_ctx['character_name']}」设计详细外貌。",
+                db=_db, project_id=_project_id, task_id=task_id,
+            )
+            parsed = _parse_json(raw)
+            appearance = {}
+            if isinstance(parsed, dict):
+                inner = parsed.get("appearance")
+                appearance = inner if isinstance(inner, dict) else parsed
+            if not isinstance(appearance, dict) or not appearance:
+                task.status = "failed"
+                task.error = "未能从模型输出中解析出外貌 JSON"
+                task.completed_at = time.time()
+                return
+
+            char = _db.query(_Character).filter(_Character.id == _character_id).first()
+            task.result = {"appearance": appearance, "character_name": char.name if char else ""}
+            task.status = "completed"
+            task.progress = 100
+            task.completed_at = time.time()
+        except Exception as e:
+            from api.tasks import get_task
+            task = get_task(task_id)
+            if task:
+                task.status = "failed"
+                task.error = str(e)
+                task.completed_at = time.time()
+        finally:
+            _db.close()
+
+    ctx = {
+        "script_format": project.script_format or "movie",
+        "character_name": character.name,
+        "character_role": character.role or "配角",
+        "character_description": character.description or "（暂无描述）",
+        "project_description": project.description or "（暂无背景）",
+    }
+
+    task = submit_llm_task(
+        task_type="generate_appearance",
+        llm_call_fn=_async_appearance_task,
+        project_id=project_id,
+        description=f"生成角色外貌「{character.name}」",
+        _project_id=project_id,
+        _character_id=character_id,
+        _ctx=ctx,
+    )
+    return {"task_id": task.id, "status": "submitted"}
 
 
 @router.get("/{character_id}/references")
