@@ -53,6 +53,10 @@ Alpine.data('novelEditor', () => ({
     showPipelineSetup: false,
     showBatchGenerate: false,
     showExportModal: false,
+    exportFormat: 'txt',
+    exportRechapter: false,
+    exportWordsPerChapter: 3000,
+    exportSaveIndividual: false,
     showTextReplaceModal: false,
     showTaskManager: false,
     showPipelineProgress: false,
@@ -431,6 +435,7 @@ Alpine.data('novelEditor', () => ({
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
+                    project_id: this.projectId,
                     chapter_id: this.currentChapter.id,
                     guide: guide || '',
                 }),
@@ -526,6 +531,47 @@ Alpine.data('novelEditor', () => ({
 
     async openExportModal() {
         this.showExportModal = true;
+    },
+
+    async exportChapters() {
+        if (!this.chapters || this.chapters.length === 0) {
+            Alpine.store('app').toast('没有可导出的章节', 'warning');
+            return;
+        }
+        try {
+            const res = await fetch('/api/export/chapters', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project_id: this.projectId,
+                    chapter_ids: this.chapters.map(c => c.id),
+                    rechapter: this.exportRechapter,
+                    words_per_chapter: this.exportWordsPerChapter,
+                    format: this.exportFormat,
+                    save_individual: this.exportSaveIndividual,
+                }),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const blob = await res.blob();
+            // 优先用后端 Content-Disposition 里的文件名（中文已 RFC5987 编码）
+            let filename = this.exportFormat === 'markdown' ? '导出.md' : '导出.txt';
+            const disposition = res.headers.get('Content-Disposition') || '';
+            const m = /filename\*=UTF-8''([^;]+)/.exec(disposition);
+            if (m) filename = decodeURIComponent(m[1]);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+            this.showExportModal = false;
+            Alpine.store('app').toast('导出成功', 'success');
+        } catch (e) {
+            console.error('导出失败:', e);
+            Alpine.store('app').toast('导出失败: ' + e.message, 'error');
+        }
     },
 
     async openTextReplaceModal() {
@@ -1351,14 +1397,14 @@ window.registerPageTemplate?.('novel_editor', `
             <h3>📊 剧情点（共 <span x-text="plotPoints.length"></span> 个）</h3>
             <template x-if="plotPoints.length === 0"><p class="empty-hint">暂无剧情点</p></template>
             <table class="data-table" x-show="plotPoints.length > 0">
-              <thead><tr><th>#</th><th>标题</th><th>类型</th><th>章节</th></tr></thead>
+              <thead><tr><th>标题</th><th>重要度</th><th>状态</th><th>标签</th></tr></thead>
               <tbody>
                 <template x-for="pp in plotPoints" :key="pp.id">
                   <tr>
-                    <td x-text="pp.order || pp.point_order || '-'"></td>
                     <td x-text="pp.title || pp.name || '-'"></td>
-                    <td x-text="pp.type || '-'"></td>
-                    <td x-text="pp.chapter || '-'"></td>
+                    <td x-text="pp.importance || '-'"></td>
+                    <td x-text="pp.status || '-'"></td>
+                    <td x-text="(pp.tags && pp.tags.length) ? pp.tags.join('、') : '-'"></td>
                   </tr>
                 </template>
               </tbody>
@@ -1470,9 +1516,24 @@ window.registerPageTemplate?.('novel_editor', `
             <button class="modal-close-x" @click="showExportModal = false">×</button>
             <h2>📤 导出项目</h2>
             <p>导出《<strong x-text="project.title"></strong>》的全部章节内容</p>
+            <label>格式
+              <select x-model="exportFormat">
+                <option value="txt">TXT</option>
+                <option value="markdown">Markdown</option>
+              </select>
+            </label>
+            <label>
+              <input type="checkbox" x-model="exportRechapter"> 重新分章
+            </label>
+            <label x-show="exportRechapter">每章字数
+              <input type="number" x-model.number="exportWordsPerChapter" min="500" step="500">
+            </label>
+            <label>
+              <input type="checkbox" x-model="exportSaveIndividual"> 每章独立保存（打包 zip）
+            </label>
             <div class="form-footer">
               <button class="btn-secondary" @click="showExportModal = false">取消</button>
-              <a class="btn-primary" :href="'/api/projects/' + project.id + '/export'" @click="showExportModal = false">📥 导出 TXT</a>
+              <button class="btn-primary" @click="exportChapters()">📥 导出</button>
             </div>
           </div>
         </div>

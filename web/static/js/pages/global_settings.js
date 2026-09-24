@@ -357,8 +357,8 @@ window.registerPageTemplate?.('global_settings', `
                 <template x-if="showModelPicker && availableModels.length > 0">
                   <div class="model-picker">
                     <h5>可用模型</h5>
-                    <template x-for="m in availableModels" :key="m">
-                      <button type="button" class="model-option" @click="selectModel(m)" x-text="m"></button>
+                    <template x-for="m in availableModels" :key="m.id">
+                      <button type="button" class="model-option" @click="selectModel(m.id)" x-text="m.name"></button>
                     </template>
                   </div>
                 </template>

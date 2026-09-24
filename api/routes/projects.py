@@ -99,6 +99,7 @@ class ProjectUpdate(BaseModel):
     word_count_min: int | None = None
     word_count_max: int | None = None
     total_chapters: int | None = None
+    chapter_word_count: int | None = None  # 千字单位，写入时换算为 target_word_count
 
 
 class ProjectResponse(BaseModel):
@@ -286,6 +287,11 @@ async def update_project(project_id: str, data: ProjectUpdate, db: Session = Dep
         value = getattr(data, field)
         if value is not None:
             setattr(project, field, value)
+    # chapter_word_count 为「千字」单位，换算为 target_word_count 及上下限
+    if data.chapter_word_count is not None:
+        project.target_word_count = data.chapter_word_count * 1000
+        project.word_count_min = int(project.target_word_count * 0.9)
+        project.word_count_max = int(project.target_word_count * 1.1)
     db.commit()
     db.refresh(project)
     return project

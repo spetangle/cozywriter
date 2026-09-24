@@ -346,6 +346,12 @@ Alpine.data('scriptEditor', () => ({
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
+                    title: this.currentScreenplay.title,
+                    act: this.currentScreenplay.act,
+                    scene_type: this.currentScreenplay.scene_type,
+                    location: this.currentScreenplay.location,
+                    time_of_day: this.currentScreenplay.time_of_day,
+                    characters_present: this.currentScreenplay.characters_present,
                     content: this.currentScreenplay.content,
                     synopsis: this.currentScreenplay.synopsis,
                 }),
@@ -558,14 +564,14 @@ window.registerPageTemplate?.('script_editor', `
               <h3>📊 剧情点（共 <span x-text="plotPoints.length"></span> 个）</h3>
               <template x-if="plotPoints.length === 0"><p class="empty-hint">暂无剧情点</p></template>
               <table class="data-table" x-show="plotPoints.length > 0">
-                <thead><tr><th>#</th><th>标题</th><th>类型</th><th>章节</th></tr></thead>
+                <thead><tr><th>标题</th><th>重要度</th><th>状态</th><th>标签</th></tr></thead>
                 <tbody>
                   <template x-for="pp in plotPoints" :key="pp.id">
                     <tr>
-                      <td x-text="pp.order || pp.point_order || '-'"></td>
                       <td x-text="pp.title || pp.name || '-'"></td>
-                      <td x-text="pp.type || '-'"></td>
-                      <td x-text="pp.chapter || '-'"></td>
+                      <td x-text="pp.importance || '-'"></td>
+                      <td x-text="pp.status || '-'"></td>
+                      <td x-text="(pp.tags && pp.tags.length) ? pp.tags.join('、') : '-'"></td>
                     </tr>
                   </template>
                 </tbody>

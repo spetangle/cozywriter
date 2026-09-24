@@ -415,22 +415,15 @@ Alpine.data('questionnaire', () => ({
                 answer = this.q.answers[qid];
             }
 
-            if (qid && answer) {
-                await fetch(`/api/questionnaires/${this.q.id}/answer-step`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        question_id: qid,
-                        answer,
-                        current_step: this.q.currentStep,
-                    }),
-                });
+            if (qid && answer !== undefined && answer !== null) {
+                this.q.answers[qid] = answer;
             }
 
+            // 仅保存当前答案，不推进步骤（推进由 nextStep / answer-step 负责）
             await fetch(`/api/questionnaires/${this.q.id}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ current_step: this.q.currentStep }),
+                body: JSON.stringify({ answers: this.q.answers }),
             });
 
             this.q.hasUnsavedChanges = false;

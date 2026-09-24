@@ -15,6 +15,7 @@ Alpine.data('projectSettings', () => ({
     bootstrapLoading: false,
     isRegeneratingSettings: false,
     selectedProvider: null,
+    settingsChapterWordCount: 0,
 
     get projectId() {
         return Alpine.store('app').currentRoute.params.id;
@@ -36,6 +37,7 @@ Alpine.data('projectSettings', () => ({
             const res = await fetch(`/api/projects/${id}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             this.project = await res.json();
+            this.settingsChapterWordCount = Math.round((this.project.target_word_count || 0) / 1000);
         } catch (e) {
             console.error('加载项目失败:', e);
             Alpine.store('app').toast('加载项目失败: ' + e.message, 'error');
@@ -115,6 +117,7 @@ Alpine.data('projectSettings', () => ({
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const updated = await res.json();
             this.project = updated;
+            this.settingsChapterWordCount = Math.round((updated.target_word_count || 0) / 1000);
             Alpine.store('app').toast('保存成功', 'success');
         } catch (e) {
             console.error('保存失败:', e);
@@ -224,7 +227,7 @@ window.registerPageTemplate?.('project_settings', `
             <input type="number" x-model.number="project.total_chapters" @change="updateProject('total_chapters', project.total_chapters)">
           </label>
           <label>章节字数（千字）
-            <input type="number" x-model.number="project.chapter_word_count" @change="updateProject('chapter_word_count', project.chapter_word_count)">
+            <input type="number" x-model.number="settingsChapterWordCount" @change="updateProject('chapter_word_count', settingsChapterWordCount)">
           </label>
           <label class="full-width">描述
             <textarea x-model="project.description" rows="3" @change="updateProject('description', project.description)"></textarea>
