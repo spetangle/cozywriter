@@ -1,0 +1,33 @@
+# 统一行尾：文本文件入库一律 LF，Windows 批处理/脚本保持 CRLF
+# 参考：https://git-scm.com/docs/gitattributes
+* text=auto
+
+*.py     text eol=lf
+*.js     text eol=lf
+*.mjs    text eol=lf
+*.css    text eol=lf
+*.html   text eol=lf
+*.htm    text eol=lf
+*.md     text eol=lf
+*.txt    text eol=lf
+*.json   text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.toml   text eol=lf
+*.cfg    text eol=lf
+*.ini    text eol=lf
+*.sh     text eol=lf
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+*.ps1    text eol=crlf
+
+# 二进制，禁止行尾转换
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.woff   binary
+*.woff2  binary
+*.safetensors binary
+*.bin    binary
