@@ -7,7 +7,7 @@ from storage.models import OutlineNode, Project
 from datetime import datetime
 
 
-router = APIRouter(prefix="/api/projects/{project_id}/outline", tags=["大纲"])
+router = APIRouter(prefix="/api/projects/{project_id}/outline-nodes", tags=["大纲节点"])
 
 
 # ─── Schemas ───
