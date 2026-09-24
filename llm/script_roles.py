@@ -454,6 +454,52 @@ ROLE_SCRIPT_REVISION = Role(
 
 
 # ═══════════════════════════════════════════════════════════════
+# Role S7b: 场景细纲修订
+#
+# 细纲修订与正文修订的输出协议不同：正文是纯文本，细纲必须返回 JSON。
+# 不能复用 ROLE_SCRIPT_REVISION，否则 provider 会被告知 use_json=False，
+# 最终只能把 JSON 修订静默降级为原细纲。
+# ═══════════════════════════════════════════════════════════════
+
+SCRIPT_OUTLINE_REVISION_SYSTEM = """你是一位专业的剧本编剧，负责根据评审意见修订单个场景的详细细纲。
+
+【语言要求】
+所有输出内容均使用中文。
+
+【原细纲】
+{content}
+
+【评审意见】
+{critique}
+
+【修改建议】
+{suggestions}
+
+请保留原细纲中仍然有效的设计，只修复评审指出的问题。直接输出修订后的完整场景细纲 JSON，
+不要输出解释、Markdown 代码块或任何 JSON 之外的内容。返回结构：
+{{
+  "scene_goal": "场景叙事目标",
+  "emotion_arc": "紧张→释放→悬疑",
+  "dialogue_points": ["对白要点1", "对白要点2"],
+  "action_notes": ["动作设计1", "动作设计2"],
+  "transition": "场景转换方式",
+  "estimated_duration": "预估时长"
+}}"""
+
+
+SCRIPT_OUTLINE_REVISION_USER = """请根据评审意见修订场景细纲，直接返回 JSON。"""
+
+
+ROLE_SCRIPT_OUTLINE_REVISION = Role(
+    name="script_outline_revision",
+    system_prompt=SCRIPT_OUTLINE_REVISION_SYSTEM,
+    user_prompt_template=SCRIPT_OUTLINE_REVISION_USER,
+    max_tokens=2048,
+    temperature=0.5,
+)
+
+
+# ═══════════════════════════════════════════════════════════════
 # Role S8: 分镜稿生成（基于已定稿正文）
 # ═══════════════════════════════════════════════════════════════
 
@@ -651,6 +697,7 @@ SCRIPT_ROLES = {
     "script_scene_gen": ROLE_SCRIPT_SCENE_GEN,
     "script_review": ROLE_SCRIPT_REVIEW,
     "script_revision": ROLE_SCRIPT_REVISION,
+    "script_outline_revision": ROLE_SCRIPT_OUTLINE_REVISION,
     "script_storyboard_gen": ROLE_SCRIPT_STORYBOARD,
     "script_post_process": ROLE_SCRIPT_POST_PROCESS,
     "script_consistency_checker": ROLE_SCRIPT_CONSISTENCY,
@@ -666,6 +713,7 @@ SCRIPT_ROLE_NAME_CN = {
     "script_scene_gen": "剧本正文生成",
     "script_review": "剧本评审",
     "script_revision": "剧本修订",
+    "script_outline_revision": "场景细纲修订",
     "script_storyboard_gen": "分镜稿生成",
     "script_post_process": "剧本后处理",
     "script_consistency_checker": "剧本一致性检查",

@@ -28,74 +28,91 @@ from llm.usage_tracker import generate_llm_call_id
 # ═══════════════════════════════════════════════════════════════
 
 def _parse_json(text: str) -> dict | list | str:
-    """宽松 JSON 解析（容忍 markdown / 前缀后缀 / 字符串内换行等常见问题）"""
-    if not text or not text.strip():
+    """解析 LLM 返回的 JSON，兼容代码块、前后说明和常见格式错误。
+
+    剧本各阶段对 JSON 的容错要求比普通 ``json.loads`` 高：模型经常会
+    在 JSON 前后加解释、使用尾逗号、在字符串中放未转义换行，或把对象/数组
+    包在 Markdown 代码块中。这里先按 JSON decoder 扫描完整的结构（不会把
+    字符串里的 ``{`` / ``}`` 误认为结构边界），再逐层修复；最后使用项目已
+    声明的 ``json_repair`` 依赖兜底。
+    """
+    if not isinstance(text, str) or not text.strip():
         raise ValueError("empty response from LLM")
-    text = text.strip()
-    # 去掉 markdown 代码块包裹
-    if text.startswith("```"):
-        end_marker = text.find("```", 3)
-        if end_marker != -1:
-            text = text[3:end_marker].strip()
-            if text.startswith("json"):
-                text = text[4:].strip()
-        else:
-            text = text[3:].strip()
-            if text.startswith("json"):
-                text = text[4:].strip()
 
-    # 尝试提取最大 {…} 或 […] 块
-    start_brace = text.find("{")
-    start_bracket = text.find("[")
-    if start_brace == -1 and start_bracket == -1:
-        raise ValueError("No JSON structure found in response")
+    original = text
+    cleaned = text.strip()
 
-    if start_brace != -1 and (start_bracket == -1 or start_brace < start_bracket):
-        # 提取 {...}
-        depth = 0
-        end = -1
-        for i in range(start_brace, len(text)):
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    end = i
-                    break
-        if end != -1:
-            text = text[start_brace:end + 1]
-    else:
-        # 提取 [...]
-        depth = 0
-        end = -1
-        for i in range(start_bracket, len(text)):
-            if text[i] == "[":
-                depth += 1
-            elif text[i] == "]":
-                depth -= 1
-                if depth == 0:
-                    end = i
-                    break
-        if end != -1:
-            text = text[start_bracket:end + 1]
+    # 去掉 ```json ... ``` / ``` ... ``` 包装。LLM 也可能只在开头写
+    # ```json 而没有结束标记，因此两种情况都处理。
+    if cleaned.startswith("```"):
+        fence = re.match(r"^```(?:json)?\s*", cleaned, flags=re.IGNORECASE)
+        if fence:
+            cleaned = cleaned[fence.end():]
+        closing = re.search(r"```\s*$", cleaned)
+        if closing:
+            cleaned = cleaned[:closing.start()].strip()
 
-    # 直接解析
+    # 先尝试修复格式错误（尾逗号、raw 换行、中文逗号等），而不是一上来
+    # 就扫描 raw_decode：对于“外层对象尾逗号 + 内层合法对象”的响应，
+    # raw_decode 会先解析出内层对象，导致返回不完整的 JSON。
+    no_control_chars = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", " ", cleaned)
+    no_trailing_commas = re.sub(r",\s*([}\]])", r"\1", no_control_chars)
+    repaired_candidates = (
+        cleaned,
+        no_control_chars,
+        no_trailing_commas,
+    )
+    for candidate in repaired_candidates:
+        try:
+            parsed = json.loads(candidate, strict=False)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(parsed, (dict, list)):
+            return parsed
+
+    # raw_decode 能正确处理字符串中的花括号/方括号，也能从解释文字中定位
+    # JSON 结构。若存在多个候选，选跨度最大的那个（通常是外层完整结构）。
+    decoder = json.JSONDecoder()
+    best = None
+    best_span = -1
+    for index, char in enumerate(cleaned):
+        if char not in "[{":
+            continue
+        try:
+            parsed, end = decoder.raw_decode(cleaned[index:])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(parsed, (dict, list)):
+            continue
+        span = end
+        if span > best_span:
+            best, best_span = parsed, span
+    if best is not None:
+        return best
+
+    # json_repair 能处理单引号、未闭合引号、注释、中文标点等 LLM 常见错误。
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
+        import json_repair
 
-    # 尝试修复常见问题后解析
-    # 移除尾部多余逗号
-    cleaned = re.sub(r',\s*([}\]])', r'\1', text)
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
+        repaired = json_repair.repair_json(cleaned, return_objects=True)
+        if isinstance(repaired, (dict, list)):
+            return repaired
+        if isinstance(repaired, str) and repaired.strip():
+            try:
+                parsed = json.loads(repaired, strict=False)
+            except (json.JSONDecodeError, TypeError):
+                parsed = None
+            if isinstance(parsed, (dict, list)):
+                return parsed
+    except ImportError:
+        # requirements.txt 已声明该依赖，但保留无依赖时的安全降级。
         pass
+    except Exception as exc:
+        logger.warning(f"[ScriptPipeline] json_repair failed: {exc}")
 
     raise json.JSONDecodeError(
-        f"JSON parse failed (text len={len(text)})",
-        text[:200],
+        f"JSON parse failed (text len={len(original)})",
+        original[:200],
         0,
     )
 
@@ -135,12 +152,12 @@ def _parse_storyboard_flexible(text: str) -> list[dict]:
     try:
         result = _parse_json(text)
         if isinstance(result, list):
-            return result
+            return [item for item in result if isinstance(item, dict)]
         if isinstance(result, dict):
             # 可能是 {"shots": [...]} 或 {"storyboard": [...]}
             for key in ("shots", "storyboard", "storyboards", "items", "data"):
                 if key in result and isinstance(result[key], list):
-                    return result[key]
+                    return [item for item in result[key] if isinstance(item, dict)]
             # 单个分镜对象
             return [result]
     except Exception:
@@ -199,6 +216,38 @@ def _parse_storyboard_flexible(text: str) -> list[dict]:
     return shots
 
 
+def _normalize_storyboard_data(data: list) -> list[dict]:
+    """规范化分镜列表并按镜号去重。
+
+    LLM 偶尔会重复输出同一个 ``shot_number``，或者给部分镜头遗漏编号。
+    统一在写库前整理，避免同一场景出现重复行，也避免后续 ``.get`` 因
+    非字典项崩溃。重复或非法镜号会被顺延到下一个可用编号。
+    """
+    normalized: list[dict] = []
+    seen_numbers: set[int] = set()
+    next_number = 1
+
+    for raw in data or []:
+        if not isinstance(raw, dict):
+            continue
+
+        shot = dict(raw)
+        try:
+            number = int(shot.get("shot_number"))
+        except (TypeError, ValueError):
+            number = 0
+        if number <= 0 or number in seen_numbers:
+            while next_number in seen_numbers:
+                next_number += 1
+            number = next_number
+        seen_numbers.add(number)
+        shot["shot_number"] = number
+        normalized.append(shot)
+        next_number = max(next_number, number + 1)
+
+    return normalized
+
+
 def _extract_shot_fields(text: str, shot_number: int) -> dict:
     """从分镜文本片段中提取结构化字段"""
     shot = {
@@ -243,14 +292,16 @@ def _extract_shot_fields(text: str, shot_number: int) -> dict:
 
 def _call_llm(role_name: str, ctx: dict, user_msg: str,
               provider: str | None = None, db=None,
-              project_id: str | None = None, task_id: str | None = None) -> str:
+              project_id: str | None = None, task_id: str | None = None,
+              use_json: bool | None = None) -> str:
     """通用 LLM 调用 helper - 剧本专用"""
     role = get_script_role(role_name)
     system = role.build_system(ctx)
     user = role.build_user({**ctx, "context": user_msg, "prompt": user_msg})
     llm = LLMFactory.create(provider=provider, db=db)
-    # 剧本正文和修订不需要 JSON 输出
-    use_json = role_name not in ("script_scene_gen", "script_revision")
+    # 剧本正文和正文修订不需要 JSON 输出；细纲修订有独立的 JSON role。
+    if use_json is None:
+        use_json = role_name not in ("script_scene_gen", "script_revision")
     llm_call_id = generate_llm_call_id(task_id)
     return llm.generate(
         prompt=user,
@@ -278,7 +329,10 @@ def _build_screenplay_prep_info(db, project_id: str, screenplay_id: int) -> dict
     if not project:
         raise ValueError(f"Project {project_id} not found")
 
-    screenplay = db.query(Screenplay).filter(Screenplay.id == screenplay_id).first()
+    screenplay = db.query(Screenplay).filter(
+        Screenplay.id == screenplay_id,
+        Screenplay.project_id == project_id,
+    ).first()
     if not screenplay:
         raise ValueError(f"Screenplay {screenplay_id} not found")
 
@@ -317,17 +371,23 @@ def _build_screenplay_prep_info(db, project_id: str, screenplay_id: int) -> dict
         [f"- {c.name}：{c.appearance_text or (c.description or '')[:200]}" for c in chars]
     ) or "（暂无外貌信息）"
 
-    # 项目大纲参考
+    # 项目大纲参考。ProjectOutline 没有 synopsis 字段，正文在 outline_text。
     project_outline = ""
     try:
         from storage.models import ProjectOutline
         po = db.query(ProjectOutline).filter(ProjectOutline.project_id == project_id).first()
         if po:
-            project_outline = (po.synopsis or "")[:2000]
-    except Exception:
-        pass
+            outline_parts = [
+                po.outline_text or "",
+                po.pacing_notes or "",
+            ]
+            if po.structure:
+                outline_parts.append(json.dumps(po.structure, ensure_ascii=False))
+            project_outline = "\n".join(part for part in outline_parts if part)[:4000]
+    except Exception as exc:
+        logger.warning(f"[ScriptPipeline] 读取项目大纲失败: {exc}")
 
-    # 伏笔
+    # 伏笔。Foreshadowing 的正文在 content，description 字段并不存在。
     foreshadowings = ""
     try:
         from storage.models import Foreshadowing
@@ -336,22 +396,41 @@ def _build_screenplay_prep_info(db, project_id: str, screenplay_id: int) -> dict
             Foreshadowing.status == "active",
         ).all()
         if active:
-            foreshadowings = "\n".join([f"- {f.description}" for f in active])
-    except Exception:
-        pass
+            foreshadowings = "\n".join([
+                f"- {f.title or '未命名伏笔'}：{f.content or ''}"
+                for f in active
+            ])
+    except Exception as exc:
+        logger.warning(f"[ScriptPipeline] 读取伏笔失败: {exc}")
 
-    # 角色弧光
+    # 角色弧光。CharacterArc 只保存 character_id，角色名需要从 Character
+    # 反查；旧代码访问了不存在的 character_name/arc_description，导致整段
+    # 弧光上下文被 try/except 静默吞掉。
     character_arcs = ""
     try:
         from storage.models import CharacterArc
         arcs = db.query(CharacterArc).filter(CharacterArc.project_id == project_id).all()
         if arcs:
-            character_arcs = "\n".join([
-                f"- {a.character_name or ''}：{a.current_state or a.arc_description or ''}"
-                for a in arcs
-            ])
-    except Exception:
-        pass
+            character_by_id = {
+                c.id: c
+                for c in db.query(Character).filter(Character.project_id == project_id).all()
+            }
+            arc_lines = []
+            for arc in arcs:
+                character = character_by_id.get(arc.character_id)
+                name = character.name if character else f"角色#{arc.character_id}"
+                state = (
+                    arc.current_state
+                    or arc.start_state
+                    or arc.end_state
+                    or arc.key_behavior
+                    or ""
+                )
+                if name or state:
+                    arc_lines.append(f"- {name}：{state}")
+            character_arcs = "\n".join(arc_lines)
+    except Exception as exc:
+        logger.warning(f"[ScriptPipeline] 读取角色弧光失败: {exc}")
 
     return {
         "project": project,
@@ -436,7 +515,24 @@ def run_script_generation_pipeline(
                 "script_scene_outline_gen", common_ctx, user_msg,
                 provider=provider, db=db, project_id=project_id, task_id=task_id,
             )
-            return _parse_json(raw)
+            try:
+                parsed = _parse_json(raw)
+                return parsed if isinstance(parsed, dict) else {
+                    "scene_goal": screenplay.synopsis or "",
+                    "emotion_arc": "",
+                    "dialogue_points": [],
+                    "action_notes": [],
+                    "transition": "",
+                }
+            except (json.JSONDecodeError, ValueError) as exc:
+                logger.warning(f"[ScriptPipeline] 场景细纲解析失败，使用最小细纲: {exc}")
+                return {
+                    "scene_goal": screenplay.synopsis or "",
+                    "emotion_arc": "",
+                    "dialogue_points": [],
+                    "action_notes": [],
+                    "transition": "",
+                }
 
         outline_data, _ = _run_stage("2_outline_gen", _gen_outline)
 
@@ -452,7 +548,14 @@ def run_script_generation_pipeline(
                 "script_review", review_ctx, user_msg,
                 provider=provider, db=db, project_id=project_id, task_id=task_id,
             )
-            return _parse_json(raw)
+            try:
+                parsed = _parse_json(raw)
+                return parsed if isinstance(parsed, dict) else {
+                    "scores": {}, "issues": [], "overall_comment": "评审结果不是对象，已跳过"
+                }
+            except (json.JSONDecodeError, ValueError) as exc:
+                logger.warning(f"[ScriptPipeline] 细纲评审解析失败，跳过修订: {exc}")
+                return {"scores": {}, "issues": [], "overall_comment": "评审解析失败"}
 
         outline_review, _ = _run_stage("3_outline_review", _review_outline)
 
@@ -460,7 +563,12 @@ def run_script_generation_pipeline(
         high_issues = []
         if isinstance(outline_review, dict):
             issues = outline_review.get("issues", [])
-            high_issues = [i for i in issues if i.get("severity") == "high"]
+            if not isinstance(issues, list):
+                issues = []
+            high_issues = [
+                i for i in issues
+                if isinstance(i, dict) and i.get("severity") == "high"
+            ]
 
         if high_issues:
             def _revise_outline():
@@ -476,8 +584,9 @@ def run_script_generation_pipeline(
                 }
                 user_msg = f"请根据评审意见修订场景 {screenplay.scene_number} 的细纲。请以 JSON 格式输出修订后的细纲。"
                 raw = _call_llm(
-                    "script_revision", revise_ctx, user_msg,
+                    "script_outline_revision", revise_ctx, user_msg,
                     provider=provider, db=db, project_id=project_id, task_id=task_id,
+                    use_json=True,
                 )
                 try:
                     return _parse_json(raw)
@@ -537,10 +646,19 @@ def run_script_generation_pipeline(
         need_revision = False
         if isinstance(content_review, dict):
             scores = content_review.get("scores", {})
-            avg_score = sum(scores.values()) / len(scores) if scores else 0
+            if not isinstance(scores, dict):
+                scores = {}
+            numeric_scores = [
+                float(value) for value in scores.values()
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            ]
+            avg_score = sum(numeric_scores) / len(numeric_scores) if numeric_scores else 0
+            issues = content_review.get("issues", [])
+            if not isinstance(issues, list):
+                issues = []
             high_content_issues = [
-                i for i in content_review.get("issues", [])
-                if i.get("severity") == "high"
+                i for i in issues
+                if isinstance(i, dict) and i.get("severity") == "high"
             ]
             # 平均分低于 6.5 或有 high severity 问题 → 需要修订
             need_revision = avg_score < 6.5 or len(high_content_issues) > 0
@@ -549,7 +667,8 @@ def run_script_generation_pipeline(
             def _revise_content():
                 suggestions = "\n".join([
                     f"- [{i.get('severity', 'high')}] {i.get('description', '')} → {i.get('suggestion', '')}"
-                    for i in content_review.get("issues", [])
+                    for i in issues
+                    if isinstance(i, dict)
                 ])
                 revise_ctx = {
                     **common_ctx,
@@ -592,28 +711,40 @@ def run_script_generation_pipeline(
                 "script_storyboard_gen", storyboard_ctx, user_msg,
                 provider=provider, db=db, project_id=project_id, task_id=task_id,
             )
-            return _parse_storyboard_flexible(raw)
+            return _normalize_storyboard_data(_parse_storyboard_flexible(raw))
 
         storyboard_data, _ = _run_stage("9_storyboard_gen", _gen_storyboard)
 
-        # 保存分镜稿到 Storyboard 表
+        # 保存分镜稿到 Storyboard 表。生成任务可能重跑：同一事务里先删除
+        # 该场景旧分镜，再写入本次去重后的结果，避免重复/残留镜号。
+        existing_rows = (
+            db.query(Storyboard)
+            .filter(
+                Storyboard.project_id == project_id,
+                Storyboard.screenplay_id == screenplay_id,
+            )
+            .all()
+        )
+        for existing in existing_rows:
+            db.delete(existing)
+
         for shot_data in storyboard_data:
-            sb = Storyboard(
+            shot_characters = shot_data.get("characters")
+            db.add(Storyboard(
                 screenplay_id=screenplay_id,
                 project_id=project_id,
-                shot_number=shot_data.get("shot_number", 1),
-                shot_type=shot_data.get("shot_type", "中景"),
-                camera_angle=shot_data.get("camera_angle", "平视"),
-                camera_movement=shot_data.get("camera_movement", "固定"),
-                duration_estimate=shot_data.get("duration_estimate", "3-5秒"),
-                location=screenplay.location or "",
-                characters=screenplay.characters_present or [],
-                visual_description=shot_data.get("visual_description", ""),
-                dialogue=shot_data.get("dialogue", ""),
-                sound_effects=shot_data.get("sound_effects", ""),
-                notes=shot_data.get("notes", ""),
-            )
-            db.add(sb)
+                shot_number=int(shot_data.get("shot_number") or 1),
+                shot_type=shot_data.get("shot_type") or "中景",
+                camera_angle=shot_data.get("camera_angle") or "平视",
+                camera_movement=shot_data.get("camera_movement") or "固定",
+                duration_estimate=shot_data.get("duration_estimate") or "3-5秒",
+                location=shot_data.get("location") or screenplay.location or "",
+                characters=list(shot_characters) if isinstance(shot_characters, list) else list(screenplay.characters_present or []),
+                visual_description=shot_data.get("visual_description") or "",
+                dialogue=shot_data.get("dialogue") or "",
+                sound_effects=shot_data.get("sound_effects") or "",
+                notes=shot_data.get("notes") or "",
+            ))
         db.commit()
 
         # ── Step 10: 后处理 ──
@@ -628,7 +759,13 @@ def run_script_generation_pipeline(
                 "script_post_process", pp_ctx, user_msg,
                 provider=provider, db=db, project_id=project_id, task_id=task_id,
             )
-            return _parse_json(raw)
+            try:
+                parsed = _parse_json(raw)
+                return parsed if isinstance(parsed, dict) else {}
+            except (json.JSONDecodeError, ValueError) as exc:
+                # 后处理是增强步骤，解析失败不应丢弃已经生成并保存的正文/分镜。
+                logger.warning(f"[ScriptPipeline] 后处理解析失败，跳过增强: {exc}")
+                return {}
 
         post_process_result, _ = _run_stage("10_post_process", _post_process)
 

@@ -603,6 +603,7 @@ SCRIPT_STAGE_DEFS = {
     "script_stage_3d_arcs": {
         "name": "角色弧光 + 外貌变化规划",
         "description": "所有角色的弧光（CharacterArc[]）与造型变化节点",
+        "needs_llm": True,
         "depends_on": ["script_stage_3a_protagonist", "script_stage_3b_antagonist", "script_stage_3c_supporting"],
         "outputs": ["arcs"],
         "max_tokens": 2048,
@@ -611,6 +612,7 @@ SCRIPT_STAGE_DEFS = {
     "script_stage_4a_outline": {
         "name": "剧本大纲（幕结构 + 场景序列）",
         "description": "acts + scenes[]，scenes 将落库为 Screenplay 行",
+        "needs_llm": True,
         "depends_on": ["script_stage_3d_arcs"],
         "outputs": ["acts", "scenes"],
         "max_tokens": 8192,
@@ -619,6 +621,7 @@ SCRIPT_STAGE_DEFS = {
     "script_stage_4b_foreshadow": {
         "name": "伏笔 / 视觉母题规划",
         "description": "Foreshadowing[]（按场景号埋设与回收）",
+        "needs_llm": True,
         "depends_on": ["script_stage_4a_outline"],
         "outputs": ["foreshadowings"],
         "max_tokens": 2048,
@@ -863,6 +866,46 @@ def resolve_project_type(project_id, db) -> str:
         return "novel"
 
 
+def _positive_int(value, default: int = 0) -> int:
+    """把用户/LLM 输入安全转换为正整数。"""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number > 0 else default
+
+
+def _build_bootstrap_locked(user_input: dict, project_type: str) -> dict:
+    """按项目类型构造 bootstrap 的硬约束。
+
+    小说和剧本的篇幅概念不同：把 ``chapter_word_count`` / ``total_chapters``
+    注入剧本 prompt 会误导 LLM，也会让 rerun 与首次执行得到不同上下文。
+    """
+    user_input = user_input or {}
+    project_type = "script" if project_type == "script" else "novel"
+    locked = {
+        "title": user_input.get("title", ""),
+        "genre": user_input.get("genre", ""),
+        "description": user_input.get("description", ""),
+        "project_type": project_type,
+    }
+
+    if project_type == "script":
+        locked["script_format"] = user_input.get("script_format") or "movie"
+        episodes = _positive_int(user_input.get("script_episode_count"))
+        if episodes:
+            locked["script_episode_count"] = episodes
+        total_scenes = _positive_int(user_input.get("total_scenes"))
+        if total_scenes:
+            locked["total_scenes"] = total_scenes
+    else:
+        locked["chapter_word_count"] = user_input.get("chapter_word_count", 0)
+        total_chapters = _positive_int(user_input.get("total_chapters"))
+        if total_chapters:
+            locked["total_chapters"] = total_chapters
+    return locked
+
+
 # ═══════════════════════════════════════════════════════════════
 # 规划：根据用户已填字段动态裁剪 stage
 # ═══════════════════════════════════════════════════════════════
@@ -940,27 +983,7 @@ def run_bootstrap_sync(run_id: int, user_input: dict, db=None) -> dict:
         project_type = resolve_project_type(run.project_id, db)
         stage_results["_meta"]["project_type"] = project_type
 
-        locked = {
-            "title": user_input.get("title", ""),
-            "genre": user_input.get("genre", ""),
-            "description": user_input.get("description", ""),
-            "project_type": project_type,
-        }
-        if project_type == "script":
-            locked["script_format"] = user_input.get("script_format") or "movie"
-            episodes = user_input.get("script_episode_count") or 0
-            if episodes and int(episodes) > 0:
-                locked["script_episode_count"] = int(episodes)
-            # 用户指定了场景总数则作为硬约束
-            user_total_scenes = user_input.get("total_scenes", 0)
-            if user_total_scenes and int(user_total_scenes) > 0:
-                locked["total_scenes"] = int(user_total_scenes)
-        else:
-            locked["chapter_word_count"] = user_input.get("chapter_word_count", 0)
-            # 如果用户指定了预计总章节数（> 0），也作为硬约束传入 LLM
-            user_total_chapters = user_input.get("total_chapters", 0)
-            if user_total_chapters and int(user_total_chapters) > 0:
-                locked["total_chapters"] = int(user_total_chapters)
+        locked = _build_bootstrap_locked(user_input, project_type)
 
         # 用户已填的选填
         user_filled = {
@@ -1093,13 +1116,20 @@ def run_bootstrap_sync(run_id: int, user_input: dict, db=None) -> dict:
                     "error": str(e),
                 })
 
-        # 计算总状态
+        # 计算总状态。只统计 run.stages 中的真实 stage；stage_results 还
+        # 包含用于 rerun 的 _meta 元数据，不能把它当作未完成 stage。
+        stage_values = [
+            stage_results.get(stage.get("id"), {})
+            for stage in (run.stages or [])
+        ]
         has_failure = any(
-            r.get("status") == "failed" for r in stage_results.values()
+            isinstance(result, dict) and result.get("status") == "failed"
+            for result in stage_values
         )
         all_done = all(
-            r.get("status") in ("ok", "user_filled", "skipped")
-            for r in stage_results.values()
+            isinstance(result, dict)
+            and result.get("status") in ("ok", "user_filled", "skipped")
+            for result in stage_values
         )
 
         if has_failure:
@@ -2157,9 +2187,10 @@ def _parse_json(text: str) -> dict:
             f"  ...{original[-600:] if len(original) > 600 else original}"
         )
         # 同时把可能的“最优修复版”也记录下来，方便人工诊断
+        has_trailing_comma = bool(re.search(r",\s*[}\]]", original))
         logger.warning(
             f"[JSON-parse] 原文长度={len(original)}，含中文逗号={('，' in original)}, "
-            f"含尾随逗号={bool(re.search(r',\\s*[}\\]]', original))}, "
+            f"含尾随逗号={has_trailing_comma}, "
             f"含 markdown 包装={original.strip().startswith('```')}"
         )
     except Exception:
@@ -2192,8 +2223,16 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
     run = db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
     if not run:
         return {"status": "failed", "error": "Run not found"}
+    if str(run.project_id) != str(project_id):
+        return {"status": "failed", "error": "Run does not belong to project"}
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        return {"status": "failed", "error": "Project not found"}
 
     results = run.stage_results or {}
+    if (getattr(project, "project_type", None) or "novel") == "script":
+        return _commit_script_bootstrap(project, run, results, db)
 
     try:
         # ── 清理旧数据（重新生成时全量覆盖）──
@@ -2512,6 +2551,340 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
         return {"status": "failed", "error": str(e)}
 
 
+def _commit_script_bootstrap(project, run, results: dict, db) -> dict:
+    """把 script bootstrap 的产物写入剧本相关表。
+
+    剧本和小说共用 WorkflowRun，但落库目标完全不同。这里独立处理，避免
+    小说 commit 的“先删角色、再按小说 stage 写 Chapter”逻辑误伤剧本项目。
+    所有写入在末尾统一 commit，失败时可以整体回滚。
+    """
+    from storage.models import (
+        Theme, WorldEntry, Character, CharacterArc, CharacterRelation,
+        ProjectOutline, Foreshadowing,
+    )
+    from storage.models.screenplay import Screenplay
+
+    project_id = project.id
+    stage_results = results or {}
+
+    def _payload(stage_id: str, default=None):
+        info = stage_results.get(stage_id) or {}
+        if info.get("status") == "user_filled":
+            value = info.get("user_values")
+        elif info.get("status") == "ok":
+            value = info.get("data")
+        else:
+            value = default
+        return value if value is not None else ({} if default is None else default)
+
+    def _characters_from(stage_id: str, role: str) -> list[dict]:
+        data = _payload(stage_id)
+        if isinstance(data, str):
+            # 兼容旧 run：user_filled 可能直接存了自由文本。
+            parsed = _parse_user_filled_character(
+                data, role, role, db=db, project_id=project_id
+            )
+            return [parsed] if parsed else []
+        if not isinstance(data, dict):
+            return []
+        # user_filled 的兼容形态：{"protagonist": "自由文本"} /
+        # {"antagonist": "自由文本"} / {"supporting": "自由文本"}。
+        field = {
+            "script_stage_3a_protagonist": "protagonist",
+            "script_stage_3b_antagonist": "antagonist",
+            "script_stage_3c_supporting": "supporting",
+        }.get(stage_id)
+        if field and isinstance(data.get(field), str):
+            parsed = _parse_user_filled_character(
+                data[field], role, role, db=db, project_id=project_id
+            )
+            return [parsed] if parsed else []
+        items = data.get("characters")
+        if not isinstance(items, list):
+            items = data.get("supporting") if stage_id.endswith("supporting") else None
+        if isinstance(items, list):
+            return [item for item in items if isinstance(item, dict)]
+        if data.get("name") or data.get("profile") or data.get("description"):
+            return [data]
+        return []
+
+    def _normalize_scenes(data) -> list[dict]:
+        if not isinstance(data, dict):
+            return []
+        raw_scenes = data.get("scenes")
+        if not isinstance(raw_scenes, list):
+            return []
+        scenes: list[dict] = []
+        used_numbers: set[int] = set()
+        next_number = 1
+        for raw in raw_scenes:
+            if not isinstance(raw, dict):
+                continue
+            number = _positive_int(raw.get("scene_number"))
+            if not number or number in used_numbers:
+                while next_number in used_numbers:
+                    next_number += 1
+                number = next_number
+            used_numbers.add(number)
+            characters = raw.get("characters_present")
+            if not isinstance(characters, list):
+                characters = []
+            scenes.append({
+                "scene_number": number,
+                "title": str(raw.get("title") or raw.get("scene_title") or f"场景{number}"),
+                "act": str(raw.get("act") or "第一幕"),
+                "scene_type": str(raw.get("scene_type") or "对话场景"),
+                "location": str(raw.get("location") or ""),
+                "time_of_day": str(raw.get("time_of_day") or "白天"),
+                "characters_present": [str(name) for name in characters if name],
+                "synopsis": str(raw.get("synopsis") or ""),
+            })
+            next_number = max(next_number, number + 1)
+        return sorted(scenes, key=lambda item: item["scene_number"])
+
+    try:
+        meta_input = (stage_results.get("_meta") or {}).get("user_input") or {}
+        # 这些字段是项目创建时的用户硬约束，stage 结果不应覆盖它们。
+        if meta_input.get("script_format"):
+            project.script_format = str(meta_input["script_format"])
+        if meta_input.get("script_episode_count"):
+            project.script_episode_count = _positive_int(
+                meta_input.get("script_episode_count"), project.script_episode_count or 1
+            )
+
+        # bootstrap 产物属于可重建设定；清理后再写，避免重复 commit 产生
+        # 多份主题/世界观/关系。Screenplay 正文和分镜不删除，后面按场景号
+        # upsert，以保留用户已经生成的内容。
+        db.query(Theme).filter(Theme.project_id == project_id).delete(synchronize_session="fetch")
+        db.query(WorldEntry).filter(WorldEntry.project_id == project_id).delete(synchronize_session="fetch")
+        db.query(CharacterRelation).filter(CharacterRelation.project_id == project_id).delete(synchronize_session="fetch")
+        db.query(CharacterArc).filter(CharacterArc.project_id == project_id).delete(synchronize_session="fetch")
+        db.query(Foreshadowing).filter(Foreshadowing.project_id == project_id).delete(synchronize_session="fetch")
+
+        # ── Stage 1 / 2：项目基调、风格、世界观 ──
+        base = _payload("script_stage_1_base")
+        if isinstance(base, dict):
+            # Project 目前没有 total_scenes/total_acts 列，基础估算保留在
+            # stage_results 中；这里只更新已有项目字段，不伪造章节数。
+            project.total_chapters = project.total_chapters or 0
+
+        theme_data = _payload("script_stage_2a_theme")
+        if isinstance(theme_data, dict) and theme_data.get("theme"):
+            db.add(Theme(
+                project_id=project_id,
+                theme_type="core_theme",
+                title=str(theme_data.get("theme")),
+                description=f"基调：{theme_data.get('tone', '')}",
+            ))
+
+        style_data = _payload("script_stage_2b_style")
+        if isinstance(style_data, dict) and style_data.get("style"):
+            project.writing_style = str(style_data["style"])
+
+        world_data = _payload("script_stage_2c_world")
+        if isinstance(world_data, str):
+            world_data = {"premise": world_data}
+        if isinstance(world_data, dict):
+            entries = world_data.get("world_entries")
+            if not isinstance(entries, list):
+                entries = []
+            for entry in entries:
+                if not isinstance(entry, dict) or not entry.get("content"):
+                    continue
+                db.add(WorldEntry(
+                    project_id=project_id,
+                    category=str(entry.get("category") or "背景设定"),
+                    title=str(entry.get("title") or "世界观背景"),
+                    content=str(entry.get("content") or ""),
+                    tags=entry.get("tags") if isinstance(entry.get("tags"), list) else [],
+                ))
+            if not entries and world_data.get("premise"):
+                db.add(WorldEntry(
+                    project_id=project_id,
+                    category="背景设定",
+                    title="世界观背景",
+                    content=str(world_data["premise"]),
+                ))
+
+        # ── Stage 3：角色、关系、弧光（保留 appearance）──
+        existing_chars = db.query(Character).filter(Character.project_id == project_id).all()
+        char_by_name = {}
+        for existing in existing_chars:
+            name_key = str(existing.name or "").strip().lower()
+            if name_key:
+                char_by_name[name_key] = existing
+        generated_chars: list[Character] = []
+        generated_name_keys: set[str] = set()
+        for stage_id, role in [
+            ("script_stage_3a_protagonist", "主角"),
+            ("script_stage_3b_antagonist", "反派"),
+            ("script_stage_3c_supporting", "配角"),
+        ]:
+            for item in _characters_from(stage_id, role):
+                name = str(item.get("name") or "").strip()
+                if not name or name == "未命名":
+                    continue
+                key = name.lower()
+                char = char_by_name.get(key)
+                if char is None:
+                    char = Character(project_id=project_id, name=name)
+                    db.add(char)
+                    char_by_name[key] = char
+                char.role = str(item.get("role") or role)
+                profile = item.get("profile")
+                char.profile = dict(profile) if isinstance(profile, dict) else {}
+                char.description = str(item.get("description") or "")
+                appearance = item.get("appearance")
+                char.appearance = dict(appearance) if isinstance(appearance, dict) else {}
+                if key not in generated_name_keys:
+                    generated_chars.append(char)
+                    generated_name_keys.add(key)
+        db.flush()
+        char_id_by_name = {char.name.lower(): char.id for char in generated_chars}
+
+        supporting_data = _payload("script_stage_3c_supporting")
+        relations = supporting_data.get("relations", []) if isinstance(supporting_data, dict) else []
+        if isinstance(relations, list):
+            for relation in relations:
+                if not isinstance(relation, dict):
+                    continue
+                from_id = char_id_by_name.get(str(relation.get("from") or "").strip().lower())
+                to_id = char_id_by_name.get(str(relation.get("to") or "").strip().lower())
+                if not from_id or not to_id or from_id == to_id:
+                    continue
+                db.add(CharacterRelation(
+                    project_id=project_id,
+                    from_character_id=from_id,
+                    to_character_id=to_id,
+                    relation_type=str(relation.get("type") or relation.get("relation_type") or ""),
+                    description=str(relation.get("description") or ""),
+                    strength=_positive_int(relation.get("strength"), 5),
+                    status=str(relation.get("status") or "stable"),
+                ))
+
+        arcs_data = _payload("script_stage_3d_arcs")
+        arcs = arcs_data.get("arcs", []) if isinstance(arcs_data, dict) else []
+        if isinstance(arcs, list):
+            for arc in arcs:
+                if not isinstance(arc, dict):
+                    continue
+                character_id = char_id_by_name.get(
+                    str(arc.get("character_name") or "").strip().lower()
+                )
+                if not character_id:
+                    continue
+                end_state = str(arc.get("end_state") or "")
+                shifts = arc.get("appearance_shifts")
+                if isinstance(shifts, list) and shifts:
+                    shift_text = "；".join(str(item) for item in shifts if item)
+                    if shift_text:
+                        end_state = (
+                            f"{end_state}（造型变化：{shift_text}）"
+                            if end_state else f"造型变化：{shift_text}"
+                        )
+                db.add(CharacterArc(
+                    project_id=project_id,
+                    character_id=character_id,
+                    arc_type=str(arc.get("arc_type") or "成长"),
+                    start_state=str(arc.get("start_state") or ""),
+                    end_state=end_state,
+                    current_state=str(arc.get("start_state") or ""),
+                    key_behavior=str(arc.get("key_behavior") or ""),
+                    is_stable=bool(arc.get("is_stable", True)),
+                ))
+
+        # ── Stage 4A：总体大纲 + 场景行 ──
+        outline_data = _payload("script_stage_4a_outline")
+        if isinstance(outline_data, dict):
+            existing_outline = db.query(ProjectOutline).filter(
+                ProjectOutline.project_id == project_id
+            ).first()
+            if existing_outline is None:
+                existing_outline = ProjectOutline(project_id=project_id)
+                db.add(existing_outline)
+            existing_outline.outline_text = str(outline_data.get("outline_text") or "")
+            existing_outline.pacing_notes = str(outline_data.get("pacing_notes") or "")
+            acts = outline_data.get("acts")
+            existing_outline.structure = {"acts": acts} if isinstance(acts, list) else {}
+            existing_outline.plot_lines = outline_data.get("plot_lines") or []
+            existing_outline.chapter_outlines = []
+
+            existing_scenes: dict[int, Screenplay] = {}
+            for row in db.query(Screenplay).filter(
+                Screenplay.project_id == project_id
+            ).order_by(Screenplay.id).all():
+                number = int(row.scene_number or 0)
+                if number in existing_scenes:
+                    db.delete(row)
+                else:
+                    existing_scenes[number] = row
+            for scene in _normalize_scenes(outline_data):
+                row = existing_scenes.get(scene["scene_number"])
+                if row is None:
+                    row = Screenplay(project_id=project_id, scene_number=scene["scene_number"])
+                    db.add(row)
+                row.title = scene["title"]
+                row.act = scene["act"]
+                row.scene_type = scene["scene_type"]
+                row.location = scene["location"]
+                row.time_of_day = scene["time_of_day"]
+                row.characters_present = list(scene["characters_present"])
+                row.synopsis = scene["synopsis"]
+
+        # ── Stage 4B：伏笔（场景号存 plant_order，保留视觉母题）──
+        foreshadow_data = _payload("script_stage_4b_foreshadow")
+        foreshadowings = foreshadow_data.get("foreshadowings", []) if isinstance(foreshadow_data, dict) else []
+        if isinstance(foreshadowings, list):
+            for item in foreshadowings:
+                if not isinstance(item, dict) or not item.get("title"):
+                    continue
+                content = str(item.get("content") or "")
+                visual_motif = item.get("visual_motif")
+                if visual_motif:
+                    content = f"{content}\n视觉母题：{visual_motif}".strip()
+                db.add(Foreshadowing(
+                    project_id=project_id,
+                    title=str(item.get("title")),
+                    content=content,
+                    cycle=str(item.get("type") or "短伏笔"),
+                    importance=str(item.get("importance") or "medium"),
+                    connection_to_mainline=str(item.get("connection_to_mainline") or ""),
+                    plant_order=_positive_int(
+                        item.get("suggested_plant_scene")
+                        or item.get("suggested_plant_chapter")
+                    ),
+                    status="active",
+                ))
+
+        db.commit()
+        run.status = "committed"
+        db.commit()
+
+        # RAG 失败不应把已提交的数据库事务标记为失败。
+        try:
+            from llm.chapter_pipeline import reindex_project_rag
+            reindex_project_rag(project_id, db, with_signatures=True)
+        except Exception as rag_err:
+            logger.warning(f"[Bootstrap script commit] reindex RAG 失败: {rag_err}")
+
+        return {
+            "status": "committed",
+            "summary": {
+                "themes": db.query(Theme).filter(Theme.project_id == project_id).count(),
+                "world_entries": db.query(WorldEntry).filter(WorldEntry.project_id == project_id).count(),
+                "characters": db.query(Character).filter(Character.project_id == project_id).count(),
+                "relations": db.query(CharacterRelation).filter(CharacterRelation.project_id == project_id).count(),
+                "arcs": db.query(CharacterArc).filter(CharacterArc.project_id == project_id).count(),
+                "foreshadowings": db.query(Foreshadowing).filter(Foreshadowing.project_id == project_id).count(),
+                "screenplays": db.query(Screenplay).filter(Screenplay.project_id == project_id).count(),
+            },
+        }
+    except Exception as exc:
+        db.rollback()
+        logger.error(f"[Bootstrap script commit] failed: {exc}", exc_info=True)
+        return {"status": "failed", "error": str(exc)}
+
+
 def _stage_data(results: dict, stage_id: str) -> dict | str:
     """提取 stage 实际数据（user_filled 时可能是字符串）"""
     info = results.get(stage_id, {})
@@ -2789,12 +3162,26 @@ def _rebuild_user_input_from_project(project_id: int, db) -> dict:
         proj = db.query(Project).filter(Project.id == project_id).first()
         if not proj:
             return {}
+        project_type = getattr(proj, "project_type", None) or "novel"
+        if project_type == "script":
+            return {
+                "title": proj.title or "",
+                "description": proj.description or "",
+                "genre": "",  # Project 模型无此字段，重跑时 LLM 上下文会缺 genre（可接受）
+                "project_type": "script",
+                "script_format": getattr(proj, "script_format", None) or "movie",
+                "script_episode_count": getattr(proj, "script_episode_count", 1) or 1,
+                # 老库没有 total_scenes 列，不能可靠反推；不注入小说章节约束。
+                "total_scenes": 0,
+            }
+
         return {
             "title": proj.title or "",
             "description": proj.description or "",
             "chapter_word_count": proj.target_word_count or 0,
             "genre": "",  # Project 模型无此字段，重跑时 LLM 上下文会缺 genre（可接受）
             "total_chapters": proj.total_chapters or 0,
+            "project_type": "novel",
             # 8 选填：Project 也没存这些，无法还原，留空（user_filled 全是 falsy 不会影响）
             "theme": "",
             "tone": "",
@@ -2809,6 +3196,26 @@ def _rebuild_user_input_from_project(project_id: int, db) -> dict:
     except Exception as e:
         logger.warning(f"[RebuildUserInput] failed for project {project_id}: {e}")
         return {}
+
+
+def _collect_prev_outputs(run, stage_id: str, stage_results: dict) -> dict:
+    """收集目标 stage 之前所有已完成 stage 的产物。
+
+    首次执行会把全部 completed_set 传给下游；rerun 若只传直接依赖，会
+    丢失主题/世界观/角色等更早的上下文，重跑结果容易与首次不一致。
+    """
+    outputs: dict = {}
+    for stage in (run.stages or []):
+        sid = stage.get("id")
+        if not sid or sid == stage_id:
+            break
+        info = stage_results.get(sid) or {}
+        status = info.get("status")
+        if status == "ok":
+            outputs[sid] = info.get("data", {})
+        elif status == "user_filled":
+            outputs[sid] = info.get("user_values", {})
+    return outputs
 
 
 def rerun_stage(run_id: int, stage_id: str, db) -> dict:
@@ -2827,6 +3234,9 @@ def rerun_stage(run_id: int, stage_id: str, db) -> dict:
         return {"status": "failed", "error": f"Unknown stage: {stage_id}"}
 
     stage_def = ALL_STAGE_DEFS[stage_id]
+    run_stage_ids = {stage.get("id") for stage in (run.stages or [])}
+    if run_stage_ids and stage_id not in run_stage_ids:
+        return {"status": "failed", "error": f"Stage {stage_id} does not belong to this run"}
     stage_results = dict(run.stage_results or {})
 
     # 检查依赖
@@ -2860,26 +3270,30 @@ def rerun_stage(run_id: int, stage_id: str, db) -> dict:
 
     from storage.models.project import Project
     proj = db.query(Project).filter(Project.id == project_id).first()
-    
-    locked = {
-        "title": user_input.get("title", ""),
-        "chapter_word_count": user_input.get("chapter_word_count", 0),
-        "genre": user_input.get("genre", ""),
-        "description": user_input.get("description", ""),
-        # 续写机制需要：rerun 时也得把 total_chapters 透传下去
-        # 优先使用 Project 表中的 total_chapters（用户可能修改过）
-        "total_chapters": int(proj.total_chapters) if proj else int(user_input.get("total_chapters") or 0),
-    }
+    project_type = (
+        getattr(proj, "project_type", None)
+        or user_input.get("project_type")
+        or meta.get("project_type")
+        or "novel"
+    )
+    # 让旧 run 的 user_input 也带上类型/剧本配置，helper 会按项目类型过滤硬约束。
+    user_input = {**user_input, "project_type": project_type}
+    if project_type == "script" and proj is not None:
+        user_input.setdefault("script_format", getattr(proj, "script_format", None) or "movie")
+        user_input.setdefault("script_episode_count", getattr(proj, "script_episode_count", 1) or 1)
+    locked = _build_bootstrap_locked(user_input, project_type)
+    # 小说 rerun 仍需把用户在项目设置页改过的总章节数传给续写逻辑；
+    # 剧本不使用这个字段。
+    if project_type != "script" and proj is not None:
+        total_chapters = _positive_int(proj.total_chapters)
+        if total_chapters:
+            locked["total_chapters"] = total_chapters
     user_filled = {
         k: v for k, v in user_input.items()
         if k not in locked and v
     }
 
-    prev_outputs = {
-        sid: stage_results[sid].get("data", {})
-        for sid in stage_def["depends_on"]
-        if sid in stage_results and "data" in stage_results[sid]
-    }
+    prev_outputs = _collect_prev_outputs(run, stage_id, stage_results)
 
     try:
         result = _run_single_stage(
@@ -2987,16 +3401,21 @@ def rerun_all_failed_stages(run_id: int, db, only_failed: bool = True, force_all
 
         from storage.models.project import Project
         proj = db.query(Project).filter(Project.id == run.project_id).first()
-        
-        locked = {
-            "title": user_input.get("title", ""),
-            "chapter_word_count": user_input.get("chapter_word_count", 0),
-            "genre": user_input.get("genre", ""),
-            "description": user_input.get("description", ""),
-            # 续写机制需要：rerun 时也得把 total_chapters 透传下去
-            # 优先使用 Project 表中的 total_chapters（用户可能修改过）
-            "total_chapters": int(proj.total_chapters) if proj else int(user_input.get("total_chapters") or 0),
-        }
+        project_type = (
+            getattr(proj, "project_type", None)
+            or user_input.get("project_type")
+            or meta.get("project_type")
+            or "novel"
+        )
+        user_input = {**user_input, "project_type": project_type}
+        if project_type == "script" and proj is not None:
+            user_input.setdefault("script_format", getattr(proj, "script_format", None) or "movie")
+            user_input.setdefault("script_episode_count", getattr(proj, "script_episode_count", 1) or 1)
+        locked = _build_bootstrap_locked(user_input, project_type)
+        if project_type != "script" and proj is not None:
+            total_chapters = _positive_int(proj.total_chapters)
+            if total_chapters:
+                locked["total_chapters"] = total_chapters
         user_filled = {
             k: v for k, v in user_input.items()
             if k not in locked and v
@@ -3083,12 +3502,9 @@ def rerun_all_failed_stages(run_id: int, db, only_failed: bool = True, force_all
             run.stage_results = stage_results
             db.commit()
 
-            # 构造 prev_outputs
-            prev_outputs = {
-                dep: stage_results[dep].get("data", {})
-                for dep in stage_def["depends_on"]
-                if dep in stage_results and "data" in stage_results[dep]
-            }
+            # 构造 prev_outputs：包含目标 stage 之前所有已完成 stage，
+            # 而不只是直接依赖。
+            prev_outputs = _collect_prev_outputs(run, sid, stage_results)
 
             try:
                 result = _run_single_stage(
@@ -3150,8 +3566,8 @@ def rerun_all_failed_stages(run_id: int, db, only_failed: bool = True, force_all
         #     或新项目被截断),自动补一次续写
         from storage.models import ProjectOutline
         proj_check = db.query(ProjectOutline).filter(ProjectOutline.project_id == run.project_id).first()
-        if proj_check:
-            target_total = int(user_input.get("total_chapters") or 0)
+        if project_type != "script" and proj_check:
+            target_total = _positive_int(user_input.get("total_chapters"))
             existing_co = list(proj_check.chapter_outlines or [])
             existing_max = max(
                 [int(c.get("chapter_num", 0)) for c in existing_co if c.get("chapter_num")],

@@ -623,6 +623,7 @@ async def build_project_from_questionnaire(q_id: int, db: Session = Depends(get_
             "description": project.description,
         },
         user_filled=user_filled,
+        project_type=project.project_type or "novel",
     )
 
     run = WorkflowRun(

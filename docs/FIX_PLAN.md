@@ -28,10 +28,15 @@
 
 ## Phase 3 · 剧本子系统补全
 
-- [ ] 3.1 `plan_bootstrap_stages` 传 `project_type`（projects.py ×2、creative_questionnaire.py ×1）
-- [ ] 3.2 `commit_bootstrap` 增加 Screenplay 落库分支
-- [ ] 3.3 `script_pipeline` JSON 兜底 / 修订 role / 弧光读取 / 分镜去重
-- [ ] 3.4 剧本 rerun 的 `locked` 按 `project_type` 构造
+- [x] 3.1 `plan_bootstrap_stages` 传 `project_type`（projects.py ×2、creative_questionnaire.py、inspirations.py）
+  - 附带修复：`script_stage_3d_arcs` / `script_stage_4a_outline` / `script_stage_4b_foreshadow` 补 `needs_llm=True`；`run_bootstrap_sync` 计算总状态时排除 `_meta`，否则正常 run 永远 `partial`
+- [x] 3.2 `commit_bootstrap` 增加 Screenplay 落库分支
+  - 新增 `_commit_script_bootstrap`：Theme / WorldEntry / Character(含 appearance) / CharacterRelation / CharacterArc / ProjectOutline / Screenplay / Foreshadowing；统一事务，重复 commit 幂等；自动 commit / rerun-and-commit 检查 commit 结果
+- [x] 3.3 `script_pipeline` JSON 兜底 / 修订 role / 弧光读取 / 分镜去重
+  - 新增 `script_outline_revision` role；修复 ProjectOutline/Foreshadowing 字段；分镜先删后写并按镜号规范化
+- [x] 3.4 剧本 rerun 的 `locked` 按 `project_type` 构造
+  - 抽出 `_build_bootstrap_locked`；两个 rerun 入口共用；`_rebuild_user_input_from_project` 支持剧本；rerun 前校验 stage 属于本 run；prev_outputs 收集全部前置 stage
+  - 附带：`bootstrap-data` 增加剧本视图；`ProjectCreate` 支持剧本 `total_scenes`、剧本不再强制 `chapter_word_count`
 
 ## Phase 4 · 稳定性与数据安全
 

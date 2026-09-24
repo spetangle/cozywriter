@@ -185,6 +185,122 @@ async def get_latest_run(project_id: str, db: Session = Depends(get_db)):
     }
 
 
+def _script_bootstrap_view(project_id: str, run, stage_results: dict, db) -> dict:
+    """剧本 bootstrap-data 视图：字段形状与小说保持一致，但数据来自 script_* stage。"""
+    from storage.models import Project
+    from storage.models.screenplay import Screenplay
+
+    def _data(stage_id: str):
+        info = stage_results.get(stage_id) or {}
+        if info.get("status") == "ok":
+            return info.get("data") or {}
+        if info.get("status") == "user_filled":
+            return info.get("user_values") or {}
+        return {}
+
+    meta_input = (stage_results.get("_meta") or {}).get("user_input") or {}
+    project = db.query(Project).filter(Project.id == project_id).first()
+
+    base = _data("script_stage_1_base")
+    theme_data = _data("script_stage_2a_theme")
+    style_data = _data("script_stage_2b_style")
+    world_data = _data("script_stage_2c_world")
+    world_entries = world_data.get("world_entries", []) if isinstance(world_data, dict) else []
+    if not isinstance(world_entries, list):
+        world_entries = []
+    world_by_category: dict[str, list] = {}
+    for entry in world_entries:
+        if isinstance(entry, dict):
+            world_by_category.setdefault(entry.get("category") or "其他", []).append(entry)
+
+    def _characters(stage_id: str) -> list[dict]:
+        data = _data(stage_id)
+        items = data.get("characters", []) if isinstance(data, dict) else []
+        return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+    protagonist_chars = _characters("script_stage_3a_protagonist")
+    antagonist_chars = _characters("script_stage_3b_antagonist")
+    supporting_chars = _characters("script_stage_3c_supporting")
+    supporting_data = _data("script_stage_3c_supporting")
+    relations = supporting_data.get("relations", []) if isinstance(supporting_data, dict) else []
+    if not isinstance(relations, list):
+        relations = []
+
+    arcs_data = _data("script_stage_3d_arcs")
+    arcs = arcs_data.get("arcs", []) if isinstance(arcs_data, dict) else []
+    if not isinstance(arcs, list):
+        arcs = []
+
+    outline_data = _data("script_stage_4a_outline")
+    if not isinstance(outline_data, dict):
+        outline_data = {}
+
+    f_data = _data("script_stage_4b_foreshadow")
+    foreshadowings = f_data.get("foreshadowings", []) if isinstance(f_data, dict) else []
+    if not isinstance(foreshadowings, list):
+        foreshadowings = []
+    foreshadow_by_period: dict[str, list] = {"短周期": [], "中周期": [], "长周期": [], "未分类": []}
+    period_map = {
+        "short": "短周期", "medium": "中周期", "long": "长周期",
+        "短": "短周期", "中": "中周期", "长": "长周期",
+        "短周期": "短周期", "中周期": "中周期", "长周期": "长周期",
+    }
+    for item in foreshadowings:
+        if not isinstance(item, dict):
+            continue
+        period = "未分类"
+        raw = item.get("type") or item.get("period") or item.get("category")
+        if isinstance(raw, str) and raw in period_map:
+            period = period_map[raw]
+        foreshadow_by_period[period].append(item)
+
+    scene_count = db.query(Screenplay).filter(Screenplay.project_id == project_id).count()
+    return {
+        "project_id": project_id,
+        "run_id": run.id,
+        "run_status": run.status,
+        "run_created_at": run.created_at,
+        "run_updated_at": run.updated_at,
+        "project_meta": {
+            "title": meta_input.get("title", ""),
+            "description": meta_input.get("description", ""),
+            "genre": meta_input.get("genre", ""),
+            "project_type": "script",
+            "script_format": meta_input.get("script_format") or getattr(project, "script_format", "movie"),
+            "script_episode_count": meta_input.get("script_episode_count") or getattr(project, "script_episode_count", 1),
+            "total_scenes": meta_input.get("total_scenes", 0),
+            "theme_input": meta_input.get("theme", ""),
+            "tone": meta_input.get("tone", ""),
+            "style_input": meta_input.get("style", ""),
+            "pacing": meta_input.get("pacing", ""),
+            "premise": meta_input.get("premise", ""),
+            "protagonist_input": meta_input.get("protagonist", ""),
+            "antagonist_input": meta_input.get("antagonist", ""),
+            "supporting_input": meta_input.get("supporting", ""),
+            "notes": meta_input.get("notes", ""),
+        },
+        "base": {
+            "total_acts": base.get("total_acts"),
+            "total_scenes": base.get("total_scenes") or scene_count,
+            "est_duration_minutes": base.get("est_duration_minutes"),
+            "rationale": base.get("rationale", ""),
+        },
+        "theme": {"theme": theme_data.get("theme", ""), "tone": theme_data.get("tone", "")},
+        "style": {"style": style_data.get("style", ""), "pacing": style_data.get("pacing", "")},
+        "world": {"entries_by_category": world_by_category, "entry_count": len(world_entries)},
+        "characters": {
+            "protagonist": protagonist_chars[0] if protagonist_chars else {},
+            "antagonist": antagonist_chars[0] if antagonist_chars else {},
+            "supporting": supporting_chars,
+            "relations": relations,
+        },
+        "arcs": arcs,
+        "outline": outline_data,
+        "foreshadowings": {"by_period": foreshadow_by_period, "total": len(foreshadowings)},
+        "chapter_outlines": [],
+    }
+
+
 @router.get("/project/{project_id}/bootstrap-data")
 async def get_bootstrap_data(project_id: str, db: Session = Depends(get_db)):
     """获取 bootstrap 产出的"设定文档"（按 stage 整理成结构化视图，给"设定预览"面板用）
@@ -306,6 +422,13 @@ async def get_bootstrap_data(project_id: str, db: Session = Depends(get_db)):
     # 读 _meta.user_input（兼容老 run：可能缺失或为反推值）
     meta = sr.get("_meta", {})
     user_input = meta.get("user_input", {}) or {}
+
+    from storage.models import Project as _Project
+    _project = db.query(_Project).filter(_Project.id == project_id).first()
+    project_type = meta.get("project_type") or getattr(_project, "project_type", None) or "novel"
+    if project_type == "script":
+        return _script_bootstrap_view(project_id, run, sr, db)
+
     project_meta = {
         "title": user_input.get("title", ""),
         "description": user_input.get("description", ""),
@@ -499,6 +622,16 @@ async def rerun_stage(run_id: int, req: RerunRequest, db: Session = Depends(get_
         raise HTTPException(
             status_code=400,
             detail="失败的 run 不能 rerun stage，请新建项目",
+        )
+
+    # 只允许重跑本 run 计划内的 stage，避免剧本 run 被塞入小说 stage（或反之）。
+    from llm.workflow import ALL_STAGE_DEFS
+    run_stage_ids = {stage.get("id") for stage in (run.stages or [])}
+    if req.stage_id not in ALL_STAGE_DEFS or (run_stage_ids and req.stage_id not in run_stage_ids):
+        _release_run_lock(run_id)
+        raise HTTPException(
+            status_code=400,
+            detail=f"stage {req.stage_id} 不属于该 run",
         )
 
     logger.info(f"[Workflow] rerun (async) run={run_id} stage={req.stage_id}")
@@ -847,11 +980,13 @@ async def rerun_and_commit(run_id: int, req: RerunRequest, db: Session = Depends
             commit_result = commit_bootstrap(local_run.project_id, run_id_inner, local_db)
             task = get_task(task_id)
             if task:
-                task.status = "completed"
+                committed = commit_result.get("status") == "committed"
+                task.status = "completed" if committed else "failed"
                 task.result = {
-                    "status": "committed",
+                    "status": "committed" if committed else "failed",
                     "rerun_stage": stage_id,
                     "commit_summary": commit_result.get("summary", {}),
+                    "commit_error": commit_result.get("error"),
                 }
                 task.progress = 100
                 task.completed_at = _time.time()

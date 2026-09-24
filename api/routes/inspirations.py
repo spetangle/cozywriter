@@ -308,6 +308,7 @@ async def create_project_from_inspiration(
             "description": description,
         },
         user_filled=user_filled,
+        project_type=project.project_type or "novel",
     )
 
     run = WorkflowRun(

@@ -66,7 +66,9 @@ class ProjectCreate(BaseModel):
     """创建项目 - 4 必填 + 8 选填（未填则 LLM 补全）"""
     # 4 必填
     title: str = ""
-    chapter_word_count: int = Field(default=0, description="章节字数（千字单位）", ge=1, le=20)
+    chapter_word_count: int = Field(default=0, description="章节字数（千字单位，小说必填）", ge=0, le=20)
+    # 剧本专用：用户可直接锁定场景总数；未填写时由 bootstrap 推导
+    total_scenes: int = Field(default=0, description="剧本总场景数（可选）", ge=0, le=1000)
     # genre 支持多选：list[str] 或 str（逗号分隔），写入时存为逗号分隔字符串
     genre: str | list[str] = ""
     description: str = ""
@@ -198,14 +200,15 @@ async def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
         genre_str = (data.genre or "").strip()
 
     # 3) 创建项目骨架（仅 4 必填 + 用户填的选填）
+    is_script = data.project_type == "script"
     project = Project(
         title=data.title.strip(),
         description=data.description.strip(),
         genre=genre_str,
-        target_word_count=data.chapter_word_count * 1000,  # 千字 → 字
-        word_count_min=int(data.chapter_word_count * 1000 * 0.9),
-        word_count_max=int(data.chapter_word_count * 1000 * 1.1),
-        total_chapters=data.total_chapters,
+        target_word_count=0 if is_script else data.chapter_word_count * 1000,  # 千字 → 字
+        word_count_min=0 if is_script else int(data.chapter_word_count * 1000 * 0.9),
+        word_count_max=0 if is_script else int(data.chapter_word_count * 1000 * 1.1),
+        total_chapters=0 if is_script else data.total_chapters,
         writing_style=data.style or "平实",
         project_type=data.project_type,
         script_format=data.script_format,
@@ -231,6 +234,7 @@ async def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
             "description": data.description,
         },
         user_filled=user_filled,
+        project_type=data.project_type,
     )
 
     # 5) 创建 WorkflowRun
@@ -406,6 +410,7 @@ async def regenerate_settings(project_id: str, db: Session = Depends(get_db)):
             "description": project.description or "",
         },
         user_filled=user_filled,
+        project_type=project.project_type or "novel",
     )
 
     run = WorkflowRun(
@@ -424,6 +429,9 @@ async def regenerate_settings(project_id: str, db: Session = Depends(get_db)):
         "chapter_word_count": project.target_word_count,
         "genre": genre_str,
         "description": project.description or "",
+        "project_type": project.project_type or "novel",
+        "script_format": project.script_format or "movie",
+        "script_episode_count": project.script_episode_count or 1,
         "_project_id": project.id,
         "auto_commit": True,
         **user_filled,
@@ -454,7 +462,7 @@ def _check_required(data: ProjectCreate) -> list[str]:
     missing = []
     if not (data.title or "").strip():
         missing.append("title")
-    if not (data.chapter_word_count and data.chapter_word_count > 0):
+    if data.project_type != "script" and not (data.chapter_word_count and data.chapter_word_count > 0):
         missing.append("chapter_word_count")
     # genre 支持 str 或 list[str]（多选题材）
     if isinstance(data.genre, list):
@@ -490,11 +498,18 @@ def _run_bootstrap_task(task_id: str, run_id: int, user_input: dict):
     try:
         task = get_task(task_id)
         result = run_bootstrap_sync(run_id, user_input, db=db)
+        commit_result = None
         if result["status"] == "completed" and user_input.get("auto_commit", True):
-            commit_bootstrap(user_input.get("_project_id", 0), run_id, db)
+            commit_result = commit_bootstrap(user_input.get("_project_id", ""), run_id, db)
+        workflow_ok = result["status"] == "completed"
+        commit_ok = commit_result is None or commit_result.get("status") == "committed"
         if task:
-            task.status = "completed" if "fail" not in result["status"] else "failed"
-            task.result = {"run_id": run_id, "workflow_status": result["status"]}
+            task.status = "completed" if workflow_ok and commit_ok else "failed"
+            task.result = {
+                "run_id": run_id,
+                "workflow_status": result["status"],
+                "commit": commit_result,
+            }
             task.progress = 100
         return result
     except Exception as e:
