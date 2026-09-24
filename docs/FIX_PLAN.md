@@ -21,9 +21,10 @@
 ## Phase 2 · 前端拦截级问题
 
 - [x] 2.1 B7 单章生成 422：`novel_editor.js` body 补 `project_id`
-- [ ] 2.2 B8 导出 404：前端接 `POST /api/export/chapters` + blob 下载（决策：保留完整功能）
-- [ ] 2.3 B9 大纲路由冲突：`OutlineNode` 迁到 `/outline-nodes`（待决策）
-- [ ] 2.4 前端字段错位：`global_settings` 模型选择器、`script_editor` 保存/生成、`questionnaire` 保存、`project_settings` 字段、plot 字段
+- [x] 2.2 B8 导出 404：前端接 `POST /api/export/chapters` + blob 下载（含格式/重新分章/独立打包）
+- [x] 2.3 B9 大纲路由冲突：`OutlineNode` 迁到 `/outline-nodes`
+- [~] 2.4 前端字段错位：已修模型选择器、场景保存、问卷保存、项目章节字数、plot 字段
+  - 待办（依赖 Phase 3/4）：剧本「AI 生成」prompt/mode 后端未读取；fingerprint 未解包；版本表 word_count 字段；评审/一致性前端尚未接线
 
 ## Phase 3 · 剧本子系统补全
 
@@ -56,9 +57,9 @@
 3. Windows：`tests/test_frontend_routes.py`、`test_script_api.py`、`test_script_post_process.py`
 4. 手动冒烟：建项目 → 引导补全落库 → 单章生成 → 评审 → 导出 → 建剧本 → 场景生成 → 分镜
 
-## 待决策
+## 决策记录
 
-1. 导出方案（推荐前端接 POST，保留重新分章/打包）
-2. 大纲路由归属（推荐 OutlineNode 迁 `/outline-nodes`）
-3. 行尾规范化范围（已在 Phase 0 全库执行）
-4. 旧库处理（数据修复脚本 vs 允许重置）
+1. 导出：✅ 已按推荐前端接 `POST /api/export/chapters`（保留重新分章 / 打包）
+2. 大纲路由：✅ 已按推荐把 `OutlineNode` 迁到 `/outline-nodes`
+3. 行尾规范化：✅ Phase 0 全库执行
+4. 旧库处理：⏳ 待定（Phase 4 需要：写数据修复脚本 vs 允许重置数据库）
