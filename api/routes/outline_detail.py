@@ -126,6 +126,17 @@ class ChapterOutlineResponse(BaseModel):
 
 # ─── Project Outline Routes ───
 
+def _jsonable(value):
+    """把 Pydantic 模型列表转成可写入 JSON 列的普通结构。"""
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    return value
+
+
 @router.get("/outline", response_model=ProjectOutlineResponse | None)
 async def get_project_outline(project_id: str, db: Session = Depends(get_db)):
     """获取项目大纲（可能为空）"""
@@ -148,12 +159,12 @@ async def create_or_update_project_outline(
         for field in ["plot_lines", "structure", "pacing_notes", "outline_text"]:
             val = getattr(data, field, None)
             if val is not None:
-                setattr(outline, field, val)
+                setattr(outline, field, _jsonable(val))
     else:
         outline = ProjectOutline(
             project_id=project_id,
-            plot_lines=data.plot_lines,
-            structure=data.structure,
+            plot_lines=_jsonable(data.plot_lines),
+            structure=_jsonable(data.structure),
             pacing_notes=data.pacing_notes,
             outline_text=data.outline_text,
         )

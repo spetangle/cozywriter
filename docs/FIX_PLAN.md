@@ -54,14 +54,14 @@
 
 - [x] 5.1 `AGENTS.md` 增补 `test_script_bootstrap.py` 命令
 - [x] 5.2 `README.md` / `ARCHITECTURE.md` 顶部标注过时内容，指向代码与 `AGENTS.md`
-- [x] 5.3 测试：Linux 侧已跑 `test_frontend_routes.py`（测试已兼容 FastAPI 0.141 的 `_IncludedRouter` 展开）、`test_script_bootstrap.py`、`test_migrate_project_ids.py`、`test_script_post_process.py`、`test_script_api.py`、`test_spa_components.js`；Windows 侧仍需按项目环境复跑
+- [x] 5.3 测试：Linux 侧已跑 `test_frontend_routes.py`（测试已兼容 FastAPI 0.141 的 `_IncludedRouter` 展开）、`test_script_bootstrap.py`、`test_migrate_project_ids.py`、`test_script_post_process.py`、`test_script_api.py`、`test_system_smoke.py`、`test_spa_components.js`；报告见 `docs/TEST_REPORT.md`，Windows 侧仍需按项目环境复跑
 - [x] 5.4 清理 `chapters.py` 无效 import；无其他 `_commit_bootstrap_results` 引用
 
 ## 验证策略
 
 1. 本机：`python3 -m py_compile`（全量）+ `node --check`（全量）
 2. 本机：`node tests/test_spa_components.js`
-3. Windows：`tests/test_frontend_routes.py`、`test_script_api.py`、`test_script_post_process.py`、`test_script_bootstrap.py`、`test_migrate_project_ids.py`
+3. Windows：`tests/test_frontend_routes.py`、`test_script_api.py`、`test_script_post_process.py`、`test_script_bootstrap.py`、`test_migrate_project_ids.py`、`test_system_smoke.py`
 4. 手动冒烟：建项目 → 引导补全落库 → 单章生成 → 评审 → 导出 → 建剧本 → 场景生成 → 分镜
 
 ## 决策记录
