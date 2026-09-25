@@ -40,7 +40,7 @@ STAGE_DEFS = {
         "description": "生成核心主题与基调",
         "needs_llm_if_missing": ["theme", "tone"],
         "depends_on": ["stage_1_base"],
-        "outputs": ["theme", "tone"],
+        "outputs": ["theme", "tone", "core_hook"],
         "max_tokens": 1024,
         "temperature": 0.5,
     },
@@ -56,9 +56,9 @@ STAGE_DEFS = {
     "stage_2c_world": {
         "name": "世界观骨架",
         "description": "生成世界观条目（按 category 分类）",
-        "needs_llm_if_missing": ["premise"],
+        "needs_llm_if_missing": ["premise", "world_setting", "society_structure"],
         "depends_on": ["stage_1_base"],
-        "outputs": ["premise"],
+        "outputs": ["premise", "world_setting", "society_structure"],
         "max_tokens": 2048,
         "temperature": 0.5,
     },
@@ -67,7 +67,7 @@ STAGE_DEFS = {
         "description": "主角设定（Character + profile）",
         "needs_llm_if_missing": ["protagonist"],
         "depends_on": ["stage_2a_theme", "stage_2b_style", "stage_2c_world"],
-        "outputs": ["protagonist"],
+        "outputs": ["protagonist", "protagonist_name"],
         "max_tokens": 2048,
         "temperature": 0.6,
     },
@@ -2282,6 +2282,14 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
                     description=f"基调：{data.get('tone', '')}",
                 )
                 db.add(t)
+            core_hook = data.get("core_hook")
+            if core_hook:
+                db.add(Theme(
+                    project_id=project_id,
+                    theme_type="core_hook",
+                    title="核心看点",
+                    description=str(core_hook),
+                ))
 
         # ── Stage 2B: Style + Pacing ──
         if results.get("stage_2b_style", {}).get("status") in ("ok", "user_filled"):
@@ -2334,6 +2342,22 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
                         content=data["premise"],
                     )
                     db.add(we)
+                # 问卷会把 world_setting / society_structure 单独透传；
+                # 不能因为 stage 输出契约不同就静默丢掉。
+                if data.get("world_setting"):
+                    db.add(WorldEntry(
+                        project_id=project_id,
+                        category="世界观",
+                        title="世界设定",
+                        content=str(data["world_setting"]),
+                    ))
+                if data.get("society_structure"):
+                    db.add(WorldEntry(
+                        project_id=project_id,
+                        category="社会结构",
+                        title="社会结构设定",
+                        content=str(data["society_structure"]),
+                    ))
 
         # ── Stage 3A/3B/3C: Characters + Relations ──
         # 复用 chapter_pipeline 里的去重 helper（LLM 经常把同一个角色用不同名字
@@ -2392,6 +2416,11 @@ def commit_bootstrap(project_id: int, run_id: int, db) -> dict:
                         user_text, role_default, role_label_zh, db=db,
                         project_id=project_id,
                     )
+                    # 问卷常单独传 protagonist_name；如果用户指定了名字，
+                    # 以它为准，避免解析文本时改名/丢名。
+                    explicit_name = user_values.get(f"{field_map[stage_id]}_name")
+                    if structured and explicit_name:
+                        structured["name"] = str(explicit_name)
                     chars = [structured] if structured else []
             else:
                 continue

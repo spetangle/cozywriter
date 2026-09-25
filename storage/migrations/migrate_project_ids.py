@@ -62,7 +62,7 @@ def migrate_project_ids(engine: Engine = None) -> dict:
         "chapters", "characters", "character_arcs", "character_relations",
         "themes", "foreshadowings", "consistency_records",
         "world_entries", "outline_nodes", "project_outlines",
-        "chapter_outlines", "review_sessions",
+        "chapter_outlines", "review_sessions", "full_review_sessions",
         "inspirations",  # project_id nullable
         "workflow_runs",
         "plot_points",
@@ -98,33 +98,47 @@ def migrate_project_ids(engine: Engine = None) -> dict:
             )
         # SQLite: 删老 PK 列需要"表重建"流程
         # 步骤：建新表 → 复制数据 → 删老表 → 改名
-        conn.execute(text("""
-            CREATE TABLE projects__new (
-                id TEXT PRIMARY KEY,
-                title VARCHAR(255) NOT NULL,
-                description TEXT DEFAULT '',
-                genre VARCHAR(200) DEFAULT '',
-                word_count INTEGER DEFAULT 0,
-                writing_style VARCHAR(50) DEFAULT '平实',
-                "ai味去除程度" INTEGER DEFAULT 7,
-                target_word_count INTEGER DEFAULT 3000,
-                word_count_min INTEGER DEFAULT 2700,
-                word_count_max INTEGER DEFAULT 3300,
-                total_chapters INTEGER DEFAULT 0,
-                created_at DATETIME,
-                updated_at DATETIME
-            )
-        """))
-        conn.execute(text("""
-            INSERT INTO projects__new
-                (id, title, description, genre, word_count, writing_style,
-                 "ai味去除程度", target_word_count, word_count_min, word_count_max,
-                 total_chapters, created_at, updated_at)
-            SELECT _new_id, title, description, genre, word_count, writing_style,
-                 "ai味去除程度", target_word_count, word_count_min, word_count_max,
-                 total_chapters, created_at, updated_at
-            FROM projects
-        """))
+        # 不能硬编码老 schema：用旧表实际列 + ORM 当前列的并集，避免丢掉
+        # project_type / script_format / script_episode_count 等后加字段。
+        from storage.models.project import Project as _ProjectModel
+
+        old_info = conn.execute(text("PRAGMA table_info(projects)")).fetchall()
+        old_col_names = {row[1] for row in old_info}
+
+        col_defs = []
+        for row in old_info:
+            _, name, type_name, notnull, default, _pk = row
+            if name in ("_new_id",):
+                continue
+            if name == "id":
+                col_defs.append('"id" TEXT PRIMARY KEY')
+                continue
+            parts = [f'"{name}"', type_name or "TEXT"]
+            if notnull:
+                parts.append("NOT NULL")
+            if default is not None:
+                parts.append(f"DEFAULT {default}")
+            col_defs.append(" ".join(parts))
+
+        # 补上 ORM 有、但旧库缺的列（例如 project_type / script_*）。
+        for col in _ProjectModel.__table__.columns:
+            if col.name in old_col_names or col.name == "id":
+                continue
+            type_sql = col.type.compile(dialect=eng.dialect)
+            parts = [f'"{col.name}"', type_sql]
+            if not col.nullable:
+                parts.append("NOT NULL")
+            col_defs.append(" ".join(parts))
+
+        conn.execute(text(f"CREATE TABLE projects__new ({', '.join(col_defs)})"))
+
+        insert_cols = ["id"] + [row[1] for row in old_info if row[1] not in ("id", "_new_id")]
+        insert_col_sql = ", ".join(f'"{name}"' for name in insert_cols)
+        select_exprs = ["_new_id"] + [f'"{name}"' for name in insert_cols[1:]]
+        conn.execute(text(
+            f"INSERT INTO projects__new ({insert_col_sql}) "
+            f"SELECT {', '.join(select_exprs)} FROM projects"
+        ))
         conn.execute(text("DROP TABLE projects"))
         conn.execute(text("ALTER TABLE projects__new RENAME TO projects"))
 
@@ -163,24 +177,26 @@ def migrate_project_ids(engine: Engine = None) -> dict:
                 # 取老表的 SELECT 列表
                 select_cols = ", ".join(f'"{c[1]}"' for c in other_cols) + ', _new_pid AS project_id'
 
+                # 必须在 DROP TABLE 之前保存索引 SQL；DROP 后 sqlite_master 里
+                # 原索引记录已经消失，旧代码在 DROP 后 PRAGMA index_list 拿不到。
+                saved_index_sql = [
+                    row[0] for row in conn.execute(text(
+                        "SELECT sql FROM sqlite_master WHERE type='index' "
+                        "AND tbl_name = :tname AND sql IS NOT NULL"
+                    ), {"tname": tname}).fetchall()
+                ]
+
                 conn.execute(text(f"CREATE TABLE {tname}__new ({col_defs_str})"))
                 conn.execute(text(f"INSERT INTO {tname}__new SELECT {select_cols} FROM {tname}"))
                 conn.execute(text(f"DROP TABLE {tname}"))
                 conn.execute(text(f"ALTER TABLE {tname}__new RENAME TO {tname}"))
 
-                # 重建索引（如果有 project_id 索引）
-                # SQLite 索引在 DROP TABLE 时会一并删除,需要重新创建
-                idx_list = conn.execute(text(f"PRAGMA index_list({tname})")).fetchall()
-                for idx in idx_list:
-                    # idx: (seq, name, unique, origin, partial)
-                    idx_name = idx[1]
-                    idx_info = conn.execute(text(f"PRAGMA index_info({idx_name})")).fetchall()
-                    cols_in_idx = ", ".join(f'"{i[2]}"' for i in idx_info)
-                    is_unique = "UNIQUE " if idx[2] else ""
+                # 恢复原索引定义
+                for idx_sql in saved_index_sql:
                     try:
-                        conn.execute(text(f"CREATE {is_unique}INDEX {idx_name} ON {tname} ({cols_in_idx})"))
-                    except Exception:
-                        pass  # 索引可能已存在或创建失败,不影响数据
+                        conn.execute(text(idx_sql))
+                    except Exception as idx_err:
+                        logger.warning(f"[migrate] 重建索引失败 {tname}: {idx_err}")
             except Exception as e:
                 logger.error(f"[migrate] 更新表 {tname} 失败: {e}")
                 # 失败的话这张表保持原状,但 projects 主表已迁移 → 子表的 int FK 悬空

@@ -97,6 +97,7 @@ class MimoProvider(LLMProvider):
             f"prompt_chars={len(prompt)} prompt={prompt_preview!r}"
         )
         t0 = time.time()
+        usage_recorded = False
         try:
             # 构建请求参数
             create_kwargs: dict = {
@@ -167,6 +168,7 @@ class MimoProvider(LLMProvider):
                 duration_ms=duration_ms, success=True, project_id=project_id,
                 task_id=task_id, llm_call_id=llm_call_id, **usage,
             )
+            usage_recorded = True
             return text
         except anthropic.AuthenticationError as e:
             logger.error(f"[LLM:mimo] 401 鉴权失败: {e}")
@@ -229,7 +231,21 @@ class MimoProvider(LLMProvider):
                 duration_ms=duration_ms, success=False, error=str(e), project_id=project_id,
                 task_id=task_id, llm_call_id=llm_call_id,
             )
+            usage_recorded = True
             raise
+        finally:
+            # 鉴权/限流/模型不存在/网络异常等专用分支此前漏记失败用量。
+            if not usage_recorded:
+                try:
+                    elapsed_ms = (time.time() - t0) * 1000
+                    record_llm_usage(
+                        provider=self.provider_name, model=self.model, task_type=task_type,
+                        duration_ms=elapsed_ms, success=False,
+                        error="MiMo request failed", project_id=project_id,
+                        task_id=task_id, llm_call_id=llm_call_id,
+                    )
+                except Exception:
+                    pass
 
     def get_context_window(self) -> int:
         return self.CONTEXT_WINDOW

@@ -114,6 +114,7 @@ class MiniMaxProvider(LLMProvider):
             f"prompt_chars={len(prompt)} prompt={prompt_preview!r}"
         )
         t0 = time.time()
+        usage_recorded = False
         try:
             # 构建请求参数
             create_kwargs: dict = {
@@ -187,6 +188,7 @@ class MiniMaxProvider(LLMProvider):
                 duration_ms=duration_ms, success=True, project_id=project_id,
                 task_id=task_id, llm_call_id=llm_call_id, **usage,
             )
+            usage_recorded = True
             return text
         except anthropic.AuthenticationError as e:
             duration_ms = (time.time() - t0) * 1000
@@ -286,7 +288,21 @@ class MiniMaxProvider(LLMProvider):
                 duration_ms=duration_ms, success=False, error=str(e), project_id=project_id,
                 task_id=task_id, llm_call_id=llm_call_id,
             )
+            usage_recorded = True
             raise
+        finally:
+            # 鉴权/限流/网络等专用分支此前漏记失败用量；统一在这里兜底。
+            if not usage_recorded:
+                try:
+                    elapsed_ms = (time.time() - t0) * 1000
+                    record_llm_usage(
+                        provider=self.provider_name, model=self.model, task_type=task_type,
+                        duration_ms=elapsed_ms, success=False,
+                        error="MiniMax request failed", project_id=project_id,
+                        task_id=task_id, llm_call_id=llm_call_id,
+                    )
+                except Exception:
+                    pass
 
     def list_models(self) -> list[dict]:
         """获取可用模型列表
