@@ -13,7 +13,7 @@ SQLite 不支持直接 DROP COLUMN 含 PK 的列,所以采用：
 """
 import logging
 import secrets
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, text, UniqueConstraint
 from sqlalchemy.engine import Engine
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,8 @@ def migrate_project_ids(engine: Engine = None) -> dict:
         }
     """
     from storage.database import engine as default_engine
+    import storage.models  # noqa: F401  确保 ORM metadata 已注册
+    from storage.models.base import Base
 
     eng = engine or default_engine
 
@@ -77,7 +79,16 @@ def migrate_project_ids(engine: Engine = None) -> dict:
 
     result = {"migrated": True, "projects_migrated": 0, "tables_updated": child_tables}
 
-    with eng.begin() as conn:
+    conn = eng.connect()
+    # 迁移期间必须关闭 FK enforcement：DROP TABLE projects 会触发
+    # ON DELETE CASCADE，把子表数据一起删掉。PRAGMA 必须在事务外执行。
+    try:
+        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        conn.commit()
+    except Exception:
+        pass
+
+    try:
         # 1) 取所有老项目（id + new_id 映射）
         rows = conn.execute(text("SELECT id FROM projects")).fetchall()
         id_map = {}
@@ -157,7 +168,12 @@ def migrate_project_ids(engine: Engine = None) -> dict:
                 # cols_info: (cid, name, type, notnull, dflt_value, pk)
                 other_cols = [c for c in cols_info if c[1] not in ("project_id", "_new_pid")]
 
-                # 构造新表 schema,id 列必须有 PRIMARY KEY
+                # 构造新表 schema,id 列必须有 PRIMARY KEY。
+                # PRAGMA 不会给出外键/唯一约束，这里借助 ORM metadata 找回，
+                # 否则表重建后 ondelete CASCADE / UNIQUE 会静默丢失。
+                orm_table = Base.metadata.tables.get(tname)
+                orm_columns = {c.name: c for c in orm_table.columns} if orm_table is not None else {}
+
                 col_defs_full = []
                 for c in cols_info:
                     if c[1] in ("project_id", "_new_pid"):
@@ -170,8 +186,33 @@ def migrate_project_ids(engine: Engine = None) -> dict:
                         parts.append("NOT NULL")
                     if c[4] is not None:  # default
                         parts.append(f"DEFAULT {c[4]}")
+                    orm_col = orm_columns.get(c[1])
+                    if orm_col is not None:
+                        for fk in orm_col.foreign_keys:
+                            if fk.column is not None:
+                                parts.append(
+                                    f"REFERENCES {fk.column.table.name}({fk.column.name})"
+                                )
+                                if fk.ondelete:
+                                    parts.append(f"ON DELETE {fk.ondelete}")
                     col_defs_full.append(" ".join(parts))
-                col_defs_full.append('"project_id" TEXT')
+                project_id_def = '"project_id" TEXT'
+                project_orm_col = orm_columns.get("project_id")
+                if project_orm_col is not None:
+                    for fk in project_orm_col.foreign_keys:
+                        if fk.column is not None:
+                            project_id_def += (
+                                f" REFERENCES {fk.column.table.name}({fk.column.name})"
+                            )
+                            if fk.ondelete:
+                                project_id_def += f" ON DELETE {fk.ondelete}"
+                col_defs_full.append(project_id_def)
+                if orm_table is not None:
+                    for constraint in orm_table.constraints:
+                        if isinstance(constraint, UniqueConstraint):
+                            cols = ", ".join(f'"{c.name}"' for c in constraint.columns)
+                            if cols:
+                                col_defs_full.append(f"UNIQUE ({cols})")
                 col_defs_str = ", ".join(col_defs_full)
 
                 # 取老表的 SELECT 列表
@@ -218,6 +259,19 @@ def migrate_project_ids(engine: Engine = None) -> dict:
         # 5) Inspiration 的 related_characters / related_chapters JSON 字段:
         #    [{"project_id": 1, "character_id": 2}] → [{"project_id": "hex", ...}]
         #    留待应用层处理(每次读时兼容 int → str),不在迁移脚本改
+
+    finally:
+        try:
+            conn.commit()
+        except Exception:
+            conn.rollback()
+        # 连接会回到连接池；恢复 FK enforcement，避免后续请求拿到关闭外键的连接。
+        try:
+            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+            conn.commit()
+        except Exception:
+            pass
+        conn.close()
 
     logger.info(f"[migrate] 完成: {result}")
     return result

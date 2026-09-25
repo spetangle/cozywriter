@@ -72,6 +72,20 @@ def init_db():
     except Exception as e:
         logger.warning(f"[DB migrate] 通用迁移失败: {e}")
 
+    # 外键一致性检查：开启 PRAGMA foreign_keys 后，历史孤儿数据会暴露出来。
+    # 这里只告警不自动删除，避免误删用户数据。
+    try:
+        from sqlalchemy import text as _sql_text
+        with engine.connect() as _fk_conn:
+            orphan_rows = _fk_conn.execute(_sql_text("PRAGMA foreign_key_check")).fetchall()
+        if orphan_rows:
+            logger.warning(
+                f"[DB fk_check] 发现 {len(orphan_rows)} 条外键孤儿记录（仅告警，未自动清理）: "
+                f"{orphan_rows[:5]}"
+            )
+    except Exception as e:
+        logger.warning(f"[DB fk_check] 外键检查失败: {e}")
+
     # 初始化 LLM 超参数配置
     try:
         from llm.hyperparam_service import HyperparamService

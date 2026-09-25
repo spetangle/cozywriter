@@ -27,9 +27,28 @@ JS_DIR = os.path.join(ROOT, "web", "static", "js")
 CALL_RE = re.compile(r"/api/[A-Za-z0-9\-_/$.{}]*")
 
 
+def iter_routes(routes):
+    """递归展开 FastAPI 路由。
+
+    旧版 FastAPI 直接返回 APIRoute；0.141+ 会把 include_router 的结果包成
+    `_IncludedRouter`，需要用 original_router.routes 展开，否则测试会误判
+    所有业务路由都不存在。
+    """
+    for r in routes:
+        path = getattr(r, "path", None)
+        if path:
+            yield r
+        nested = getattr(r, "routes", None)
+        if nested:
+            yield from iter_routes(nested)
+        original = getattr(r, "original_router", None)
+        if original is not None:
+            yield from iter_routes(getattr(original, "routes", []) or [])
+
+
 def backend_routes() -> set[str]:
     out = set()
-    for r in main.app.routes:
+    for r in iter_routes(main.app.routes):
         p = getattr(r, "path", None)
         if p:
             out.add(re.sub(r"\{[^}]+\}", "{}", p))
@@ -76,7 +95,7 @@ def main_check() -> int:
         "POST /api/projects/{}/chapters/{}/rollback/{}",
     ]
     by_method: dict[str, set[str]] = {}
-    for r in main.app.routes:
+    for r in iter_routes(main.app.routes):
         p = getattr(r, "path", None)
         if not p:
             continue

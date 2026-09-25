@@ -42,8 +42,7 @@
 
 - [x] 4.1 Step4 补 `max_tokens`（长章截断）：主流程与独立函数一致使用 `calculate_max_tokens`
 - [x] 4.2 Step8 空文本保护（避免覆盖正文）：空文本抛错不提交；失败/取消先 rollback；后处理空正文直接返回；修订分支字段与位置参数修正
-- [x] 4.3 迁移缺口：`init_db` 集成通用迁移；`migrate.py` DateTime/CURRENT_TIMESTAMP 与 NOT NULL 处理；`migrate_project_ids` 动态保留旧列并补 ORM 新列、子表补 `full_review_sessions`、索引在 DROP 前保存后恢复
-  - 仍有局限：外键/唯一约束仍依赖 SQLite 表重建时的 ORM 声明，未做完整的 `PRAGMA foreign_key_check` 自动修复
+- [x] 4.3 迁移缺口：`init_db` 集成通用迁移；`migrate.py` DateTime/CURRENT_TIMESTAMP 与 NOT NULL；`migrate_project_ids` 动态保留旧列并补 ORM 新列、子表补 `full_review_sessions`、迁移期关闭 FK enforcement 防止 DROP 父表级联删数据、按 ORM 恢复外键/唯一约束、索引在 DROP 前保存后恢复；启动时 `PRAGMA foreign_key_check` 仅告警
 - [x] 4.4 开启 `PRAGMA foreign_keys=ON`（每个 SQLite 连接注册 connect 事件；bootstrap 删除角色前显式清关系/弧光）
 - [x] 4.5 Bootstrap 失败不误删角色；`user_filled` 透传下游
   - 拒绝 failed run commit；按 stage 状态条件清理；prev_outputs 包含 user_filled；灵感建项目走自动 commit；移除中间 commit
@@ -55,14 +54,14 @@
 
 - [x] 5.1 `AGENTS.md` 增补 `test_script_bootstrap.py` 命令
 - [x] 5.2 `README.md` / `ARCHITECTURE.md` 顶部标注过时内容，指向代码与 `AGENTS.md`
-- [~] 5.3 Windows 侧跑通测试：Linux 侧已跑 `test_script_bootstrap.py` / `test_script_post_process.py` / `test_script_api.py` / `test_spa_components.js`；`test_frontend_routes.py` 受本机 FastAPI 0.141 路由包装结构影响（后端实际路由正常），需在项目目标环境复跑
+- [x] 5.3 测试：Linux 侧已跑 `test_frontend_routes.py`（测试已兼容 FastAPI 0.141 的 `_IncludedRouter` 展开）、`test_script_bootstrap.py`、`test_migrate_project_ids.py`、`test_script_post_process.py`、`test_script_api.py`、`test_spa_components.js`；Windows 侧仍需按项目环境复跑
 - [x] 5.4 清理 `chapters.py` 无效 import；无其他 `_commit_bootstrap_results` 引用
 
 ## 验证策略
 
 1. 本机：`python3 -m py_compile`（全量）+ `node --check`（全量）
 2. 本机：`node tests/test_spa_components.js`
-3. Windows：`tests/test_frontend_routes.py`、`test_script_api.py`、`test_script_post_process.py`、`test_script_bootstrap.py`
+3. Windows：`tests/test_frontend_routes.py`、`test_script_api.py`、`test_script_post_process.py`、`test_script_bootstrap.py`、`test_migrate_project_ids.py`
 4. 手动冒烟：建项目 → 引导补全落库 → 单章生成 → 评审 → 导出 → 建剧本 → 场景生成 → 分镜
 
 ## 决策记录
