@@ -1936,24 +1936,31 @@ def run_quick_consistency_check(
     content = "\n\n".join(
         [f"【第{c.order + 1}章 {c.title}】\n{(c.content or '')[:1500]}" for c in last_5]
     )
-    chars = db.query(Character).filter(Character.project_id == project_id).all()
-    char_text = "\n".join(
-        [f"- {c.name}: {c.description or ''} | profile={json.dumps(c.profile, ensure_ascii=False)}"
-         for c in chars]
-    )
     proj_outline = db.query(ProjectOutline).filter(ProjectOutline.project_id == project_id).first()
     outline_text = proj_outline.outline_text if proj_outline else ""
 
-    # 复用 consistency_checker role
+    # 复用 consistency_checker role。模板需要 characters/world/foreshadowings
+    # 三个占位符，content 通过 user 消息传入（旧写法把 content 也塞进 ctx，
+    # 结果模板渲染失败、检查空转）。
+    from storage.models import Character, WorldEntry, Foreshadowing
+
+    chars_all = db.query(Character).filter(Character.project_id == project_id).all()
+    world_entries = db.query(WorldEntry).filter(WorldEntry.project_id == project_id).all()
+    foreshadows = db.query(Foreshadowing).filter(Foreshadowing.project_id == project_id).all()
+
     ctx = {
-        "characters": char_text,
-        "world": outline_text[:1500],
-        "foreshadowings": "（参见前文）",
+        "characters": "\n".join(c.profile_text for c in chars_all) or "（无）",
+        "world": "\n".join(w.summary_text for w in world_entries) or outline_text[:1500] or "（无）",
+        "foreshadowings": "\n".join(
+            f"- {f.title}：{f.content}" for f in foreshadows
+        ) or "（无）",
     }
-    user = f"【近 5 章正文】\n{content[:8000]}"
+    user = f"待检查文本：\n{content[:8000]}\n\n检查结果："
     try:
         raw = _call_llm("consistency", ctx, user, provider, project_id=project_id)
         data = _parse_json(raw)
+        if not isinstance(data, dict):
+            data = {}
         return {
             "has_issues": bool(data.get("issues")),
             "issues": data.get("issues", []),
@@ -2868,13 +2875,18 @@ def run_chapter_generation_pipeline(
 
 def _revise_outline(outline: dict, prep: dict, suggestions: str, provider: str | None = None) -> dict:
     """细纲修订：在原细纲基础上根据评审建议重做"""
+    chapter_outline = prep.get("chapter_outline") or {}
     ctx = {
-        "chapter_position": (prep["chapter_outline"] or {}).get("position", "发展"),
-        "pacing": (prep["chapter_outline"] or {}).get("pacing", "平稳"),
-        "key_content": (prep["chapter_outline"] or {}).get("key_content", ""),
-        "plot_advance": (prep["chapter_outline"] or {}).get("plot_advance", ""),
+        "chapter_position": chapter_outline.get("position", "发展"),
+        "pacing": chapter_outline.get("pacing", "平稳"),
+        "key_content": chapter_outline.get("key_content", ""),
+        "plot_advance": chapter_outline.get("plot_advance", ""),
         "prep_info": _format_prep_for_llm(prep) + f"\n\n【需修复的严重问题】\n{suggestions}",
         "target_word_count": prep["project_meta"]["target_word_count"],
+        # chapter_outline_gen 模板还需要这两个占位符；缺失会让重写请求变成
+        # “第（未提供）章”，也看不到已发生事件，重写内容容易与前面章节重复。
+        "chapter_num": (chapter_outline.get("order", 0) or 0) + 1,
+        "previous_events": prep.get("previous_event_signatures_text", "") or "（暂无已发生事件）",
     }
     
     # 使用带重试机制的 _call_llm_with_fingerprint
