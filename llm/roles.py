@@ -765,6 +765,7 @@ COMPRESS_SYSTEM = """你是小说缩写专家。
 【目标字数】{target_word_count}
 【当前字数】{current_word_count}
 【允许字数范围】{min_words} ~ {max_words} 字（最终输出必须落在这个区间内）
+【本轮量化要求】{adjust_instruction}
 【保留要求】所有 plot_advance / key_beats / 关键场景冲突点
 
 【细纲】(保留剧情核心)
@@ -801,6 +802,7 @@ EXPAND_SYSTEM = """你是小说扩写专家。
 【目标字数】{target_word_count}
 【当前字数】{current_word_count}
 【允许字数范围】{min_words} ~ {max_words} 字（最终输出必须落在这个区间内）
+【本轮量化要求】{adjust_instruction}
 【扩写方向】根据细纲补充：环境描写 / 心理活动 / 对话 / 动作细节
 
 【细纲】

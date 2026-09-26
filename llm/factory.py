@@ -6,6 +6,7 @@ from llm.ollama_provider import OllamaProvider
 from llm.minimax_provider import MiniMaxProvider
 from llm.mimo_provider import MimoProvider
 from llm.deepseek_provider import DeepSeekProvider
+from llm.opencode_provider import OpencodeProvider
 from config import settings
 
 
@@ -17,6 +18,7 @@ class LLMFactory:
         "minimax": MiniMaxProvider,
         "mimo": MimoProvider,
         "deepseek": DeepSeekProvider,
+        "opencode": OpencodeProvider,
     }
 
     @classmethod
@@ -53,6 +55,12 @@ class LLMFactory:
                 provider = SystemSetting.get(_db, SystemSetting.KEY_DEFAULT_LLM_PROVIDER)
 
             provider_key = (provider or settings.default_llm_provider or "").strip().lower()
+
+            # opencode 仅在用户显式开启时可用
+            if provider_key == "opencode" and not getattr(settings, "opencode_enabled", False):
+                raise ValueError(
+                    "opencode provider 未启用。请在 .env 中设置 OPENCODE_ENABLED=true 后重启。"
+                )
 
             config_kwargs = {}
             if _db is not None and provider_key:

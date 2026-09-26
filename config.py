@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-chat"
     deepseek_base_url: str = "https://api.deepseek.com/v1"
+    # OpenCode 配置（仅在显式开启时可用）
+    opencode_api_key: str = ""
+    opencode_model: str = "big-pickle"
+    opencode_base_url: str = "https://opencode.ai/anthropic"
+    opencode_enabled: bool = False
     # 默认 LLM Provider（值为空字符串时，由 LLMFactory 从数据库 SystemSetting 读取回退）
     default_llm_provider: str = ""
 

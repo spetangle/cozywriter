@@ -57,6 +57,24 @@
 - [x] 5.3 测试：Linux 侧已跑 `test_frontend_routes.py`（测试已兼容 FastAPI 0.141 的 `_IncludedRouter` 展开）、`test_script_bootstrap.py`、`test_migrate_project_ids.py`、`test_script_post_process.py`、`test_script_api.py`、`test_system_smoke.py`、`test_spa_components.js`；报告见 `docs/TEST_REPORT.md`，Windows 侧仍需按项目环境复跑
 - [x] 5.4 清理 `chapters.py` 无效 import；无其他 `_commit_bootstrap_results` 引用
 
+## Phase 6 · 真实流程测试衍生修复
+
+> 依据 `docs/TEST_REPORT_NOVEL_FLOW.md`（真实 LLM 跑通问卷建项目 + 连续生成 10 章）；详细方案见 `docs/FIX_PLAN_NOVEL_FLOW.md`。
+
+- [x] 6.1 细纲重写补 `chapter_num` / `previous_events`（避免重写与前面章节重复）
+- [x] 6.2 `run_quick_consistency_check` 按模板传参（`content` 走 user，修复一致性检查空转）
+- [x] 6.3 `adjust_word_count` 字数收敛：量化删减/补充目标、3 轮小幅修正、候选优先选入区间者
+- [x] 6.4 单章超长防护：生成阶段上限校验 + 压缩动态 `max_tokens` + 落库前最终防线
+- [ ] 6.5 DeepSeek JSON 空响应：降级提示增强、JSON 开关可配置、失败可观测
+- [ ] 6.6 RAG 未启用时的显式提示与文档；装好 embedding 后复测去重/一致性
+- [ ] 6.7 后处理结果（弧光/关系/伏笔）前端接线
+
+## Phase 7 · 新增 Provider
+
+- [x] 7.1 新增 opencode provider（Anthropic 兼容），默认关闭，需 `OPENCODE_ENABLED=true` 才可用
+- [x] 7.2 注册到工厂 / 服务商种子 / 模型列表 / 超参预设 / init 与启动检查
+- [x] 7.3 `.env.example` 增加 OPENCODE_* 配置项
+
 ## 验证策略
 
 1. 本机：`python3 -m py_compile`（全量）+ `node --check`（全量）

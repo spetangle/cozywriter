@@ -1308,8 +1308,8 @@ def adjust_word_count(
     )
 
     # 保存所有尝试的内容，用于最终选择
-    attempts = [(actual, content)]
-    
+    attempts = [(actual, content, False)]
+
     ctx = {
         "target_word_count": target,
         "current_word_count": actual,
@@ -1318,25 +1318,26 @@ def adjust_word_count(
         "outline": json.dumps(outline, ensure_ascii=False, indent=2) if isinstance(outline, dict) else str(outline),
         "content": content[:6000],  # 截断避免超长
     }
-    
+
     try:
         t0 = time.time()
         role_name = "compressor" if actual > max_w else "expander"
         target_key = "compressed_text" if actual > max_w else "expanded_text"
-        
+
         new_content = content
         claimed_count = None
-        max_adjust_attempts = 2  # 最多进行 2 次调整
-        
+        # 最多 3 轮；每轮要求模型“小幅修正”，避免一次过冲。
+        max_adjust_attempts = 3
+
         # 获取角色对象，用于读取默认参数
         role = ROLES.get(role_name)
         if role is None:
             logger.error(f"[WordAdjust] 未知角色: {role_name}")
             return content
-        
+
         for adjust_round in range(1, max_adjust_attempts + 1):
             logger.info(f"[WordAdjust] 第 {adjust_round} 次调整开始...")
-            
+
             # 增加随机性：每次调整使用不同的 temperature 和 top_p
             # 避免 LLM 返回相同结果（缓存命中）
             adjust_temperature = role.temperature
@@ -1347,11 +1348,29 @@ def adjust_word_count(
                 adjust_temperature = min(role.temperature + 0.2, 1.0)
                 adjust_top_p = min(getattr(role, "top_p", 1.0) + 0.1, 1.0)
                 logger.info(f"[WordAdjust] 第 {adjust_round} 次调整：增加随机性，temperature={adjust_temperature:.2f}, top_p={adjust_top_p:.2f}")
-            
-            # 根据目标字数计算 max_tokens（1 token ≈ 0.75 个中文汉字）
-            # 预留 20% 的缓冲空间，确保 LLM 有足够的输出空间
-            target_tokens = int(max_w * 1.3)
-            
+
+            # 预算化目标：明确“需要删减/补充多少字”，并要求单轮小幅修正。
+            current_for_round = _count_chinese_chars(new_content)
+            if current_for_round > max_w:
+                need_delta = current_for_round - target
+                ctx["adjust_instruction"] = (
+                    f"当前 {current_for_round} 字，需删减约 {need_delta} 字。"
+                    f"优先删环境/次要对话，再删重复心理描写，不得删主线事件；"
+                    f"单轮只做小幅修正，最终必须落在 {min_w}~{max_w} 字之间。"
+                )
+            else:
+                need_delta = target - current_for_round
+                ctx["adjust_instruction"] = (
+                    f"当前 {current_for_round} 字，需补充约 {need_delta} 字。"
+                    f"按环境描写→心理活动→对话→动作细节的顺序补充，不得新增与细纲冲突的情节；"
+                    f"单轮只做小幅修正，最终必须落在 {min_w}~{max_w} 字之间。"
+                )
+            ctx["previous_attempt_count"] = adjust_round - 1
+
+            # max_tokens 由“目标区间上限”决定（不用当前超长字数），
+            # 避免因原文过长而放开输出上限，导致压缩后仍超限。
+            target_tokens = max(512, int(max_w * 1.3))
+
             # 带重试机制的调用（每次调整内部最多重试 3 次）
             for attempt in range(3):
                 try:
@@ -1389,9 +1408,11 @@ def adjust_word_count(
             # 检查调整结果
             new_actual = _count_chinese_chars(new_content)
             in_range = min_w <= new_actual <= max_w
-            
-            # 保存本次尝试的内容
-            attempts.append((new_actual, new_content))
+            # 过冲保护：压缩/扩写越过区间 10% 以上视为失败候选，不参与最终选择。
+            overshoot = new_actual < min_w * 0.9 or new_actual > max_w * 1.1
+
+            # 保存本次尝试的内容（附带是否过冲）
+            attempts.append((new_actual, new_content, overshoot))
             
             # 验证 LLM 自报字数与实际字数差距过大时报警
             claimed_str = ""
@@ -1417,28 +1438,43 @@ def adjust_word_count(
                 duration_ms = (time.time() - t0) * 1000
                 logger.info(f"[WordAdjust] 调整成功，共尝试 {adjust_round} 次，用时 {duration_ms:.0f}ms")
                 return new_content
-            
+
             # 更新上下文，准备下一次调整
             ctx["current_word_count"] = new_actual
             ctx["content"] = new_content[:6000]
-        
+
         # ── 所有调整尝试均未达标 ──
-        # 从所有尝试（初始 + 2 次调整）中选择字数最接近目标的
+        # 选择优先级：① 落在区间内的（离目标最近）→ ② 未过冲的（离目标最近）
+        #            → ③ 过冲候选中最不离谱的
         duration_ms = (time.time() - t0) * 1000
-        logger.warning(f"[WordAdjust] 所有 {max_adjust_attempts} 次调整均未达标，将从 {len(attempts)} 份内容中选择最接近目标的")
-        
-        best_index = 0
-        best_diff = float('inf')
-        for i, (act, cnt) in enumerate(attempts):
-            diff = abs(act - target)
-            logger.info(f"[WordAdjust] 候选 {i+1}: {act}字, 与目标偏差 {diff}字")
-            if diff < best_diff:
-                best_diff = diff
-                best_index = i
-        
-        best_actual, best_content = attempts[best_index]
+        logger.warning(f"[WordAdjust] 所有 {max_adjust_attempts} 次调整均未达标，将从 {len(attempts)} 份内容中择优")
+
+        def _best(candidates):
+            best_i, best_diff = -1, float("inf")
+            for i, (act, _cnt, _over) in candidates:
+                diff = abs(act - target)
+                if diff < best_diff:
+                    best_diff, best_i = diff, i
+            return best_i, best_diff
+
+        indexed_in_range = [(i, a) for i, a in enumerate(attempts) if min_w <= a[0] <= max_w]
+        indexed_ok = [(i, a) for i, a in enumerate(attempts) if not a[2]]
+        indexed_all = [(i, a) for i, a in enumerate(attempts)]
+
+        chosen_index, best_diff = _best(indexed_in_range)
+        if chosen_index < 0:
+            chosen_index, best_diff = _best(indexed_ok)
+        if chosen_index < 0:
+            chosen_index, best_diff = _best(indexed_all)
+        if chosen_index < 0:
+            chosen_index, best_diff = 0, abs(attempts[0][0] - target)
+
+        for i, (act, _cnt, over) in enumerate(attempts):
+            logger.info(f"[WordAdjust] 候选 {i+1}: {act}字, 与目标偏差 {abs(act - target)}字{' (过冲)' if over else ''}")
+
+        best_actual, best_content, _ = attempts[chosen_index]
         logger.info(
-            f"[WordAdjust] 最终选择: 候选 {best_index + 1}, "
+            f"[WordAdjust] 最终选择: 候选 {chosen_index + 1}, "
             f"{best_actual}字 (与目标偏差 {best_diff}字), 用时 {duration_ms:.0f}ms"
         )
         return best_content
@@ -2534,28 +2570,52 @@ def run_chapter_generation_pipeline(
                 max_word_count=max_words,
             )
 
-            # LLM调用失败自动重试3次（间隔5秒），内容过短也重试
+            # 生成阶段上限校验：单章远超上限视为生成失控，
+            # 用强化后的 prompt 再生成一次，避免把 3 倍长度的正文丢给压缩器。
+            overflow_ratio = 1.8
+            best_text = ""
             for attempt in range(3):
                 try:
+                    attempt_msg = user_msg
+                    if attempt > 0:
+                        attempt_msg = (
+                            user_msg
+                            + f"\n\n【严重警告】上一次输出远超字数上限（目标 {target_word_count} 字）。"
+                            f"这次必须严格控制在 {min_words}~{max_words} 字之间，宁短勿长。"
+                        )
                     result = _call_llm_with_fingerprint(
-                        "writing", writing_ctx, user_msg, provider, db, task_id,
+                        "writing", writing_ctx, attempt_msg, provider, db, task_id,
                         max_tokens=max_tokens, project_id=project_id,
                     )
                     fingerprints.append(result["fingerprint"])
                     text = result["text"].strip()
-                    
-                    if text and len(text) > 100:
-                        return text
-                    
-                    if attempt < 2:
-                        logger.warning(f"[generate_text] 第{attempt+1}次尝试: 生成内容过短({len(text)}字)，5秒后重试...")
-                        time.sleep(5)
-                    else:
+
+                    if not text or len(text) <= 100:
+                        if attempt < 2:
+                            logger.warning(f"[generate_text] 第{attempt+1}次尝试: 生成内容过短({len(text)}字)，5秒后重试...")
+                            time.sleep(5)
+                            continue
                         logger.error("[generate_text] 3次重试均失败，生成内容过短或为空")
-                        return ""
+                        return best_text
+
+                    actual = _count_chinese_chars(text)
+                    if not best_text or actual < _count_chinese_chars(best_text) or actual <= max_words * overflow_ratio:
+                        best_text = text
+                    if actual <= max_words * overflow_ratio:
+                        return text
+
+                    logger.warning(
+                        f"[generate_text] 第{attempt+1}次生成超长：{actual}字 > 上限{max_words}×{overflow_ratio}，"
+                        f"重试以控制字数"
+                    )
+                    if attempt < 2:
+                        time.sleep(3)
                 except Exception as e:
                     logger.error(f"[generate_text] LLM调用失败: {e}")
                     raise
+
+            logger.warning(f"[generate_text] 多次生成仍超长，返回最接近上限的候选（{_count_chinese_chars(best_text)}字）")
+            return best_text
         
         stages["4_text_gen"], _ = _run_stage("4_text_gen", _generate_text)
 
@@ -2644,12 +2704,25 @@ def run_chapter_generation_pipeline(
                 raise ValueError("final chapter text is empty, refuse to overwrite existing content")
             chapter.content = final_text
             chapter.word_count = _count_chinese_chars(final_text)
+            # 最终防线：仍严重超出上限时留痕，方便前端提示与后续排查。
+            meta = stages["1_prep"]["project_meta"]
+            overflow = chapter.word_count > meta["max_words"] * 2
             chapter.fingerprint = {
                 "task_id": task_id,
                 "timestamp": time.time(),
                 "total_duration_ms": (time.time() - start_time) * 1000,
                 "llm_calls": fingerprints,
             }
+            if overflow:
+                logger.warning(
+                    f"[Pipeline] chapter {chapter_id} 字数严重超标: "
+                    f"{chapter.word_count}字 > 上限{meta['max_words']}×2"
+                )
+                chapter.fingerprint["word_count_overflow"] = {
+                    "word_count": chapter.word_count,
+                    "target": meta["target_word_count"],
+                    "max_words": meta["max_words"],
+                }
             version = ChapterVersion(
                 chapter_id=chapter_id,
                 content=final_text,

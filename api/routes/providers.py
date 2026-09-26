@@ -6,6 +6,7 @@ from storage.database import get_db
 from storage.models.provider import Provider
 from storage.models.system_setting import SystemSetting
 from logger import logger
+from config import settings
 
 router = APIRouter(prefix="/api/providers", tags=["服务商"])
 
@@ -71,6 +72,12 @@ SEED_PROVIDERS: list[dict] = [
         "base_url": "https://api.deepseek.com/v1",
         "model": "deepseek-chat-v4-flash",
     },
+    {
+        "id": "opencode",
+        "name": "OpenCode Go",
+        "base_url": "https://opencode.ai/anthropic",
+        "model": "big-pickle",
+    },
 ]
 
 
@@ -109,6 +116,10 @@ def _ensure_seeded(db: Session):
                 api_key = app_settings.deepseek_api_key or ""
                 base_url = base_url or app_settings.deepseek_base_url
                 model = model or app_settings.deepseek_model
+            elif pid == "opencode":
+                api_key = getattr(app_settings, "opencode_api_key", "") or ""
+                base_url = base_url or getattr(app_settings, "opencode_base_url", "")
+                model = model or getattr(app_settings, "opencode_model", "")
 
         db.add(Provider(
             id=seed["id"],
@@ -119,7 +130,7 @@ def _ensure_seeded(db: Session):
             is_default=False,
         ))
 
-    if db.dirty:
+    if db.new:
         default = ""
         if app_settings:
             default = (app_settings.default_llm_provider or "").strip().lower()
@@ -253,7 +264,36 @@ def list_available_models(body: ListModelsRequest, db: Session = Depends(get_db)
     base_url = body.base_url if body.base_url is not None else p.base_url
 
     if not api_key and p.id != "ollama":
+        # OpenCode 未显式开启时不调用外部接口，直接返回内置模型列表。
+        if p.id.lower() == "opencode":
+            from llm.opencode_provider import OpencodeProvider
+            return {
+                "ok": True,
+                "message": "OpenCode Go 未启用或未配置 Key，返回内置推荐模型",
+                "models": [{"id": m, "name": m} for m in OpencodeProvider.SUPPORTED_MODELS],
+                "fallback": True,
+            }
         return {"ok": False, "message": "API Key 为空，请先配置", "models": []}
+
+    # OpenCode 未显式开启时不调用外部接口，直接返回内置模型列表。
+    if p.id.lower() == "opencode" and not getattr(settings, "opencode_enabled", False):
+        from llm.opencode_provider import OpencodeProvider
+        return {
+            "ok": True,
+            "message": "OpenCode Go 未启用（OPENCODE_ENABLED=false），返回内置推荐模型",
+            "models": [{"id": m, "name": m} for m in OpencodeProvider.SUPPORTED_MODELS],
+            "fallback": True,
+        }
+
+    # OpenCode 未显式开启时不调用外部接口，直接返回内置模型列表。
+    if p.id.lower() == "opencode" and not getattr(settings, "opencode_enabled", False):
+        from llm.opencode_provider import OpencodeProvider
+        return {
+            "ok": True,
+            "message": "OpenCode Go 未启用（OPENCODE_ENABLED=false），返回内置推荐模型",
+            "models": [{"id": m, "name": m} for m in OpencodeProvider.SUPPORTED_MODELS],
+            "fallback": True,
+        }
 
     from llm.factory import LLMFactory
 
@@ -294,6 +334,11 @@ def list_available_models(body: ListModelsRequest, db: Session = Depends(get_db)
                 fallback_models = [
                     {"id": "mimo-v2.5-pro", "name": "mimo-v2.5-pro"},
                 ]
+            elif p.id.lower() == "opencode":
+                from llm.opencode_provider import OpencodeProvider
+                fallback_models = [
+                    {"id": m, "name": m} for m in OpencodeProvider.SUPPORTED_MODELS
+                ]
             return {
                 "ok": True,
                 "message": "使用内置推荐模型列表（该服务商暂未提供动态获取接口）",
@@ -312,7 +357,6 @@ def list_available_models(body: ListModelsRequest, db: Session = Depends(get_db)
             provider_instance = provider_cls(api_key=api_key)
         else:
             provider_instance = provider_cls(api_key=api_key, base_url=base_url)
-
         models = provider_instance.list_models()
         formatted_models = []
         for m in models:

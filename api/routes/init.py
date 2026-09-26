@@ -32,6 +32,8 @@ def _check_provider_configured() -> bool:
         return True
     if getattr(settings, "deepseek_api_key", ""):
         return True
+    if getattr(settings, "opencode_enabled", False) and getattr(settings, "opencode_api_key", ""):
+        return True
     # Ollama 不需要 key，只要有 URL 就行
     if settings.ollama_base_url:
         return True

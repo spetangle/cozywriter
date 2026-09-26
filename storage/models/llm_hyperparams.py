@@ -44,7 +44,7 @@ class LLMHyperparamPreset(Base):
         "default",                 
     ]
 
-    PROVIDERS = ["openai", "anthropic", "ollama", "minimax", "mimo", "deepseek"]
+    PROVIDERS = ["openai", "anthropic", "ollama", "minimax", "mimo", "deepseek", "opencode"]
 
     def to_dict(self) -> dict:
         """转换为字典"""
