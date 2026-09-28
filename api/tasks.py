@@ -136,8 +136,12 @@ def _run_task_from_queue(task: Task, fn: Callable, args: tuple, kwargs: dict):
     # 直接执行任务（不再调用 run_task_async，避免重复提交）
     task_id = task.id
     
-    # 根据任务类型选择超时时间
-    timeout_seconds = 3600.0 if task.task_type in ("batch_pipeline", "batch_generate") else 600.0
+    # 根据任务类型选择超时时间（batch 与 bootstrap 都可能跑很久）
+    timeout_seconds = (
+        21600.0 if task.task_type in ("batch_pipeline", "batch_generate")
+        else 7200.0 if task.task_type == "bootstrap"
+        else 600.0
+    )
     
     def _run():
         if task.status == "cancelled":
@@ -404,9 +408,14 @@ def run_task_async(task_id: str, fn: Callable, *args, **kwargs):
         return
 
     # 根据任务类型选择超时时间
-    # batch_pipeline: 批量生成多章，可能跑 30+ 分钟，给 1 小时
+    # batch_pipeline / batch_generate: 批量生成多章，推理模型可能跑数小时
+    # bootstrap: 150+ 章大纲续写也可能超过 10 分钟
     # 其他 LLM 任务: 10 分钟
-    timeout_seconds = 3600.0 if task.task_type in ("batch_pipeline", "batch_generate") else 600.0
+    timeout_seconds = (
+        21600.0 if task.task_type in ("batch_pipeline", "batch_generate")
+        else 7200.0 if task.task_type == "bootstrap"
+        else 600.0
+    )
 
     def _run():
         # 启动前检查是否已被标记取消（极小概率：submit 后立即终止）
