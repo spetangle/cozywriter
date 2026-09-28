@@ -66,8 +66,8 @@
 - [x] 6.3 `adjust_word_count` 字数收敛：量化删减/补充目标、3 轮小幅修正、候选优先选入区间者
 - [x] 6.4 单章超长防护：生成阶段上限校验 + 压缩动态 `max_tokens` + 落库前最终防线
 - [x] 6.5 DeepSeek JSON 空响应：降级提示增强、JSON 开关可配置（`providers.use_json_output`）、失败可观测；见 `docs/deepseek_json_mode.md`
-- [ ] 6.6 RAG 未启用时的显式提示与文档；装好 embedding 后复测去重/一致性
-- [ ] 6.7 后处理结果（弧光/关系/伏笔）前端接线
+- [x] 6.6 RAG 未启用时的显式提示与文档：`/api/config/status` 返回 `rag_enabled`（模型 + sentence-transformers 双重检测），项目页顶栏显示「⚠️ RAG 未启用」；新增 `docs/rag_setup.md`
+- [x] 6.7 后处理结果前端接线：后处理结果写入 `Chapter.fingerprint.post_processing`，新增章节/项目两个查询接口，项目页新增「🔄 状态变化」页签展示弧光/关系/伏笔/新角色
 
 ## Phase 7 · 新增 Provider
 

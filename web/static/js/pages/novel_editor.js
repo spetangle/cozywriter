@@ -11,6 +11,8 @@ Alpine.data('novelEditor', () => ({
     chapterDirty: false,
     prepInfoLoading: false,
     fingerprintLoading: false,
+    postProcessing: null,
+    postProcessingLoading: false,
     bootstrapData: null,
     bootstrapDataLoading: false,
 
@@ -107,6 +109,7 @@ Alpine.data('novelEditor', () => ({
     fullReviewHistory: [],
 
     currentLlmLabel: '',
+    ragEnabled: null,
     expandedTaskIds: [],
 
     get projectId() {
@@ -268,6 +271,20 @@ Alpine.data('novelEditor', () => ({
         }
     },
 
+    async loadPostProcessing(chapterId) {
+        this.postProcessingLoading = true;
+        try {
+            const res = await fetch(`/api/projects/${this.project.id}/chapters/${chapterId}/post-processing`);
+            if (!res.ok) return;
+            const data = await res.json();
+            this.postProcessing = data.post_processing || {};
+        } catch (e) {
+            console.warn('加载后处理结果失败:', e);
+        } finally {
+            this.postProcessingLoading = false;
+        }
+    },
+
     async loadCharacters(projectId) {
         try {
             const res = await fetch(`/api/projects/${projectId}/characters`);
@@ -348,6 +365,7 @@ Alpine.data('novelEditor', () => ({
                 this.currentLlmLabel = data.current_model
                     ? `${name} · ${data.current_model}`
                     : name;
+                this.ragEnabled = data.rag_enabled;
             }
         } catch (e) {
             console.warn('加载当前 LLM 失败:', e);
@@ -467,7 +485,10 @@ Alpine.data('novelEditor', () => ({
                         await this.loadChapters(this.project.id);
                         if (task.result?.chapter_id) {
                             const ch = this.chapters.find(c => c.id === task.result.chapter_id);
-                            if (ch) await this.selectChapter(ch);
+                            if (ch) {
+                                await this.selectChapter(ch);
+                                await this.loadPostProcessing(ch.id);
+                            }
                         }
                         Alpine.store('app').toast('生成完成', 'success');
                     } else if (task.status === 'failed') {
@@ -1090,6 +1111,8 @@ window.registerPageTemplate?.('novel_editor', `
           <h2 x-text="project.title"></h2>
           <span class="project-id-badge" x-show="project.id" x-text="'#' + project.id"></span>
           <span class="llm-badge" x-show="currentLlmLabel">🤖 <span x-text="currentLlmLabel"></span></span>
+          <span class="llm-badge" x-show="ragEnabled === false"
+                title="未检测到本地 embedding 模型，事件去重与相似度拦截会跳过；可在设置中下载 moka-ai/m3e-base">⚠️ RAG 未启用</span>
         </div>
         <div class="header-right">
           <button class="btn-secondary" @click="openTaskManager()" title="任务管理">📋 任务</button>
@@ -1206,6 +1229,7 @@ window.registerPageTemplate?.('novel_editor', `
                     <button :class="{ active: writingTab === 'review' }" @click="setWritingTab('review')">评审报告</button>
                     <button :class="{ active: writingTab === 'versions' }" @click="setWritingTab('versions'); loadChapterVersions()">📦 版本</button>
                     <button :class="{ active: writingTab === 'fingerprint' }" @click="setWritingTab('fingerprint'); loadFingerprint(currentChapter.id)">🔍 LLM指纹</button>
+                    <button :class="{ active: writingTab === 'status' }" @click="setWritingTab('status'); loadPostProcessing(currentChapter.id)">🔄 状态变化</button>
                   </div>
                 </div>
 
@@ -1328,6 +1352,67 @@ window.registerPageTemplate?.('novel_editor', `
                   <template x-if="!fingerprintLoading && currentChapter.fingerprint">
                     <div class="fingerprint-report">
                       <pre x-text="JSON.stringify(currentChapter.fingerprint, null, 2)"></pre>
+                    </div>
+                  </template>
+                </div>
+
+                <!-- 本章状态变化（后处理：弧光 / 关系 / 伏笔） -->
+                <div x-show="writingTab === 'status'" class="writing-tab-content writing-status-panel">
+                  <template x-if="postProcessingLoading"><p class="loading-hint">⏳ 加载中...</p></template>
+                  <template x-if="!postProcessingLoading">
+                    <div class="post-processing-report">
+                      <div class="empty-hint" x-show="!postProcessing || (
+                        (postProcessing.arc_updates || []).length === 0 &&
+                        (postProcessing.relation_updates || []).length === 0 &&
+                        (postProcessing.foreshadow_updates || []).length === 0 &&
+                        (postProcessing.new_characters || []).length === 0
+                      )">暂无状态变化（本章可能未跑后处理）</div>
+
+                      <div x-show="(postProcessing?.arc_updates || []).length > 0">
+                        <h5>🎭 角色弧光</h5>
+                        <ul>
+                          <template x-for="a in (postProcessing?.arc_updates || [])" :key="'arc-' + a.character_name">
+                            <li><strong x-text="a.character_name"></strong>：<span x-text="a.current_state || a.new_state || ''"></span></li>
+                          </template>
+                        </ul>
+                      </div>
+
+                      <div x-show="(postProcessing?.relation_updates || []).length > 0">
+                        <h5>🔗 角色关系</h5>
+                        <ul>
+                          <template x-for="(r, ri) in (postProcessing?.relation_updates || [])" :key="'rel-' + ri">
+                            <li><span x-text="r.from"></span> → <span x-text="r.to"></span>：<span x-text="r.new_type || r.type || ''"></span>
+                              <span x-show="r.description">（<span x-text="r.description"></span>）</span></li>
+                          </template>
+                        </ul>
+                      </div>
+
+                      <div x-show="(postProcessing?.foreshadow_updates || []).length > 0">
+                        <h5>🪶 伏笔</h5>
+                        <ul>
+                          <template x-for="(f, fi) in (postProcessing?.foreshadow_updates || [])" :key="'fs-' + fi">
+                            <li><strong x-text="f.title || f.name || ''"></strong>：<span x-text="f.new_status || f.status || f.evidence || ''"></span></li>
+                          </template>
+                        </ul>
+                      </div>
+
+                      <div x-show="(postProcessing?.new_characters || []).length > 0">
+                        <h5>🆕 新角色</h5>
+                        <ul>
+                          <template x-for="(c, ci) in (postProcessing?.new_characters || [])" :key="'newc-' + ci">
+                            <li><strong x-text="c.name"></strong>（<span x-text="c.role || ''"></span>）</li>
+                          </template>
+                        </ul>
+                      </div>
+
+                      <div x-show="(postProcessing?.notifications || []).length > 0">
+                        <h5>🔔 提示</h5>
+                        <ul>
+                          <template x-for="(n, ni) in (postProcessing?.notifications || [])" :key="'note-' + ni">
+                            <li><span x-text="n.title || n.type || ''"></span>：<span x-text="n.message || ''"></span></li>
+                          </template>
+                        </ul>
+                      </div>
                     </div>
                   </template>
                 </div>

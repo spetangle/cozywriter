@@ -2741,6 +2741,26 @@ def run_chapter_generation_pipeline(
             ),
         )
 
+        # 把后处理结果（弧光/关系/伏笔变化）持久化到 fingerprint，
+        # 供前端展示"本章状态变化"。
+        try:
+            post_result = stages.get("9_post") or {}
+            chapter_row = db.query(Chapter).filter(Chapter.id == chapter_id).first()
+            if chapter_row is not None:
+                fp = dict(chapter_row.fingerprint or {})
+                fp["post_processing"] = {
+                    "arc_updates": post_result.get("arc_updates", []),
+                    "relation_updates": post_result.get("relation_updates", []),
+                    "foreshadow_updates": post_result.get("foreshadow_updates", []),
+                    "new_characters": post_result.get("new_characters", []),
+                    "notifications": post_result.get("notifications", []),
+                    "consistency": post_result.get("consistency"),
+                }
+                chapter_row.fingerprint = fp
+                db.commit()
+        except Exception as fp_err:
+            logger.warning(f"[Pipeline] 保存 post_processing 指纹失败: {fp_err}")
+
         # ─── 保存细纲到数据库 ───
         try:
             from storage.models import ChapterOutline

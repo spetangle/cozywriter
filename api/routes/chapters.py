@@ -210,6 +210,57 @@ async def get_chapter_fingerprint(project_id: str, chapter_id: int, db: Session 
     return {"fingerprint": chapter.fingerprint or {}}
 
 
+@router.get("/projects/{project_id}/chapters/{chapter_id}/post-processing")
+async def get_chapter_post_processing(project_id: str, chapter_id: int, db: Session = Depends(get_db)):
+    """获取本章后处理结果（弧光 / 关系 / 伏笔 / 新角色变更）。"""
+    chapter = _verify_chapter(chapter_id, project_id, db)
+    fp = chapter.fingerprint or {}
+    return {
+        "chapter_id": chapter_id,
+        "order": chapter.order,
+        "title": chapter.title,
+        "post_processing": fp.get("post_processing") or {},
+    }
+
+
+@router.get("/projects/{project_id}/post-processing/latest")
+async def get_project_latest_post_processing(
+    project_id: str,
+    limit: int = 5,
+    db: Session = Depends(get_db),
+):
+    """获取项目最近 N 章的"本章状态变化"（按章节倒序）。
+
+    只读取已写入 fingerprint.post_processing 的章节，供前端展示后处理结果。
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    limit = max(1, min(int(limit or 5), 50))
+    chapters = (
+        db.query(Chapter)
+        .filter(Chapter.project_id == project_id)
+        .order_by(Chapter.order.desc())
+        .all()
+    )
+    result = []
+    for ch in chapters:
+        fp = ch.fingerprint or {}
+        post = fp.get("post_processing")
+        if not post:
+            continue
+        result.append({
+            "chapter_id": ch.id,
+            "order": ch.order,
+            "title": ch.title,
+            "post_processing": post,
+        })
+        if len(result) >= limit:
+            break
+    return {"project_id": project_id, "items": result}
+
+
 @router.put("/projects/{project_id}/chapters/{chapter_id}", response_model=ChapterResponse)
 async def update_chapter(project_id: str, chapter_id: int, data: ChapterUpdate, db: Session = Depends(get_db)):
     """更新章节（自动创建版本快照）"""

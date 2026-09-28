@@ -5807,6 +5807,25 @@ color: #92400e;
   white-space: pre-wrap;
 }
 
+/* 本章状态变化（后处理结果） */
+.post-processing-report {
+  padding: 4px 2px;
+}
+.post-processing-report h5 {
+  margin: 14px 0 6px;
+  font-size: 14px;
+  color: var(--text);
+}
+.post-processing-report ul {
+  margin: 0;
+  padding-left: 20px;
+}
+.post-processing-report li {
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--text);
+}
+
 /* 任务项 */
 .task-item {
   display: flex;

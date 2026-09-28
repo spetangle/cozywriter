@@ -199,6 +199,13 @@ def test_chapters_and_export(pid):
     check("POST 章节细纲 200", r.status_code == 200, r.text[:160])
     check("GET 章节细纲 200", client.get(f"/api/projects/{pid}/chapters/{cid}/outline").status_code == 200)
 
+    r = client.get(f"/api/projects/{pid}/chapters/{cid}/post-processing")
+    check("GET 章节后处理 200", r.status_code == 200 and "post_processing" in r.json(), r.text[:120])
+    r = client.get(f"/api/projects/{pid}/post-processing/latest")
+    check("GET 项目后处理列表 200", r.status_code == 200 and "items" in r.json(), r.text[:120])
+    check("GET 后处理未知项目 404",
+          client.get("/api/projects/nonexistent/post-processing/latest").status_code == 404)
+
     r = client.post("/api/export/chapters", json={
         "project_id": pid, "chapter_ids": [cid], "format": "txt",
     })
