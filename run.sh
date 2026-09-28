@@ -1,37 +1,65 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# CozyWriter 启动脚本（Linux / macOS）
+# 用法：./run.sh
+#
+# 步骤：
+#   1) 检查 Python 3.10+，创建/复用 .venv
+#   2) 升级 pip
+#   3) 安装 requirements.txt
+#   4) 启动服务（http://localhost:13567）
 set -e
+
+cd "$(dirname "$0")"
+
 echo "========================================"
-echo "  CozyWriter - 小说编写助手"
+echo "  CozyWriter - AI 小说 / 剧本编写助手"
 echo "========================================"
 echo ""
 
+TOTAL=4
+
 # ─── Step 1: virtual environment ───
-if [ ! -d ".venv" ]; then
-    echo "[1/4] 创建虚拟环境 .venv ..."
+echo "[1/$TOTAL] 检查 Python 与虚拟环境 .venv ..."
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "[ERROR] 未找到 python3，请先安装 Python 3.10+。" >&2
+    exit 1
+fi
+
+PY_VERSION=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+PY_OK=$(python3 -c 'import sys; print(1 if sys.version_info >= (3,10) else 0)')
+if [ "$PY_OK" != "1" ]; then
+    echo "[ERROR] 需要 Python 3.10+，当前为 $PY_VERSION。" >&2
+    exit 1
+fi
+
+if [ ! -x ".venv/bin/python" ]; then
+    echo "       创建虚拟环境（Python $PY_VERSION）..."
     python3 -m venv .venv
-    echo "      完成。"
+    echo "       完成。"
 else
-    echo "[1/4] 虚拟环境已就绪。"
+    echo "       虚拟环境已就绪（Python $PY_VERSION）。"
 fi
 echo ""
 
 # ─── Step 2: pip upgrade ───
-echo "[2/4] 升级 pip ..."
-.venv/bin/python -m pip install --upgrade pip --disable-pip-version-check 2>/dev/null
-echo "      完成。"
+echo "[2/$TOTAL] 升级 pip ..."
+.venv/bin/python -m pip install --upgrade pip --disable-pip-version-check --quiet
+echo "       完成。"
 echo ""
 
 # ─── Step 3: install requirements ───
-echo "[3/4] 安装依赖（首次运行可能需要几分钟）..."
-echo ""
+echo "[3/$TOTAL] 安装/校验依赖（首次运行可能需要几分钟）..."
 .venv/bin/python -m pip install -r requirements.txt --disable-pip-version-check
-echo ""
-echo "      所有依赖安装完成。"
+echo "       依赖就绪。"
 echo ""
 
 # ─── Step 4: launch server ───
-echo "[4/4] 启动 CozyWriter 服务 ..."
-echo "      浏览器打开 http://localhost:13567"
-echo "      按 Ctrl+C 停止。"
+mkdir -p data
+echo "[4/$TOTAL] 启动 CozyWriter ..."
+echo ""
+echo "  地址：http://localhost:13567"
+echo "  提示：LLM Provider 在「全局设置 → 服务商」里配置（数据库优先，.env 仅作回退）。"
+echo "       opencode 需在服务商里填写 API Key 才可启用；RAG 可选，见 docs/rag_setup.md。"
+echo "  停止：Ctrl+C"
 echo ""
 exec .venv/bin/python main.py

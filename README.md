@@ -1,114 +1,76 @@
-# CozyWriter · AI 小说编写助手
+# CozyWriter · AI 小说 / 剧本编写助手
 
-> ⚠️ 本文档部分内容已过时：前端已重构为多页面 SPA，新增剧本子系统与 deepseek/mimo provider，
-> Project ID 已改为 hex 字符串。请以代码与 `AGENTS.md` 为准。
->
-> 本地化 · 一键启动 · 长篇连载级一致性  
-> 基于 LLM API + RAG 知识管理 + 9 步章节生成流水线的 FastAPI Web 写作系统
+> 本地化 · 一键启动 · 长篇连载级一致性
+> FastAPI + 同步 SQLAlchemy(SQLite) + Alpine.js 无构建 SPA + ChromaDB RAG
 
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Embedding: moka-ai/m3e-base](https://img.shields.io/badge/Embedding-m3e--base-orange.svg)](https://huggingface.co/moka-ai/m3e-base)
+一个面向长篇小说与剧本创作的本地写作系统：LLM 生成 + 设定管理 + RAG 知识库 + 评审/一致性检查 + 大纲细纲 + 创意问卷 + 灵感池 + 剧本场景/分镜。
+
+> 开发与接口细节请以代码和 `AGENTS.md` 为准；`ARCHITECTURE.md` 为较早期文档，部分内容已过时。
 
 ---
 
 ## ✨ 核心特性
 
-### 🤖 9 步章节生成流水线
+### 🤖 小说 9 步章节生成流水线
+细纲生成 → 细纲评审 → 正文写作 → 字数校验/调整 → 正文评审 → 修订决策 → 保存 → 后处理（弧光/关系/伏笔）→ 事件签名。
 
-每章按下述流程自动跑完（可同步 / 异步）：
+- 支持单章（`/api/chapters/generate-pipeline`）与批量（`/api/chapters/batch-generate`）
+- 字数动态 `max_tokens` + 收敛调整（目标区间 + 过冲淘汰）
+- 空正文保护：失败时保留旧正文，不写入空章节
 
-| 步骤 | 动作 | LLM Role |
-|---|---|---|
-| 1 | 聚合章节准备信息（项目设定 + 前 3 章 + 登场人物 + 活跃伏笔） | — |
-| 2 | 生成章节细纲 | `chapter_outline_gen` |
-| 3 | 评审细纲（**只过滤严重性漏洞**，可自动修订） | `outline_reviewer` |
-| 4 | 按细纲生成正文 | `novel_writer` |
-| 5 | 字数调整（过多缩写 / 过少扩写） | `compressor` / `expander` |
-| 6 | 8 维度正文评审 | `reviewer` |
-| 7 | 自动决策修订（avg < 6.5 自动改） | `revision_decider` + `reviser` |
-| 8 | 保存到 `Chapter.content` + `ChapterVersion` 快照 | — |
-| 9 | **后处理**（弧光 / 关系 / 伏笔 / 新角色 + 触发自动检查） | `post_chapter` + `foreshadow_updater` |
-
-### 📊 自动检查与触发
-
-| 触发 | 动作 |
-|---|---|
-| **每写完 1 章** | 角色弧光 + 关系矩阵 + 伏笔状态机自动更新 |
-| **第 3 章** | 黄金三章检查（开局诊断评分 + 建议） |
-| **每 5 章** | 连续性 + 一致性检查（自动运行，结果推给用户） |
-| 失败重跑 | 任一 stage 失败可单独 `POST /api/workflow/run/{id}/rerun` |
+### 🎬 剧本子系统
+- 场景（Screenplay）→ 分镜（Storyboard）→ 道具（Property）全链路
+- 场景生成流水线：准备 → 细纲 → 评审 → 正文 → 修订 → 分镜 → 后处理
+- 角色外貌（appearance）随剧情自动更新并带变化记录
 
 ### 🚀 项目引导补全（Bootstrap Workflow）
+创建项目后自动补全：基础外推 → 主旨/风格 → 世界观 → 角色 → 关系 → 弧光 → 大纲 → 章节细纲 → 伏笔。
 
-新建项目时只填 4 必填（书名 / 章节字数 / 题材 / 一句话），其余 8 选填可由 LLM 补全：
+- 单次最多生成 100 章细纲，超出自动分批续写直到覆盖目标章数
+- 支持重跑单个 stage、缺失项重跑、失败 run 不误删旧数据
 
-```
-用户表单 ─┬─ 4 必填 (锁)
-          └─ 8 选填 (缺则补)
+### 🎨 Provider 与领域增强
+- 支持 Anthropic / OpenAI / MiniMax / MiMo / DeepSeek / OpenCode Go / Ollama
+- Provider 配置以数据库为准（全局设置 → 服务商），`.env` 仅作回退
+- 每个 Provider 可单独配置模型名、Base URL、API Key，以及「JSON 输出模式」开关
 
-工作流分 11 个 stage 按依赖执行：
-  Stage 1   基础外推        (total_chapters / ai_removal)
-  Stage 2A  核心主旨+基调
-  Stage 2B  文风+节奏
-  Stage 2C  世界观骨架
-  Stage 3A  主角细化
-  Stage 3B  反派细化
-  Stage 3C  配角+关系矩阵
-  Stage 3D  角色弧光设计
-  Stage 4A  项目大纲
-  Stage 4B  伏笔规划
-  Stage 5   章节细纲
-```
+### 📚 RAG 知识库（可选）
+- ChromaDB + `moka-ai/m3e-base`，用于事件去重、相似章节检索、评审上下文
+- **未安装也能正常写作**；未启用时项目页显示「⚠️ RAG 未启用」。详见 `docs/rag_setup.md`
 
-用户已填的字段 → 跳过该 LLM 调用（**5~9 次 LLM 调用动态调整**）。  
-浏览器刷新可自动从 `WorkflowRun` 表恢复 wizard。
-
-### 📚 RAG 知识管理
-
-- 角色设定 / 世界观 / 章节摘要 → 自动向量化入 ChromaDB
-- 写章节时按 query 检索相关上下文 → 注入 LLM system prompt
-- 项目隔离，**数据全部在项目内 `data/`**（不污染 `~/.cache/huggingface`）
-
-### 🎛 任务管理
-
-- 异步任务池 + 2s 进度轮询
-- **可终止**：单任务 / 全部任务
-- badge 实时显示进行中数量
-
-### 🎨 7 种写作风格 + 去 AI 味强度 1-10
-
-优美 / 幽默 / 冷峻 / 平实 / 诗意  
-→ 项目级配置，AI 写作时强制遵循
-
-### ✅ 8 维度智能评审
-
-一致性 · 节奏 · 文笔 · 去 AI 味 · 字数合规 · 伏笔管理 · 角色弧光 · 主旨契合
+### 🧩 其他
+- 创意问卷建项目（分步问答 / AI 补全）
+- 灵感池（全局 + 项目）、剧情追踪、角色关系图谱
+- 导出正文（TXT / Markdown / 重新分章 / 独立打包 ZIP）
+- 章节「🔄 状态变化」页签：展示本章弧光 / 关系 / 伏笔 / 新角色变化
+- 任务管理：轮询进度、取消、终止全部
 
 ---
 
 ## 🚀 快速开始
 
 ### 环境要求
-
-- Python **3.10+**（Windows / Linux / macOS）
-- 联网（首次启动需下载 embedding 模型 + 调用 LLM API）
+- Python **3.10+**
+- Node.js 仅用于前端模板测试（运行系统本身不需要）
+- 联网（调用 LLM API；RAG 模型可选）
 
 ### 一键启动
 
-**Windows (PowerShell)**：
+**Windows (PowerShell)**
 ```powershell
 git clone https://github.com/spetangle/cozywriter.git
 cd cozywriter
 .\run.ps1
 ```
 
-**Windows (CMD)**：
+**Windows (CMD)**
 ```bat
 git clone https://github.com/spetangle/cozywriter.git
 cd cozywriter
 run.bat
 ```
 
-**macOS / Linux**：
+**macOS / Linux**
 ```bash
 git clone https://github.com/spetangle/cozywriter.git
 cd cozywriter
@@ -116,63 +78,66 @@ chmod +x run.sh
 ./run.sh
 ```
 
-启动脚本会：
-1. 自动创建 `.venv`
-2. 升级 pip（静默）
-3. **只显示新装依赖的进度**（已装的跳过）
-4. 启动服务
+启动脚本会：检查 Python 版本 → 创建/复用 `.venv` → 升级 pip → 安装依赖 → 启动服务。
+
+依赖已安装时可只启动：
+```bash
+.venv/bin/python main.py        # Linux/macOS
+.venv\Scripts\python main.py    # Windows
+```
 
 打开 **http://localhost:13567**
 
-### 首次运行向导
+### 首次配置 Provider
 
-1. 选择 LLM Provider（**Anthropic / OpenAI / MiniMax / Ollama** 四选一）
-2. 填入 API Key → 自动写入 `.env`
-3. 下载中文 embedding 模型（**~400MB**，前台 SSE 进度条可见）
-4. 进入写作台
+1. 打开「全局设置 → 服务商」
+2. 选择服务商，填 API Key / 模型名，点击「测试连接」
+3. 「设为默认」切换默认 Provider
+
+> 配置保存在数据库 `providers` 表；`.env` 仅作为无数据库记录时的回退。
+> OpenCode Go 需要填入 API Key 后才可启用。
 
 ### 创建第一个项目
 
-填写 4 必填：
-- **书名**
-- **章节字数**（2/3/4/5 千字）
-- **题材**（玄幻/都市/科幻/武侠/仙侠/历史/悬疑/现实主义/奇幻/其他）
-- **创意信息**（一句话）
-
-→ 系统启动 **11 步引导补全 workflow**，自动生成角色 / 世界观 / 大纲 / 章节细纲 / 伏笔。
+两种方式：
+- **直接创建**：填写书名 / 章节字数 / 题材（可多选）/ 创意信息，系统自动跑 Bootstrap。
+- **创意问卷**：分步问答（可选 AI 一键补全）后 `build-project`，自动生成项目与设定。
 
 ---
 
 ## 🤖 支持的 LLM Provider
 
-| Provider | API 协议 | Base URL | 推荐模型 |
+| Provider | 协议 | 默认 Base URL | 默认模型 |
 |---|---|---|---|
-| **Anthropic** | Anthropic Messages | https://api.anthropic.com | `claude-sonnet-4-20250514` |
-| **OpenAI** | OpenAI Chat Completions | https://api.openai.com/v1 | `gpt-4o` |
-| **MiniMax** | **Anthropic Messages 兼容** | https://api.minimaxi.com | `MiniMax-M2.7` (默认) / `MiniMax-M3` (1M 上下文 / 多模态) |
-| **Ollama** | Ollama native | http://localhost:11434 | `qwen2.5` / 其他本地模型 |
+| anthropic | Anthropic Messages | https://api.anthropic.com | `claude-sonnet-4-20250514` |
+| openai | OpenAI Chat Completions | https://api.openai.com/v1 | `gpt-4o` |
+| minimax | Anthropic 兼容 | https://api.minimaxi.com/anthropic | `MiniMax-M2.7` |
+| mimo | Anthropic 兼容 | https://token-plan-cn.xiaomimimo.com/anthropic | `mimo-v2.5-pro` |
+| deepseek | OpenAI / Anthropic 兼容 | https://api.deepseek.com/v1 | `deepseek-chat-v4-flash` |
+| opencode | OpenAI 兼容（OpenCode Go） | https://opencode.ai/zen/go/v1 | `deepseek-v4.1-flash` |
+| ollama | Ollama native | http://localhost:11434 | 本地模型 |
 
-> 📘 MiniMax API 文档：https://platform.minimaxi.com/docs/guides/models-intro
+> 部分模型（如推理模型）在 JSON 模式下可能返回空响应；provider 已内置降级重试，仍不稳定时可在「服务商」里把「JSON 输出模式」设为强制关闭。详见 `docs/deepseek_json_mode.md`。
 
-### .env 配置
+### `.env` 配置（可选回退）
 
 ```bash
-# LLM Provider（至少配置一个）
+# 至少配置一个（也可全部在网页「服务商」里配置）
 ANTHROPIC_API_KEY=sk-ant-xxx
 OPENAI_API_KEY=sk-xxx
 MINIMAX_API_KEY=eyJxxx
-MINIMAX_MODEL=MiniMax-M2.7
-MINIMAX_BASE_URL=https://api.minimaxi.com
-OLLAMA_BASE_URL=http://localhost:11434
+MIMO_API_KEY=xxx
+DEEPSEEK_API_KEY=sk-xxx
 
-# 默认 Provider: anthropic / openai / minimax / ollama
-DEFAULT_LLM_PROVIDER=minimax
+# OpenCode Go（可选，默认关闭）
+OPENCODE_ENABLED=false
+OPENCODE_API_KEY=oc_sk_xxx
+OPENCODE_MODEL=deepseek-v4.1-flash
+OPENCODE_BASE_URL=https://opencode.ai/zen/go/v1
 
-# Embedding 模型
+# Embedding / 存储
 EMBEDDING_MODEL=moka-ai/m3e-base
 HF_ENDPOINT=https://hf-mirror.com
-
-# 存储
 DATA_DIR=./data
 CHROMA_PERSIST_DIR=./data/chroma
 DATABASE_URL=sqlite:///./data/cozywriter.db
@@ -180,59 +145,17 @@ DATABASE_URL=sqlite:///./data/cozywriter.db
 
 ---
 
-## 📦 Embedding 模型
+## 📦 Embedding 模型 / RAG（可选）
 
-首次启动会自动下载中文 embedding 模型到 `data/models/`，**项目内目录**（不污染系统）：
+RAG 依赖本地模型 `moka-ai/m3e-base`（约 400MB）。**不安装不影响写作**，只是事件去重与相似度检索会跳过。
 
-| 模型 | 用途 | 大小 | Hugging Face |
-|---|---|---|---|
-| **`moka-ai/m3e-base`** | 中文语义 embedding，RAG 检索 | ~400MB | https://huggingface.co/moka-ai/m3e-base |
-
-### 预下载 / 离线安装
-
-若机器无法访问 HuggingFace，可提前下载 `m3e-base` 后放到指定目录：
-
-**方法 1：从 HuggingFace 手动下载**
-
-1. 打开 https://huggingface.co/moka-ai/m3e-base/tree/main
-2. 下载所有文件（`config.json`, `model.safetensors`, `tokenizer.json`, `vocab.txt`, `modules.json` 等）
-3. 放入 `data/models/moka-ai/m3e-base/` 目录：
+启用方式与离线安装见 **`docs/rag_setup.md`**。模型目录：
 
 ```
-data/
-└── models/
-    └── moka-ai/
-        └── m3e-base/
-            ├── config.json
-            ├── model.safetensors         # 主要权重
-            ├── tokenizer.json
-            ├── tokenizer_config.json
-            ├── vocab.txt
-            ├── modules.json
-            └── sentence_bert_config.json
+data/models/moka-ai/m3e-base/
 ```
 
-4. 重启服务（`is_model_downloaded()` 会自动识别）
-
-**方法 2：HF 镜像加速（默认）**
-
-代码已配置 `HF_ENDPOINT=https://hf-mirror.com`，国内可直接下载。
-
-**方法 3：HuggingFace 官方 CLI**
-
-```bash
-huggingface-cli download moka-ai/m3e-base --local-dir ./data/models/moka-ai/m3e-base
-```
-
-### 模型文件大小说明
-
-- `model.safetensors`：~390MB（PyTorch 权重，安全张量格式）
-- ~~`pytorch_model.bin`：~390MB（旧权重格式，可删除以节省空间）~~
-
-> ⚠️ `model.safetensors` 优先加载，`pytorch_model.bin` 冗余。手动删除 `pytorch_model.bin` 可节省 390MB 磁盘：
-> ```bash
-> rm data/models/moka-ai/m3e-base/pytorch_model.bin
-> ```
+启用后项目页顶栏的「⚠️ RAG 未启用」提示会消失。
 
 ---
 
@@ -240,225 +163,138 @@ huggingface-cli download moka-ai/m3e-base --local-dir ./data/models/moka-ai/m3e-
 
 ```
 cozywriter/
-├── main.py                       # FastAPI 入口
+├── main.py                       # FastAPI 入口（端口 13567）
 ├── config.py                     # pydantic-settings 配置
-├── logger.py                     # 日志模块
-├── requirements.txt
-├── .env.example
-├── run.bat / run.sh / run.ps1    # 跨平台启动脚本
+├── migrate.py                    # ORM 对比迁移（给旧表补列）
+├── requirements.txt / .env.example
+├── run.sh / run.bat / run.ps1    # 跨平台启动脚本
 │
-├── llm/                          # LLM 抽象层
-│   ├── base.py                   # LLMProvider 抽象基类
-│   ├── anthropic_provider.py     # Claude
-│   ├── openai_provider.py       # GPT
-│   ├── minimax_provider.py       # MiniMax（Anthropic 兼容）
-│   ├── ollama_provider.py        # Ollama 本地
-│   ├── factory.py                # Provider 工厂
-│   ├── roles.py                  # 17 种 LLM Role
-│   ├── workflow.py               # Bootstrap 11-stage 工作流
-│   └── chapter_pipeline.py       # 9 步章节生成流水线
+├── llm/                          # LLM 抽象层与流水线
+│   ├── factory.py                # Provider 工厂（DB 优先）
+│   ├── roles.py                  # 小说 Role / prompt 模板
+│   ├── workflow.py               # Bootstrap 工作流
+│   ├── chapter_pipeline.py       # 小说 9 步流水线
+│   ├── script_pipeline.py        # 剧本生成流水线
+│   ├── script_roles.py           # 剧本 prompt
+│   └── *_provider.py             # anthropic/openai/minimax/mimo/deepseek/opencode/ollama
 │
-├── rag/                          # RAG
-│   ├── model_manager.py          # 模型下载/迁移（项目内扁平目录）
-│   ├── embedder.py
-│   ├── vector_store.py           # ChromaDB
-│   ├── knowledge_base.py         # 知识库
-│   └── retrieval.py              # 上下文检索
+├── rag/                          # RAG（ChromaDB）
+│   ├── model_manager.py / embedder.py / vector_store.py
+│   └── knowledge_base.py / retrieval.py
 │
 ├── storage/                      # 数据层
 │   ├── database.py               # SQLite（同步）
-│   └── models/                   # SQLAlchemy ORM
-│       ├── project.py
-│       ├── chapter.py
-│       ├── character.py
-│       ├── world.py
-│       ├── outline.py
-│       ├── theme.py
-│       ├── consistency.py
-│       ├── review.py
-│       ├── project_outline.py
-│       ├── inspiration.py
-│       ├── creative_questionnaire.py
-│       └── workflow.py
+│   ├── models/                   # SQLAlchemy ORM
+│   └── migrations/               # 项目 ID / schema 专项迁移
 │
-├── api/routes/                   # FastAPI 路由（17 个）
-│   ├── init.py / config.py / models.py / tasks.py
-│   ├── projects.py / chapters.py
-│   ├── characters.py / worldbuilding.py / outline.py / theme.py
-│   ├── generate.py / review.py / consistency.py
-│   ├── outline_detail.py / inspirations.py
-│   ├── creative_questionnaire.py
-│   └── workflow.py               # Bootstrap workflow 管理
+├── api/routes/                   # FastAPI 路由
 │
-├── data/                         # 用户数据（**不入 git**）
-│   ├── cozywriter.db             # SQLite 主数据库
-│   ├── chroma/                   # ChromaDB 向量库
-│   ├── logs/                     # 日志（按天滚动）
-│   └── models/moka-ai/m3e-base/  # Embedding 模型
+├── tools/
+│   └── clear_project_data.py     # 清理项目数据（保留系统配置）
 │
-└── web/                          # 前端 SPA（Alpine.js）
-    ├── index.html
+├── tests/                        # 独立测试脚本（无 pytest）
+├── docs/                         # 测试报告 / 修复计划 / 专题文档
+│
+├── data/                         # 用户数据（不入 git）
+│   ├── cozywriter.db
+│   ├── chroma/
+│   ├── logs/
+│   └── models/moka-ai/m3e-base/
+│
+└── web/                          # 前端 SPA（Alpine.js 无构建）
+    ├── index.html                # 外壳 + 脚本 ?v=N
     └── static/
         ├── css/style.css
-        └── js/app.js
+        └── js/app.js + pages/ + components/
 ```
 
 ---
 
-## 🔌 API 概览
+## 🧪 测试
 
-### 项目管理
-| 方法 | 路由 | 说明 |
-|---|---|---|
-| `GET` | `/api/projects` | 项目列表 |
-| `POST` | `/api/projects` | 创建项目（**含 4 必填校验 + Bootstrap workflow 触发**） |
-| `GET` | `/api/projects/{id}` | 项目详情 |
-| `PUT` | `/api/projects/{id}` | 更新项目设置 |
-| `DELETE` | `/api/projects/{id}` | 删除项目（级联删所有数据） |
-| `GET` | `/api/projects/{id}/bootstrap-status` | Bootstrap workflow 状态 |
+无 pytest / CI，测试为独立脚本，直接整脚本运行：
 
-### 章节 + 9 步流水线
-| 方法 | 路由 | 说明 |
-|---|---|---|
-| `GET` | `/api/projects/{id}/chapters` | 章节列表 |
-| `POST` | `/api/projects/{id}/chapters` | 新建章节 |
-| `PUT` | `/api/chapters/{id}` | 更新章节（自动版本快照） |
-| `POST` | `/api/chapters/{id}/rollback/{ver}` | 版本回滚 |
-| **`POST`** | **`/api/chapters/generate-pipeline`** | **9 步流水线生成（同步 / 异步）** |
-
-### 任务管理
-| 方法 | 路由 | 说明 |
-|---|---|---|
-| `GET` | `/api/tasks/{task_id}` | 单任务状态（轮询） |
-| `GET` | `/api/tasks/all` | 所有任务 |
-| `GET` | `/api/tasks/project/{project_id}` | 项目下任务 |
-| **`POST`** | **`/api/tasks/terminate-all`** | **终止所有进行中任务** |
-| `POST` | `/api/tasks/{task_id}/terminate` | 终止单个 |
-
-### Bootstrap Workflow 管理
-| 方法 | 路由 | 说明 |
-|---|---|---|
-| `GET` | `/api/workflow/run/{run_id}` | 单 run 状态 |
-| `GET` | `/api/workflow/project/{project_id}/latest` | 项目最新 run |
-| **`GET`** | **`/api/workflow/in-flight`** | **进行中 run（用于跨页面恢复 wizard）** |
-| `POST` | `/api/workflow/run/{run_id}/rerun` | 重跑某 stage |
-| `POST` | `/api/workflow/run/{run_id}/commit` | 提交入库（auto_commit=false 时用） |
-
-### 模型管理
-| 方法 | 路由 | 说明 |
-|---|---|---|
-| `GET` | `/api/models/status` | Embedding 模型状态 |
-| `POST` | `/api/models/download` | **SSE 进度流式下载** |
-
-### AI 生成 + 评审
-| 方法 | 路由 | 说明 |
-|---|---|---|
-| `POST` | `/api/generate` | 单次文本生成（带 RAG 上下文） |
-| `POST` | `/api/reviews` | 创建评审（同步） |
-| `POST` | `/api/reviews/async` | 异步评审 |
-| `POST` | `/api/reviews/{id}/revise` | 根据评审修订 |
-| `GET` | `/api/projects/{id}/consistency/check` | 一致性检查 |
-| `GET` | `/api/projects/{id}/consistency/report` | 一致性报告 |
-
-### 角色 / 世界观 / 大纲 / 主题 / 灵感 / 伏笔 / 弧光
-| 方法 | 路由 | 说明 |
-|---|---|---|
-| `GET` `/POST` `/PUT` `/DELETE` | `/api/projects/{id}/characters` | 角色 CRUD |
-| `GET` `/POST` `/PUT` `/DELETE` | `/api/projects/{id}/character-arcs` | 弧光 CRUD |
-| `GET` `/POST` `/PUT` `/DELETE` | `/api/projects/{id}/character-relations` | 关系矩阵 |
-| `GET` `/POST` `/PUT` `/DELETE` | `/api/projects/{id}/worldbuilding` | 世界观 CRUD |
-| `GET` `/POST` `/PUT` `/DELETE` | `/api/projects/{id}/outline` | 大纲节点 |
-| `GET` `/POST` `/PUT` `/DELETE` | `/api/projects/{id}/chapter-outlines` | 章节细纲 CRUD |
-| `GET` `/POST` `/PUT` `/DELETE` | `/api/projects/{id}/themes` | 主题 CRUD |
-| `GET` `/POST` `/PUT` `/DELETE` | `/api/projects/{id}/foreshadowings` | 伏笔 CRUD |
-| `GET` `/POST` `/PUT` `/DELETE` | `/api/projects/{id}/inspirations` | 灵感 CRUD |
-
-### 创意问卷
-| 方法 | 路由 | 说明 |
-|---|---|---|
-| `GET` | `/api/questions` | 获取问卷题目 |
-| `GET` `/POST` | `/api/questionnaires` | 问卷 CRUD |
-| `PUT` | `/api/questionnaires/{id}` | 更新问卷 |
-| `POST` | `/api/questionnaires/{id}/build-project` | 根据问卷创建项目 |
-
-### 初始化
-| 方法 | 路由 | 说明 |
-|---|---|---|
-| `GET` | `/api/init/status` | 初始化状态（决定显示 Setup Wizard） |
-| `POST` | `/api/config/save-provider` | 保存 Provider API Key |
-
----
-
-## 🧠 LLM Role 体系（17 种）
-
-### 基础写作（7 种）
-| Role | 用途 |
-|---|---|
-| `novel_writer` | 小说续写（含风格/去 AI 味/字数约束） |
-| `polisher` | 润色（保留情节，改善句式） |
-| `reviewer` | 8 维度评审 + 建议 |
-| `consistency_checker` | 一致性检查（人物/物品/能力/资源） |
-| `outline_generator` | 章节细纲生成 |
-| `reviser` | 根据评审意见修订 |
-| `plot_planner` | 全书级大纲统筹 |
-
-### Bootstrap（1 种）
-| Role | 用途 |
-|---|---|
-| `bootstrap` | 项目引导补全（动态构造） |
-
-### 9 步章节流水线（9 种）
-| Role | 用途 |
-|---|---|
-| `chapter_outline_gen` | 生成章节细纲 |
-| `outline_reviewer` | 细纲评审（仅过滤 high severity） |
-| `compressor` | 缩写（字数过多时） |
-| `expander` | 扩写（字数过少时） |
-| `revision_decider` | 决定是否自动修订 |
-| `post_chapter` | 弧光 + 关系 + 新角色更新 |
-| `foreshadow_updater` | 伏笔状态机 |
-| `golden_3_checker` | 黄金三章开局诊断 |
-| `chapter_director` | 全书级统筹规划（情节/伏笔/弧光） |
-
----
-
-## 💾 数据存储（项目内）
-
-```
-data/                              # 全部不入 git
-├── cozywriter.db                  # SQLite 主数据库
-├── chroma/                        # ChromaDB 向量库
-├── logs/                          # 运行日志（按天滚动）
-└── models/                        # Embedding 模型（项目内扁平）
-    └── moka-ai/m3e-base/
-        ├── config.json
-        ├── model.safetensors
-        ├── tokenizer.json
-        ├── ...
+```bash
+.venv/bin/python tests/test_frontend_routes.py        # 前端调用 ↔ 后端路由一致性
+.venv/bin/python tests/test_system_smoke.py           # 系统级 API 冒烟
+.venv/bin/python tests/test_script_api.py             # 剧本 API 集成
+.venv/bin/python tests/test_script_post_process.py    # 剧本后处理
+.venv/bin/python tests/test_script_bootstrap.py       # 剧本 bootstrap / commit
+.venv/bin/python tests/test_migrate_project_ids.py    # 项目 ID 迁移
+.venv/bin/python tests/test_word_adjust.py            # 字数收敛 / provider
+.venv/bin/python tests/test_outline_normalize.py      # 大纲章节号归一化
+.venv/bin/python tests/test_deepseek_json_fallback.py # DeepSeek JSON 降级
+.venv/bin/python tests/test_clear_project_data.py     # 旧库清理工具
+node tests/test_spa_components.js                     # SPA 模板/组件装配
 ```
 
-`.env` 也**不入 git**（含真实 API Key）。  
-`.env.example` 是公开模板。
+Windows 用 `.venv\Scripts\python.exe`。
 
 ---
 
-## 🪵 日志
+## 🧹 清理旧库项目数据
 
-`data/logs/cozywriter_YYYYMMDD.log` 按天滚动：
+清除所有项目及其关联数据，保留 `providers` / `system_settings` / 超参预设 / 自定义题材：
 
-- `INFO`：API 请求、任务开始/完成、LLM 调用
-- `DEBUG`：LLM 请求详情（脱敏后的 prompt）
-- `ERROR`：异常堆栈
+```bash
+.venv/bin/python tools/clear_project_data.py --dry-run   # 预览
+.venv/bin/python tools/clear_project_data.py --yes       # 执行（自动备份到 data/backups/）
+.venv/bin/python tools/clear_project_data.py --yes --clear-rag  # 同时清空向量库
+```
 
 ---
 
-## 🤝 贡献
+## 🔌 API 概览（常用）
 
-欢迎 PR！建议方向：
-- 新 LLM Provider（cohere / gemini / moonshot / 智谱 / 通义千问）
-- 章节流水线新 stage（如多幕剧结构生成 / 文风迁移）
-- 前端 UI 改进（基于 Alpine.js，保持轻量）
-- 多语言 i18n
+### 项目
+| 方法 | 路由 | 说明 |
+|---|---|---|
+| `GET`/`POST` | `/api/projects` | 列表 / 创建（4 必填校验 + Bootstrap） |
+| `GET`/`PUT`/`DELETE` | `/api/projects/{id}` | 详情 / 更新 / 删除 |
+| `GET` | `/api/projects/{id}/bootstrap-status` | Bootstrap 状态 |
+
+### 章节
+| 方法 | 路由 | 说明 |
+|---|---|---|
+| `GET`/`POST` | `/api/projects/{id}/chapters` | 章节列表 / 新建（自动带 bootstrap 细纲） |
+| `GET`/`PUT`/`DELETE` | `/api/projects/{id}/chapters/{cid}` | 详情 / 更新 / 删除 |
+| `POST` | `/api/chapters/generate-pipeline` | 单章 9 步流水线 |
+| `POST` | `/api/chapters/batch-generate` | 批量生成 |
+| `GET` | `/api/projects/{id}/chapters/{cid}/post-processing` | 本章状态变化 |
+| `GET` | `/api/projects/{id}/post-processing/latest` | 最近章节状态变化 |
+
+### 工作流 / 任务
+| 方法 | 路由 | 说明 |
+|---|---|---|
+| `GET` | `/api/workflow/project/{id}/latest` | 项目最新 run |
+| `GET` | `/api/workflow/project/{id}/bootstrap-data` | 引导产出预览 |
+| `POST` | `/api/workflow/run/{rid}/rerun` / `rerun-all` | 重跑 stage |
+| `GET` | `/api/tasks/{task_id}` / `/api/tasks/all` | 任务状态 |
+
+### 设定资源
+| 资源 | 路由前缀 |
+|---|---|
+| 角色 | `/api/projects/{id}/characters` |
+| 世界观 | `/api/projects/{id}/worldbuilding` |
+| 项目大纲 | `/api/projects/{id}/outline` |
+| 章节细纲 | `/api/projects/{id}/chapters/{cid}/outline` |
+| 主题 / 伏笔 / 弧光 / 关系 | `/api/projects/{id}/themes`、`/foreshadowings`、`/character-arcs`、`/character-relations` |
+| 剧情点 | `/api/projects/{id}/plot-points` |
+| 灵感 | `/api/inspirations` |
+| 剧本场景 / 分镜 / 道具 | `/api/projects/{id}/screenplays`、`/storyboards`、`/properties` |
+| 题材 | `/api/genres` |
+| 服务商 | `/api/providers` |
+| 导出 | `/api/export/chapters` |
+
+> 完整路由见 `/docs`（FastAPI Swagger UI）。
+
+---
+
+## 💾 数据与日志
+
+- 全部用户数据在 `data/`（gitignore）：`cozywriter.db`、`chroma/`、`logs/`、`models/`
+- LLM 完整 prompt/response 默认写日志：`data/logs/cozywriter_YYYYMMDD.log`
+- 数据库 schema 变更后运行 `.venv/bin/python migrate.py`；服务启动时 `init_db()` 也会自动补列/迁移
 
 ---
 
