@@ -87,4 +87,4 @@
 1. 导出：✅ 已按推荐前端接 `POST /api/export/chapters`（保留重新分章 / 打包）
 2. 大纲路由：✅ 已按推荐把 `OutlineNode` 迁到 `/outline-nodes`
 3. 行尾规范化：✅ Phase 0 全库执行
-4. 旧库处理：⏳ 待定（Phase 4 需要：写数据修复脚本 vs 允许重置数据库）
+4. 旧库处理：✅ 已按「清除项目数据、保留系统配置」执行，工具 `tools/clear_project_data.py`（自动备份 + dry-run + `--yes` 确认 + `--clear-rag`）；回归 `tests/test_clear_project_data.py`

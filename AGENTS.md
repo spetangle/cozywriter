@@ -51,6 +51,7 @@ node tests/test_spa_components.js                  # SPA 模板 / 组件装配
 - 改前端 JS 后必须把 `web/index.html` 里对应脚本的 `?v=N` 版本号 +1，否则浏览器缓存不刷新。
 - LLM 完整 prompt/response 默认写日志（`LOG_LLM_PAYLOAD=1` → `data/logs/cozywriter_YYYYMMDD.log`）。排查 LLM 问题直接 grep 该文件；勿让密钥落日志。
 - DeepSeek 某些模型 JSON 模式会返回空响应：provider 已内置降级重试，仍不稳定时在「全局设置 → 服务商」把该服务商的「JSON 输出模式」设为强制关闭。详见 `docs/deepseek_json_mode.md`。
+- 清理旧库项目数据（保留 providers/system_settings/超参/自定义题材）：`python tools/clear_project_data.py --dry-run` 预览，`--yes` 执行（自动备份到 `data/backups/`，可选 `--clear-rag`）。
 - 改动 ORM 列时，除 model 外还要考虑 `migrate.py` / `storage/migrations/`，否则老库会缺列。
 - 项目文件为 UTF-8 无 BOM；PowerShell 写文件用 `UTF8Encoding($false)`。Windows 控制台默认 GBK，读中文接口先设 `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`。
 - 样式集中在 `web/static/css/style.css`（~5900 行）；新增 UI 前先 grep 复用已有类名，别另造一套。
