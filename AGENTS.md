@@ -29,6 +29,7 @@ Windows 用 `run.bat` / `run.ps1`，Python 为 `.venv\Scripts\python.exe`。
 .venv/bin/python tests/test_system_smoke.py        # 系统级 API 冒烟（项目/章节/剧本/导出等）
 .venv/bin/python tests/test_word_adjust.py          # 字数收敛 / opencode provider
 .venv/bin/python tests/test_deepseek_json_fallback.py # DeepSeek JSON 空响应降级 / JSON 开关
+.venv/bin/python tests/test_task_timeout.py        # LLM 任务软超时（完成不误判 failed）
 # RAG 启用说明见 docs/rag_setup.md；后处理结果见项目页「🔄 状态变化」页签
 .venv/bin/python tests/test_outline_normalize.py    # 大纲章节号字段归一化
 .venv/bin/python tests/test_clear_project_data.py   # 旧库项目数据清理（保留系统配置）

@@ -64,6 +64,28 @@ class Task:
         }
 
 
+# 任务类型 → 超时秒数。
+# 推理模型（如 opencode/deepseek-v4.1-flash）单次 LLM 调用就可能 30~150s，
+# 9 步流水线整体可达 10~20 分钟，故 LLM 类任务给足 1 小时，避免"已完成却判超时"。
+_TASK_TIMEOUTS = {
+    "batch_pipeline": 21600.0,   # 6h：批量多章
+    "batch_generate": 21600.0,
+    "bootstrap": 7200.0,         # 2h：150+ 章大纲续写
+    "chapter_pipeline": 3600.0,  # 1h：单章 9 步流水线
+    "chapter_revise": 3600.0,
+    "word_adjust": 1800.0,
+    "extend_outline": 3600.0,
+    "review": 1800.0,
+    "full_review": 3600.0,
+    "generate": 1800.0,
+}
+_DEFAULT_TASK_TIMEOUT = 600.0
+
+
+def _task_timeout_seconds(task_type: str) -> float:
+    return _TASK_TIMEOUTS.get(task_type, _DEFAULT_TASK_TIMEOUT)
+
+
 # 任务存储（内存）
 _tasks: dict[str, Task] = {}
 _tasks_lock = threading.Lock()
@@ -137,11 +159,7 @@ def _run_task_from_queue(task: Task, fn: Callable, args: tuple, kwargs: dict):
     task_id = task.id
     
     # 根据任务类型选择超时时间（batch 与 bootstrap 都可能跑很久）
-    timeout_seconds = (
-        21600.0 if task.task_type in ("batch_pipeline", "batch_generate")
-        else 7200.0 if task.task_type == "bootstrap"
-        else 600.0
-    )
+    timeout_seconds = _task_timeout_seconds(task.task_type)
     
     def _run():
         if task.status == "cancelled":
@@ -172,11 +190,12 @@ def _run_task_from_queue(task: Task, fn: Callable, args: tuple, kwargs: dict):
                 return
             
             if timeout_holder["hit"]:
-                task.status = "failed"
-                task.error = f"任务超时（{int(timeout_seconds)}秒）"
-                task.completed_at = time.time()
-                logger.warning(f"[Task {task_id}] TIMEOUT after {int(timeout_seconds)}s")
-                return
+                # 函数已正常返回（工作已完成），只是耗时超过软阈值。
+                # 不能因此判失败，否则已生成的章节会被前端当成"生成失败"而丢弃结果。
+                logger.warning(
+                    f"[Task {task_id}] 超过软超时 {int(timeout_seconds)}s "
+                    f"但已正常完成（duration={task.duration_s:.1f}s），按完成处理"
+                )
 
             # 内部函数可能已设置终态（如 pipeline 失败时 status="failed", result=错误详情）
             # 仅在内部函数未设置时才用默认值，避免覆盖内部函数的状态判定
@@ -411,11 +430,7 @@ def run_task_async(task_id: str, fn: Callable, *args, **kwargs):
     # batch_pipeline / batch_generate: 批量生成多章，推理模型可能跑数小时
     # bootstrap: 150+ 章大纲续写也可能超过 10 分钟
     # 其他 LLM 任务: 10 分钟
-    timeout_seconds = (
-        21600.0 if task.task_type in ("batch_pipeline", "batch_generate")
-        else 7200.0 if task.task_type == "bootstrap"
-        else 600.0
-    )
+    timeout_seconds = _task_timeout_seconds(task.task_type)
 
     def _run():
         # 启动前检查是否已被标记取消（极小概率：submit 后立即终止）
@@ -450,16 +465,13 @@ def run_task_async(task_id: str, fn: Callable, *args, **kwargs):
                 logger.info(f"[Task {task_id}] user-cancelled during LLM call; discarding result")
                 return
 
-            # 检查超时
+            # 检查软超时：如果 fn 已正常返回，说明工作已完成，不能判失败
             if timeout_holder["hit"]:
-                task.status = "failed"
-                task.error = f"任务超时（{int(timeout_seconds)}秒）"
-                task.completed_at = time.time()
                 logger.warning(
-                    f"[Task {task_id}] TIMEOUT after {int(timeout_seconds)}s "
-                    f"type={task.task_type}"
+                    f"[Task {task_id}] 超过软超时 {int(timeout_seconds)}s "
+                    f"但已正常完成（duration={task.duration_s:.1f}s "
+                    f"type={task.task_type}），按完成处理"
                 )
-                return
 
             # 内部函数可能已设置终态（如 pipeline 失败时 status="failed", result=错误详情）
             # 仅在内部函数未设置时才用默认值，避免覆盖内部函数的状态判定

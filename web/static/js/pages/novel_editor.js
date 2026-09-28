@@ -591,16 +591,16 @@ Alpine.data('novelEditor', () => ({
                 this.pipelinePollHandle = null;
                 console.log(`[Pipeline] ${taskId} 结束: ${task.status}`);
                 const resultStatus = (task.result || {}).status;
-                if (task.status === 'completed' && resultStatus !== 'failed') {
+                const succeeded = resultStatus === 'completed'
+                    || (task.status === 'completed' && resultStatus !== 'failed');
+                if (succeeded) {
                     await this.loadChapters(this.project.id);
                     const ch = this.chapters.find((c) => c.id === (this.currentChapter && this.currentChapter.id));
                     if (ch) await this.selectChapter(ch);
                     if (this.currentChapter) await this.loadPostProcessing(this.currentChapter.id);
                     Alpine.store('app').toast(`生成完成（${(task.result || {}).final_word_count || 0} 字）`, 'success');
-                } else if (task.status === 'completed' && resultStatus === 'failed') {
-                    Alpine.store('app').toast('生成失败: ' + ((task.result || {}).error || '未知错误'), 'error');
-                } else if (task.status === 'failed') {
-                    Alpine.store('app').toast('生成失败: ' + (task.error || 'unknown'), 'error');
+                } else if (task.status === 'failed' || resultStatus === 'failed') {
+                    Alpine.store('app').toast('生成失败: ' + ((task.result || {}).error || task.error || '未知错误'), 'error');
                 }
             }
         } catch (e) {
@@ -683,7 +683,9 @@ Alpine.data('novelEditor', () => ({
     get pipelineStatus() {
         const t = this.pipelineTask;
         if (!t) return 'pending';
-        if (t.status === 'completed' && t.result && t.result.status === 'failed') return 'failed';
+        const rs = t.result && t.result.status;
+        if (rs === 'failed') return 'failed';
+        if (rs === 'completed' || t.status === 'completed') return 'completed';
         return t.status;
     },
 
