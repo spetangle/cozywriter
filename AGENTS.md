@@ -16,6 +16,8 @@ CozyWriter：本地 FastAPI + 同步 SQLAlchemy(SQLite) + Alpine.js 无构建 SP
 
 Windows 用 `run.bat` / `run.ps1`，Python 为 `.venv\Scripts\python.exe`。
 
+启动脚本会把依赖安装到项目内 `.venv`（设置 `PIP_USER=0`/`PYTHONNOUSERSITE=1`/`PIP_REQUIRE_VIRTUALENV=1`，并校验 `sys.prefix` 在项目目录内），并检测跨平台 venv；支持 `--rag` / `--rag-cpu` 追加 RAG 依赖。
+
 没有 pytest / lint / formatter / CI 配置。测试是独立脚本，只能整脚本运行，直接跑：
 
 ```bash

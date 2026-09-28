@@ -1,93 +1,87 @@
 ﻿# CozyWriter - PowerShell startup script
-# Usage: .\run.ps1    (from project root)
+# Usage:
+#   .\run.ps1                 # install core deps and start
+#   .\run.ps1 --rag           # also install RAG deps (sentence-transformers)
+#   .\run.ps1 --rag-cpu       # also install CPU-only RAG (no nvidia-*)
 #
-# Stages:
-#   1) Check Python 3.10+ and create/reuse .venv
-#   2) Upgrade pip (silent)
-#   3) Install requirements (progress for new packages only)
-#   4) Start server at http://localhost:13567
+# Guarantees all dependencies go into the project-local .venv (no global/--user site-packages).
+
+param(
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Args
+)
 
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = $PSScriptRoot
 Set-Location $ProjectRoot
 
+$RagMode = ""
+if ($Args -contains "--rag") { $RagMode = "rag" }
+if ($Args -contains "--rag-cpu") { $RagMode = "rag_cpu" }
+
 function Write-Step($n, $total, $msg) {
     Write-Host ""
     Write-Host "[$n/$total] $msg" -ForegroundColor Cyan
 }
-
 function Fail($msg) {
     Write-Host "[ERROR] $msg" -ForegroundColor Red
     exit 1
 }
 
+# 防止依赖装到用户级 / 全局 site-packages
+$env:PIP_USER = "0"
+$env:PYTHONNOUSERSITE = "1"
+$env:PIP_REQUIRE_VIRTUALENV = "1"
+
 # === Step 1/4: Python + virtual environment ===
 Write-Step 1 4 "Checking Python and virtual environment .venv ..."
+
+if (Test-Path ".venv\bin\python") {
+    Fail "Detected a Linux/macOS virtualenv (.venv/bin). Run ./run.sh on Linux/macOS, or delete .venv and retry."
+}
+
 $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
 if (-not $pythonCmd) { $pythonCmd = Get-Command py -ErrorAction SilentlyContinue }
 if (-not $pythonCmd) { Fail "Python not found on PATH. Please install Python 3.10+." }
 
-if (-not (Test-Path ".venv\Scripts\python.exe")) {
+$PythonExe = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path $PythonExe)) {
     Write-Host "  Creating virtual environment ..." -ForegroundColor Gray
     & $pythonCmd.Source -m venv .venv
     if ($LASTEXITCODE -ne 0) { Fail "Failed to create venv. Python 3.10+ required." }
-    Write-Host "  Done." -ForegroundColor Green
-} else {
-    Write-Host "  Ready." -ForegroundColor Green
 }
+if (-not (Test-Path $PythonExe)) { Fail "Virtual environment is broken. Delete .venv and retry." }
 
-$PythonExe = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
-if (-not (Test-Path $PythonExe)) { Fail "Python not found at $PythonExe" }
+# 校验 venv 位于项目目录内
+& $PythonExe -c "import os,sys; p=os.path.abspath(sys.prefix); r=os.path.abspath(os.getcwd()); sys.exit(0 if p.startswith(r) else 2)"
+if ($LASTEXITCODE -ne 0) { Fail ".venv is broken or outside the project folder. Delete .venv and retry." }
+Write-Host "  Ready: $ProjectRoot\.venv" -ForegroundColor Green
 
-# === Step 2/4: upgrade pip (silent) ===
+# === Step 2/4: upgrade pip ===
 Write-Step 2 4 "Upgrading pip ..."
-& $PythonExe -m pip install --upgrade pip --disable-pip-version-check --quiet 2>&1 | Out-Null
+& $PythonExe -m pip install --upgrade pip --no-user --disable-pip-version-check --quiet 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { Fail "pip upgrade failed." }
 Write-Host "  Done." -ForegroundColor Green
 
-# === Step 3/4: install deps (only show new) ===
-Write-Step 3 4 "Checking dependencies (installed ones auto-skip) ..."
-if (-not (Test-Path "requirements.txt")) { Fail "requirements.txt not found" }
+# === Step 3/4: install deps ===
+Write-Step 3 4 "Installing dependencies (first run may take a few minutes) ..."
+& $PythonExe -m pip install -r requirements.txt --no-user --disable-pip-version-check
+if ($LASTEXITCODE -ne 0) { Fail "pip install failed. Check the output above." }
 
-# Parse requirements.txt -> top-level package names
-$requiredPackages = @()
-Get-Content "requirements.txt" | ForEach-Object {
-    $line = $_.Trim()
-    if ($line -eq "" -or $line.StartsWith("#") -or $line.StartsWith("-")) { return }
-    $name = ($line -split '[><=!\[]')[0].Trim().ToLower()
-    if ($name) { $requiredPackages += $name }
+if ($RagMode -eq "rag_cpu") {
+    Write-Host "  Installing CPU RAG dependencies ..." -ForegroundColor Cyan
+    & (Join-Path $ProjectRoot "tools\install_rag_cpu.ps1")
+}
+elseif ($RagMode -eq "rag") {
+    Write-Host "  Installing RAG dependencies (may include nvidia-*) ..." -ForegroundColor Cyan
+    & $PythonExe -m pip install -r requirements-rag.txt --no-user --disable-pip-version-check
+    if ($LASTEXITCODE -ne 0) { Fail "requirements-rag.txt install failed." }
 }
 
-$installedRaw = & $PythonExe -m pip list --format=json --disable-pip-version-check 2>&1
-$installedNames = @()
-try {
-    $installed = $installedRaw | ConvertFrom-Json
-    $installedNames = $installed | ForEach-Object { $_.Name.ToLower() }
-} catch {
-    Write-Host "  (cannot parse pip list; treating as fresh install)" -ForegroundColor Yellow
-}
-
-$normalize = { param($n) $n -replace '_', '-' }
-$installedNormalized = $installedNames | ForEach-Object { & $normalize $_ }
-
-$missing = @()
-foreach ($pkg in $requiredPackages) {
-    $normPkg = & $normalize $pkg
-    if (-not ($installedNormalized -contains $normPkg)) { $missing += $pkg }
-}
-
-if ($missing.Count -gt 0) {
-    Write-Host ""
-    Write-Host "  Will install $($missing.Count) new package(s):" -ForegroundColor Yellow
-    foreach ($pkg in $missing) { Write-Host "    + $pkg" -ForegroundColor Gray }
-    Write-Host ""
-    foreach ($pkg in $missing) {
-        Write-Host "  Installing $pkg ..." -ForegroundColor Cyan
-        & $PythonExe -m pip install $pkg --disable-pip-version-check
-        if ($LASTEXITCODE -ne 0) { Fail "Failed to install $pkg" }
-    }
-} else {
-    Write-Host "  All $($requiredPackages.Count) dependencies ready." -ForegroundColor Green
-}
+Write-Host "  Verifying install location ..." -ForegroundColor Gray
+& $PythonExe -c "import os,sys; e=os.path.abspath(sys.executable); r=os.path.abspath(os.getcwd()); assert e.startswith(r), 'not in project venv: '+e; import fastapi; print('  OK:', sys.executable)"
+if ($LASTEXITCODE -ne 0) { Fail "Dependencies are not installed inside the project .venv." }
+Write-Host "  Dependencies ready." -ForegroundColor Green
 
 # === Step 4/4: start server ===
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" | Out-Null }
@@ -95,7 +89,7 @@ Write-Step 4 4 "Starting CozyWriter ..."
 Write-Host "  URL  : http://localhost:13567" -ForegroundColor Green
 Write-Host "  Hint : configure LLM provider in 'Settings - Providers' (DB first; .env is fallback)." -ForegroundColor Gray
 Write-Host "         opencode needs an API key to enable." -ForegroundColor Gray
-Write-Host "         RAG is optional: .venv\Scripts\python -m pip install -r requirements-rag.txt  (see docs/rag_setup.md)." -ForegroundColor Gray
+Write-Host "         RAG: 'Settings - RAG' local CPU or online API (see docs/rag_setup.md)." -ForegroundColor Gray
 Write-Host "  Stop : Ctrl+C" -ForegroundColor Gray
 Write-Host ""
 

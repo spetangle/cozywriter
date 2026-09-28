@@ -78,7 +78,16 @@ chmod +x run.sh
 ./run.sh
 ```
 
-启动脚本会：检查 Python 版本 → 创建/复用 `.venv` → 升级 pip → 安装依赖 → 启动服务。
+启动脚本会：检查 Python 版本 → 创建/复用**项目内 `.venv`** → 升级 pip → 安装依赖 → 启动服务。
+
+- 所有依赖都装进项目目录的 `.venv`（设置 `PIP_USER=0` / `PYTHONNOUSERSITE=1`，不会写入全局或用户 site-packages）
+- 检测并拒绝跨平台 venv（如 Windows 下用 `run.sh` 建的 `.venv`）
+- 可选参数：
+  ```bash
+  ./run.sh --rag          # 额外安装 RAG 依赖（可能带 nvidia-* CUDA 包）
+  ./run.sh --rag-cpu      # 额外安装 CPU 版 RAG（不装 nvidia-*）
+  ```
+  Windows：`run.bat --rag-cpu` / `.\run.ps1 --rag-cpu`
 
 依赖已安装时可只启动：
 ```bash
