@@ -18,13 +18,19 @@ if [ ! -x "$PY" ]; then
     exit 1
 fi
 
+# 依赖源：可用 COZYWRITER_PIP_INDEX / PIP_INDEX_URL 覆盖，默认清华镜像
+INDEX_URL="${COZYWRITER_PIP_INDEX:-${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}}"
+export PIP_INDEX_URL="$INDEX_URL" UV_DEFAULT_INDEX="$INDEX_URL" UV_INDEX_URL="$INDEX_URL"
+# CPU 版 torch 的 wheel 源（可覆盖）
+TORCH_INDEX="${TORCH_CPU_INDEX:-https://download.pytorch.org/whl/cpu}"
+
 echo "[1/4] 卸载现有 torch（如有）..."
 "$PY" -m pip uninstall -y torch >/dev/null 2>&1 || true
 
-echo "[2/4] 安装 CPU 版 torch ..."
-"$PY" -m pip install --upgrade torch --index-url https://download.pytorch.org/whl/cpu
+echo "[2/4] 安装 CPU 版 torch（源：$TORCH_INDEX）..."
+"$PY" -m pip install --upgrade torch --index-url "$TORCH_INDEX"
 
-echo "[3/4] 安装 RAG 依赖（sentence-transformers）..."
+echo "[3/4] 安装 RAG 依赖（源：$INDEX_URL）..."
 "$PY" -m pip install -r requirements-rag.txt
 
 echo "[4/4] 清理残留的 nvidia-* / triton（可选）..."

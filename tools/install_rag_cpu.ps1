@@ -13,11 +13,19 @@ if (-not (Test-Path $PythonExe)) {
 Write-Host "[1/4] Uninstalling existing torch if any ..." -ForegroundColor Cyan
 & $PythonExe -m pip uninstall -y torch 2>&1 | Out-Null
 
-Write-Host "[2/4] Installing CPU-only torch ..." -ForegroundColor Cyan
-& $PythonExe -m pip install --upgrade torch --index-url https://download.pytorch.org/whl/cpu
+$IndexUrl = if ($env:COZYWRITER_PIP_INDEX) { $env:COZYWRITER_PIP_INDEX }
+            elseif ($env:PIP_INDEX_URL) { $env:PIP_INDEX_URL }
+            else { "https://pypi.tuna.tsinghua.edu.cn/simple" }
+$TorchIndex = if ($env:TORCH_CPU_INDEX) { $env:TORCH_CPU_INDEX } else { "https://download.pytorch.org/whl/cpu" }
+$env:PIP_INDEX_URL = $IndexUrl
+$env:UV_DEFAULT_INDEX = $IndexUrl
+$env:UV_INDEX_URL = $IndexUrl
+
+Write-Host "[2/4] Installing CPU-only torch from $TorchIndex ..." -ForegroundColor Cyan
+& $PythonExe -m pip install --upgrade torch --index-url $TorchIndex
 if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] torch (CPU) install failed." -ForegroundColor Red; exit 1 }
 
-Write-Host "[3/4] Installing RAG dependencies (sentence-transformers) ..." -ForegroundColor Cyan
+Write-Host "[3/4] Installing RAG dependencies from $IndexUrl ..." -ForegroundColor Cyan
 & $PythonExe -m pip install -r requirements-rag.txt
 if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] requirements-rag.txt install failed." -ForegroundColor Red; exit 1 }
 

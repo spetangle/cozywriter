@@ -80,6 +80,15 @@ chmod +x run.sh
 
 启动脚本会：检查 Python 版本 → 创建/复用**项目内 `.venv`** → 升级 pip → 安装依赖 → 启动服务。
 
+- **依赖源默认使用清华镜像**（避免 `pypi.org` 超时）；可用参数或环境变量切换：
+  ```bash
+  ./run.sh --official                                   # 官方 PyPI
+  ./run.sh --mirror aliyun                              # 阿里云镜像
+  ./run.sh --index-url https://your-mirror/simple       # 自定义源
+  COZYWRITER_PIP_INDEX=https://mirrors.aliyun.com/pypi/simple/ ./run.sh
+  ```
+  Windows：`run.bat --mirror aliyun` / `.\run.ps1 --official`
+- 也可在 `.env` 里设置 `COZYWRITER_PIP_INDEX=...`
 - 所有依赖都装进项目目录的 `.venv`（设置 `PIP_USER=0` / `PYTHONNOUSERSITE=1`，不会写入全局或用户 site-packages）
 - 检测并拒绝跨平台 venv（如 Windows 下用 `run.sh` 建的 `.venv`）
 - 可选参数：

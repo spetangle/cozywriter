@@ -1,10 +1,14 @@
 ﻿# CozyWriter - PowerShell startup script
 # Usage:
-#   .\run.ps1                 # install core deps and start
-#   .\run.ps1 --rag           # also install RAG deps (sentence-transformers)
-#   .\run.ps1 --rag-cpu       # also install CPU-only RAG (no nvidia-*)
+#   .\run.ps1                     # install core deps and start (default: Tsinghua mirror)
+#   .\run.ps1 --official          # use PyPI official index
+#   .\run.ps1 --mirror aliyun     # use Aliyun mirror
+#   .\run.ps1 --index-url URL     # custom index
+#   .\run.ps1 --rag               # also install RAG deps
+#   .\run.ps1 --rag-cpu           # also install CPU-only RAG (no nvidia-*)
 #
-# Guarantees all dependencies go into the project-local .venv (no global/--user site-packages).
+# Index can also come from env: COZYWRITER_PIP_INDEX / PIP_INDEX_URL.
+# Guarantees all dependencies go into the project-local .venv.
 
 param(
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -15,9 +19,39 @@ $ErrorActionPreference = 'Stop'
 $ProjectRoot = $PSScriptRoot
 Set-Location $ProjectRoot
 
+$Tuna = "https://pypi.tuna.tsinghua.edu.cn/simple"
+$Aliyun = "https://mirrors.aliyun.com/pypi/simple/"
+$Official = "https://pypi.org/simple"
+
 $RagMode = ""
-if ($Args -contains "--rag") { $RagMode = "rag" }
-if ($Args -contains "--rag-cpu") { $RagMode = "rag_cpu" }
+$IndexUrl = ""
+$IndexExplicit = $false
+
+for ($i = 0; $i -lt $Args.Count; $i++) {
+    $a = $Args[$i]
+    switch -Regex ($a) {
+        '^--rag$'        { $RagMode = "rag" }
+        '^--rag-cpu$'    { $RagMode = "rag_cpu" }
+        '^--official$'   { $IndexUrl = $Official; $IndexExplicit = $true }
+        '^--mirror=aliyun$' { $IndexUrl = $Aliyun; $IndexExplicit = $true }
+        '^--mirror(=.*)?$'  { $IndexUrl = $Tuna; $IndexExplicit = $true }
+        '^--mirror$'     {
+            if ($i + 1 -lt $Args.Count -and $Args[$i+1] -eq 'aliyun') { $IndexUrl = $Aliyun; $i++ }
+            else { $IndexUrl = $Tuna }
+            $IndexExplicit = $true
+        }
+        '^--index-url$'  { if ($i + 1 -lt $Args.Count) { $IndexUrl = $Args[$i+1]; $i++ }; $IndexExplicit = $true }
+        '^--index-url='  { $IndexUrl = $a.Substring(12); $IndexExplicit = $true }
+        '^(-h|--help)$'  { Write-Host "Usage: .\run.ps1 [--official | --mirror aliyun | --index-url URL] [--rag | --rag-cpu]"; exit 0 }
+    }
+}
+
+if (-not $IndexExplicit) {
+    if ($env:COZYWRITER_PIP_INDEX) { $IndexUrl = $env:COZYWRITER_PIP_INDEX }
+    elseif ($env:PIP_INDEX_URL)    { $IndexUrl = $env:PIP_INDEX_URL }
+    elseif ($env:UV_INDEX_URL)     { $IndexUrl = $env:UV_INDEX_URL }
+}
+if (-not $IndexUrl) { $IndexUrl = $Tuna }
 
 function Write-Step($n, $total, $msg) {
     Write-Host ""
@@ -28,7 +62,10 @@ function Fail($msg) {
     exit 1
 }
 
-# 防止依赖装到用户级 / 全局 site-packages
+# 统一 pip / uv 源，避免 pypi.org 超时；并防止装到用户级 site-packages
+$env:PIP_INDEX_URL = $IndexUrl
+$env:UV_DEFAULT_INDEX = $IndexUrl
+$env:UV_INDEX_URL = $IndexUrl
 $env:PIP_USER = "0"
 $env:PYTHONNOUSERSITE = "1"
 $env:PIP_REQUIRE_VIRTUALENV = "1"
@@ -52,21 +89,30 @@ if (-not (Test-Path $PythonExe)) {
 }
 if (-not (Test-Path $PythonExe)) { Fail "Virtual environment is broken. Delete .venv and retry." }
 
-# 校验 venv 位于项目目录内
 & $PythonExe -c "import os,sys; p=os.path.abspath(sys.prefix); r=os.path.abspath(os.getcwd()); sys.exit(0 if p.startswith(r) else 2)"
 if ($LASTEXITCODE -ne 0) { Fail ".venv is broken or outside the project folder. Delete .venv and retry." }
 Write-Host "  Ready: $ProjectRoot\.venv" -ForegroundColor Green
+Write-Host "  Index: $IndexUrl" -ForegroundColor Green
 
 # === Step 2/4: upgrade pip ===
 Write-Step 2 4 "Upgrading pip ..."
 & $PythonExe -m pip install --upgrade pip --no-user --disable-pip-version-check --quiet 2>&1 | Out-Null
-if ($LASTEXITCODE -ne 0) { Fail "pip upgrade failed." }
-Write-Host "  Done." -ForegroundColor Green
+if ($LASTEXITCODE -ne 0) { Write-Host "  [WARN] pip upgrade failed; continuing." -ForegroundColor Yellow }
+else { Write-Host "  Done." -ForegroundColor Green }
 
 # === Step 3/4: install deps ===
 Write-Step 3 4 "Installing dependencies (first run may take a few minutes) ..."
 & $PythonExe -m pip install -r requirements.txt --no-user --disable-pip-version-check
-if ($LASTEXITCODE -ne 0) { Fail "pip install failed. Check the output above." }
+if ($LASTEXITCODE -ne 0) {
+    if ($IndexUrl -ne $Tuna) {
+        Write-Host "  [!] Install failed with $IndexUrl; retrying with Tsinghua mirror ..." -ForegroundColor Yellow
+        $env:PIP_INDEX_URL = $Tuna
+        $env:UV_DEFAULT_INDEX = $Tuna
+        $env:UV_INDEX_URL = $Tuna
+        & $PythonExe -m pip install -r requirements.txt --no-user --disable-pip-version-check
+    }
+    if ($LASTEXITCODE -ne 0) { Fail "pip install failed. Check the output above." }
+}
 
 if ($RagMode -eq "rag_cpu") {
     Write-Host "  Installing CPU RAG dependencies ..." -ForegroundColor Cyan

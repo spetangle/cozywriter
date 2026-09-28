@@ -5,15 +5,52 @@ cd /d "%~dp0"
 set "PROJECT_ROOT=%CD%"
 
 set "RAG_MODE="
+set "IDX="
+set "IDX_SET="
+set "TUNA=https://pypi.tuna.tsinghua.edu.cn/simple"
+set "ALIYUN=https://mirrors.aliyun.com/pypi/simple/"
+set "OFFICIAL=https://pypi.org/simple"
+
+REM === 解析参数 ===
+:parse_args
+if "%~1"=="" goto args_done
 if /I "%~1"=="--rag" set "RAG_MODE=rag"
 if /I "%~1"=="--rag-cpu" set "RAG_MODE=rag_cpu"
+if /I "%~1"=="--official" ( set "IDX=%OFFICIAL%" & set "IDX_SET=1" )
+if /I "%~1"=="--mirror" (
+    shift
+    if /I "%~1"=="aliyun" ( set "IDX=%ALIYUN%" ) else ( set "IDX=%TUNA%" )
+    set "IDX_SET=1"
+)
+if /I "%~1"=="--index-url" ( shift & set "IDX=%~1" & set "IDX_SET=1" )
+if /I "%~1"=="-h" goto show_help
+if /I "%~1"=="--help" goto show_help
+shift
+goto parse_args
+
+:show_help
+echo Usage: run.bat [--official ^| --mirror aliyun ^| --index-url URL] [--rag ^| --rag-cpu]
+exit /b 0
+
+:args_done
+REM 优先级：CLI > 环境变量 > 默认（清华镜像）
+if not defined IDX_SET (
+    if defined COZYWRITER_PIP_INDEX set "IDX=%COZYWRITER_PIP_INDEX%"
+)
+if not defined IDX (
+    if defined PIP_INDEX_URL set "IDX=%PIP_INDEX_URL%"
+)
+if not defined IDX set "IDX=%TUNA%"
 
 echo ========================================
 echo   CozyWriter - AI Novel / Script Writer
 echo ========================================
 echo.
 
-REM 防止依赖装到用户级 / 全局 site-packages
+REM 统一 pip / uv 源，并防止依赖装到用户级 site-packages
+set "PIP_INDEX_URL=%IDX%"
+set "UV_DEFAULT_INDEX=%IDX%"
+set "UV_INDEX_URL=%IDX%"
 set "PIP_USER=0"
 set "PYTHONNOUSERSITE=1"
 set "PIP_REQUIRE_VIRTUALENV=1"
@@ -50,24 +87,21 @@ if not exist "%PY%" (
     pause
     exit /b 1
 )
-
-REM 校验 venv 位于项目目录内
 "%PY%" -c "import os,sys; p=os.path.abspath(sys.prefix); r=os.path.abspath(os.getcwd()); sys.exit(0 if p.startswith(r) else 2)"
 if errorlevel 1 (
     echo [ERROR] .venv is broken or outside the project folder. Delete .venv and retry.
     pause
     exit /b 1
 )
-echo       Virtual environment ready: %PROJECT_ROOT%\.venv
+echo       Ready: %PROJECT_ROOT%\.venv
+echo       Index: %IDX%
 echo.
 
 REM === Step 2: pip upgrade ===
 echo [2/4] Upgrading pip ...
 "%PY%" -m pip install --upgrade pip --no-user --disable-pip-version-check --quiet
 if errorlevel 1 (
-    echo [ERROR] pip upgrade failed.
-    pause
-    exit /b 1
+    echo [WARN] pip upgrade failed; continuing with existing pip.
 )
 echo       Done.
 echo.
@@ -78,9 +112,17 @@ echo.
 "%PY%" -m pip install -r requirements.txt --no-user --disable-pip-version-check
 if errorlevel 1 (
     echo.
-    echo [ERROR] pip install failed. Check the error above.
-    pause
-    exit /b 1
+    echo [!] Install failed with %IDX%
+    if /I not "%IDX%"=="%TUNA%" (
+        echo     Retrying with Tsinghua mirror %TUNA% ...
+        set "PIP_INDEX_URL=%TUNA%"
+        "%PY%" -m pip install -r requirements.txt --no-user --disable-pip-version-check
+    )
+    if errorlevel 1 (
+        echo [ERROR] pip install failed. Check the error above.
+        pause
+        exit /b 1
+    )
 )
 
 if /I "%RAG_MODE%"=="rag_cpu" (

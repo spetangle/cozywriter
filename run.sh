@@ -2,28 +2,102 @@
 # CozyWriter 启动脚本（Linux / macOS）
 #
 # 用法：
-#   ./run.sh                # 安装核心依赖并启动
-#   ./run.sh --rag          # 额外安装 RAG 依赖（sentence-transformers）
-#   ./run.sh --rag-cpu      # 额外安装 CPU 版 RAG（不会装 nvidia-*）
+#   ./run.sh                     # 安装核心依赖并启动（默认国内镜像）
+#   ./run.sh --official          # 使用 PyPI 官方源
+#   ./run.sh --mirror aliyun     # 使用阿里云镜像
+#   ./run.sh --index-url URL     # 自定义源
+#   ./run.sh --rag               # 额外安装 RAG 依赖（可能带 nvidia-*）
+#   ./run.sh --rag-cpu           # 额外安装 CPU 版 RAG（不装 nvidia-*）
 #
-# 保证：所有依赖都安装到项目目录内的 .venv，不使用全局 / --user site-packages。
+# 镜像也可以通过环境变量或 .env 覆盖：
+#   COZYWRITER_PIP_INDEX / PIP_INDEX_URL / UV_INDEX_URL
+#
+# 保证：所有依赖都安装到项目目录内的 .venv。
 set -e
+
+# 即使用 `sh run.sh` 调用也切换到 bash，避免 dash 兼容问题
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec bash "$0" "$@"
+fi
 
 cd "$(dirname "$0")"
 PROJECT_ROOT="$(pwd)"
 TOTAL=4
 
+TUNA="https://pypi.tuna.tsinghua.edu.cn/simple"
+ALIYUN="https://mirrors.aliyun.com/pypi/simple/"
+OFFICIAL="https://pypi.org/simple"
+
 # ─── 解析参数 ───
 RAG_MODE=""
-for arg in "$@"; do
-    case "$arg" in
+INDEX_URL=""
+INDEX_EXPLICIT=0
+USE_OFFICIAL=0
+
+show_help() {
+    echo "用法: ./run.sh [--official | --mirror tuna|aliyun | --index-url URL] [--rag | --rag-cpu]"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
         --rag) RAG_MODE="rag" ;;
         --rag-cpu) RAG_MODE="rag_cpu" ;;
-        -h|--help)
-            echo "用法: ./run.sh [--rag|--rag-cpu]"
-            exit 0 ;;
+        --official) USE_OFFICIAL=1; INDEX_URL="$OFFICIAL"; INDEX_EXPLICIT=1 ;;
+        --mirror)
+            shift
+            case "${1:-}" in
+                tuna|tsinghua|cn) INDEX_URL="$TUNA" ;;
+                aliyun) INDEX_URL="$ALIYUN" ;;
+                official|pypi) INDEX_URL="$OFFICIAL" ;;
+                "") echo "[ERROR] --mirror 需要一个值（tuna/aliyun）" >&2; exit 1 ;;
+                *) INDEX_URL="$1" ;;
+            esac
+            INDEX_EXPLICIT=1 ;;
+        --mirror=*)
+            val="${1#--mirror=}"
+            case "$val" in
+                tuna|tsinghua|cn) INDEX_URL="$TUNA" ;;
+                aliyun) INDEX_URL="$ALIYUN" ;;
+                official|pypi) INDEX_URL="$OFFICIAL" ;;
+                *) INDEX_URL="$val" ;;
+            esac
+            INDEX_EXPLICIT=1 ;;
+        --index-url)
+            shift
+            if [ -z "${1:-}" ]; then echo "[ERROR] --index-url 需要一个 URL" >&2; exit 1; fi
+            INDEX_URL="$1"; INDEX_EXPLICIT=1 ;;
+        --index-url=*) INDEX_URL="${1#--index-url=}"; INDEX_EXPLICIT=1 ;;
+        -h|--help) show_help; exit 0 ;;
+        *) echo "[WARN] 忽略未知参数: $1" >&2 ;;
     esac
+    shift
 done
+
+# ─── 解析镜像优先级：CLI > 环境变量 > .env > 默认(清华) ───
+if [ "$INDEX_EXPLICIT" != "1" ]; then
+    if [ -n "${COZYWRITER_PIP_INDEX:-}" ]; then
+        INDEX_URL="$COZYWRITER_PIP_INDEX"
+    elif [ -n "${PIP_INDEX_URL:-}" ]; then
+        INDEX_URL="$PIP_INDEX_URL"
+    elif [ -n "${UV_INDEX_URL:-}" ]; then
+        INDEX_URL="$UV_INDEX_URL"
+    elif [ -f ".env" ]; then
+        env_index="$(grep -E '^(COZYWRITER_PIP_INDEX|PIP_INDEX_URL)=' .env | tail -1 | cut -d= -f2- | tr -d '\r' | xargs 2>/dev/null || true)"
+        if [ -n "$env_index" ]; then INDEX_URL="$env_index"; fi
+    fi
+fi
+if [ -z "$INDEX_URL" ]; then
+    INDEX_URL="$TUNA"   # 默认国内镜像，避免 pypi.org 超时
+fi
+# 未显式指定时，失败后回退到清华镜像
+FALLBACK_INDEX=""
+if [ "$INDEX_EXPLICIT" != "1" ] && [ "$INDEX_URL" != "$TUNA" ]; then
+    FALLBACK_INDEX="$TUNA"
+fi
+
+export PIP_INDEX_URL="$INDEX_URL"
+export UV_DEFAULT_INDEX="$INDEX_URL"
+export UV_INDEX_URL="$INDEX_URL"
 
 echo "========================================"
 echo "  CozyWriter - AI 小说 / 剧本编写助手"
@@ -57,7 +131,6 @@ if [ -e ".venv/Scripts/python.exe" ] && [ ! -x ".venv/bin/python" ]; then
     exit 1
 fi
 
-# 损坏的 venv：目录在但 python 不可执行
 if [ -d ".venv" ] && [ ! -x ".venv/bin/python" ]; then
     echo "       检测到不可用的 .venv，正在重建..."
     rm -rf .venv
@@ -81,7 +154,6 @@ fi
 
 PY=".venv/bin/python"
 
-# 校验：venv 必须可用，且位于项目目录内
 if ! "$PY" - <<'PYEOF'
 import os, sys
 prefix = os.path.abspath(sys.prefix)
@@ -95,6 +167,7 @@ then
     exit 1
 fi
 echo "       虚拟环境就绪：$PY_VERSION · $PROJECT_ROOT/.venv"
+echo "       依赖源：$INDEX_URL"
 echo ""
 
 # ─── 选择安装器（venv 内 pip，缺失则用 uv）───
@@ -117,24 +190,39 @@ pip_install() {
     fi
 }
 
+# 带镜像回退的安装：先用当前源，失败则尝试 FALLBACK_INDEX
+install_with_fallback() {
+    if pip_install "$@"; then
+        return 0
+    fi
+    if [ -n "$FALLBACK_INDEX" ]; then
+        echo ""
+        echo "       [!] 当前源安装失败，改用镜像重试：$FALLBACK_INDEX"
+        export PIP_INDEX_URL="$FALLBACK_INDEX" UV_DEFAULT_INDEX="$FALLBACK_INDEX" UV_INDEX_URL="$FALLBACK_INDEX"
+        pip_install "$@"
+    else
+        return 1
+    fi
+}
+
 # ─── Step 2: pip 升级（静默，失败不阻断）───
 echo "[2/$TOTAL] 准备包管理器 ..."
 if [ "$USE_UV" = "0" ]; then
-    "$PY" -m pip install --upgrade pip --no-user --disable-pip-version-check --quiet || true
+    install_with_fallback --upgrade pip --quiet || true
 fi
 echo "       完成。"
 echo ""
 
 # ─── Step 3: 安装依赖 ───
 echo "[3/$TOTAL] 安装/校验依赖（首次运行可能需要几分钟）..."
-pip_install -r requirements.txt
+install_with_fallback -r requirements.txt
 
 if [ "$RAG_MODE" = "rag_cpu" ]; then
     echo "       安装 CPU 版 RAG 依赖..."
     ./tools/install_rag_cpu.sh
 elif [ "$RAG_MODE" = "rag" ]; then
     echo "       安装 RAG 依赖（可能包含 nvidia-* CUDA 包）..."
-    pip_install -r requirements-rag.txt
+    install_with_fallback -r requirements-rag.txt
 fi
 echo "       依赖就绪。"
 echo ""
