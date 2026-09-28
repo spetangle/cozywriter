@@ -29,6 +29,39 @@ async def lifespan(app: FastAPI):
     # ── Startup ──
     init_db()
 
+    # ── RAG 本地 embedding 模型后台预热 ──
+    # 首次加载 moka-ai/m3e-base 约需 1~2 分钟，若不预热，首次打开章节
+    # （prep-info）或首次生成会卡住。这里只在「模型已下载」且「本地模式」时预热，
+    # 不触发下载；用守护线程，不阻塞启动。
+    try:
+        import threading
+
+        def _warm_rag_local_model():
+            try:
+                from storage.database import SessionLocal
+                from storage.models.system_setting import SystemSetting
+                from rag.model_manager import ModelManager
+
+                db = SessionLocal()
+                try:
+                    mode = SystemSetting.get(db, SystemSetting.KEY_RAG_EMBEDDING_MODE, "local")
+                finally:
+                    db.close()
+                if (mode or "local").strip().lower() != "local":
+                    return
+                if not ModelManager().is_model_downloaded():
+                    return
+                from rag.embedder import get_embedder
+                emb = get_embedder(mode="local")
+                emb.embed(["预热"])  # 触发懒加载
+                logger.info("[Startup] RAG 本地 embedding 模型预热完成")
+            except Exception as e:
+                logger.info(f"[Startup] RAG 本地模型预热跳过：{e}")
+
+        threading.Thread(target=_warm_rag_local_model, name="rag-warmup", daemon=True).start()
+    except Exception as e:
+        logger.warning(f"[Startup] RAG 预热线程创建失败：{e}")
+
     # ── 配置健康检查 ──
     # 只在用户显式配置了 DEFAULT_LLM_PROVIDER 时做提示（缺 API key 时大声告诉他）；
     # 没配置就不再警告（系统允许用户在 web UI 里临时选 provider）。

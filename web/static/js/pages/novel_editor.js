@@ -205,20 +205,19 @@ Alpine.data('novelEditor', () => ({
 
     async selectChapter(chapter) {
         if (this.chapterSwitching) return;
+        // 立即切换并渲染正文，不阻塞在细纲 / RAG 预检索上
+        // （RAG 首次会懒加载本地 embedding 模型，可能耗时 1~2 分钟）
         this.chapterSwitching = true;
-        try {
-            this.currentChapter = chapter;
-            this.chapterDirty = false;
-            this._saveLastView();
-            await this.loadChapterOutlines(chapter.id);
-            await this.loadPrepInfo(chapter.id);
-            if (this.writingTab === 'fingerprint') {
-                await this.loadFingerprint(chapter.id);
-            }
-        } catch (e) {
-            console.error('加载章节失败:', e);
-        } finally {
-            this.chapterSwitching = false;
+        this.currentChapter = chapter;
+        this.chapterDirty = false;
+        this._saveLastView();
+        this.chapterSwitching = false;
+        console.log('[NovelEditor] 切换章节', chapter.id, chapter.title);
+        // 以下异步加载，失败不影响正文显示
+        this.loadChapterOutlines(chapter.id);
+        this.loadPrepInfo(chapter.id);
+        if (this.writingTab === 'fingerprint') {
+            this.loadFingerprint(chapter.id);
         }
     },
 
