@@ -94,7 +94,8 @@ if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" | Out-N
 Write-Step 4 4 "Starting CozyWriter ..."
 Write-Host "  URL  : http://localhost:13567" -ForegroundColor Green
 Write-Host "  Hint : configure LLM provider in 'Settings - Providers' (DB first; .env is fallback)." -ForegroundColor Gray
-Write-Host "         opencode needs an API key to enable; RAG is optional, see docs/rag_setup.md." -ForegroundColor Gray
+Write-Host "         opencode needs an API key to enable." -ForegroundColor Gray
+Write-Host "         RAG is optional: .venv\Scripts\python -m pip install -r requirements-rag.txt  (see docs/rag_setup.md)." -ForegroundColor Gray
 Write-Host "  Stop : Ctrl+C" -ForegroundColor Gray
 Write-Host ""
 

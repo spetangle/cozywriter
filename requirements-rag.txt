@@ -1,0 +1,18 @@
+# CozyWriter RAG（embedding 检索）可选依赖
+#
+# 安装后会启用：
+#   - 事件去重 / 相似章节检索（build_chapter_prep_info 的 RAG 段）
+#   - 一致性检查的向量上下文
+#
+# ⚠️ sentence-transformers 会连带安装 torch。Linux x86_64 上 torch 默认带
+#    CUDA 依赖（nvidia-* 包，数 GB）。如果只用 CPU，建议先装 CPU 版 torch：
+#
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements-rag.txt
+#
+# 不需要 RAG 时只装 requirements.txt 即可，系统会显示「⚠️ RAG 未启用」。
+#
+# 另需下载模型 moka-ai/m3e-base（~400MB），见 docs/rag_setup.md。
+
+-r requirements.txt
+sentence-transformers>=2.2.0

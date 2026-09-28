@@ -56,7 +56,8 @@ echo [4/4] Starting CozyWriter ...
 echo.
 echo   URL  : http://localhost:13567
 echo   Hint : configure LLM provider in "Settings - Providers" (DB first; .env is fallback).
-echo          opencode needs an API key to enable; RAG is optional, see docs/rag_setup.md.
+echo          opencode needs an API key to enable.
+echo          RAG is optional: install with  .venv\Scripts\python -m pip install -r requirements-rag.txt  (see docs/rag_setup.md).
 echo   Stop : Ctrl+C
 echo.
 .venv\Scripts\python main.py

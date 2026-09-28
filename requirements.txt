@@ -1,15 +1,35 @@
+# CozyWriter 核心运行依赖
+#
+# 说明：
+# - 这里只放"启动与写作主流程"必需的库。
+# - RAG（embedding 检索）是可选的，相关依赖见 requirements-rag.txt。
+#   sentence-transformers 会连带安装 torch（Linux 上还会拉 nvidia-* CUDA 库，
+#   体积可达数 GB）；不需要 RAG 时不必安装。
+#
+# 如需启用 RAG：
+#   pip install -r requirements-rag.txt
+# 或（CPU-only，避免 nvidia 库）：
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install sentence-transformers
+
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 sqlalchemy>=2.0.0
+
+# 向量库：rag/vector_store.py 在模块导入时即 import chromadb，属核心依赖
 chromadb>=0.4.0
-sentence-transformers>=2.2.0
+# 模型下载/路径管理：rag/model_manager.py 顶部 import，属核心依赖
 huggingface-hub>=0.20.0
+
+# LLM Provider SDK
 anthropic>=0.18.0
 openai>=1.0.0
+# DeepSeek 余额/模型列表接口 + SDK 传输层
 httpx>=0.27.0
+
+# 配置与校验
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
-python-multipart>=0.0.9
-python-dotenv>=1.0.0
-# LLM 输出 JSON 容错修复（处理尾随逗号 / 中英文逗号混用 / 未闭合引号 / 注释等）
+
+# LLM 输出 JSON 容错（尾随逗号 / 中英文逗号 / 未闭合引号等）
 json_repair>=0.30.0

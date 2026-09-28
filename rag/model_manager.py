@@ -134,7 +134,16 @@ class ModelManager:
     def load_model(self):
         """加载模型到内存"""
         if self._model is None:
-            from sentence_transformers import SentenceTransformer
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError as e:
+                raise RuntimeError(
+                    "未安装 sentence-transformers，RAG（embedding 检索）不可用。\n"
+                    "启用方式：pip install -r requirements-rag.txt\n"
+                    "（CPU-only 可先装：pip install torch --index-url "
+                    "https://download.pytorch.org/whl/cpu）\n"
+                    "不使用 RAG 时无需安装，主流程写作不受影响。"
+                ) from e
             self._model = SentenceTransformer(
                 str(self.local_dir),  # 直接传本地目录
             )

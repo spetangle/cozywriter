@@ -17,6 +17,21 @@ RAG 依赖本地 embedding 模型 **`moka-ai/m3e-base`**（约 400MB）。未下
 
 ## 如何启用
 
+### 步骤 0：安装 RAG 依赖
+
+核心 `requirements.txt` 不含 `sentence-transformers`（它只在 RAG 用到），需要单独安装：
+
+```bash
+pip install -r requirements-rag.txt
+```
+
+> ⚠️ `sentence-transformers` 会连带安装 `torch`；Linux 上 `torch` 默认带 `nvidia-*` CUDA 库（数 GB）。
+> 只用 CPU 时先装 CPU 版 torch，可避免这些包：
+> ```bash
+> pip install torch --index-url https://download.pytorch.org/whl/cpu
+> pip install -r requirements-rag.txt
+> ```
+
 ### 方式一：网页下载（推荐）
 
 1. 打开「全局设置」；

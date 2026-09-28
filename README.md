@@ -147,7 +147,18 @@ DATABASE_URL=sqlite:///./data/cozywriter.db
 
 ## 📦 Embedding 模型 / RAG（可选）
 
-RAG 依赖本地模型 `moka-ai/m3e-base`（约 400MB）。**不安装不影响写作**，只是事件去重与相似度检索会跳过。
+RAG 依赖本地模型 `moka-ai/m3e-base`（约 400MB），并且需要额外安装 `sentence-transformers`。
+**核心依赖 `requirements.txt` 不包含它**，所以：
+
+- 不装：主流程写作完全正常，只是事件去重与相似度检索会跳过，项目页显示「⚠️ RAG 未启用」；
+- 要装：`pip install -r requirements-rag.txt`。
+
+> ⚠️ `sentence-transformers` 会连带安装 `torch`。Linux x86_64 上 `torch` 默认带 CUDA 依赖
+> （`nvidia-*` 包，体积可达数 GB）。只用 CPU 时建议先装 CPU 版 torch：
+> ```bash
+> pip install torch --index-url https://download.pytorch.org/whl/cpu
+> pip install -r requirements-rag.txt
+> ```
 
 启用方式与离线安装见 **`docs/rag_setup.md`**。模型目录：
 
