@@ -16,6 +16,9 @@ class TaskStatusResponse(BaseModel):
     result: dict | None
     error: str
     duration_s: float
+    created_at: float | None = None
+    project_id: str | int | None = None
+    run_id: int | None = None
 
 
 # 注意：FastAPI 路由按声明顺序匹配。具体路径（/all, /project/..., /terminate-all）

@@ -63,13 +63,48 @@ Alpine.data('novelEditor', () => ({
     showTaskManager: false,
     showPipelineProgress: false,
     pipelineTask: null,
+    pipelineTaskId: null,
     pipelinePollHandle: null,
+    pipelineStartTs: 0,
     showRegenerateConfirm: false,
+
+    // ─── 任务管理 ───
+    allTasks: [],
+    allTasksLoading: false,
+    _taskPollHandle: null,
+
+    // ─── 大纲 / 世界观面板：重新生成 ───
+    rerunStageBusy: {},
+    showExtendOutlineModal: false,
+    extendOutlineOriginalTotal: 0,
+    extendOutlineGenerated: 0,
+    extendOutlineExtendBy: 0,
+    extendOutlineNewTotal: 0,
+    extendOutlineArchitecture: true,
+    extendOutlineBusy: false,
+
+    // 9 步流水线元数据（与后端 llm.chapter_pipeline.PIPELINE_STAGES_META 对齐）
+    PIPELINE_STAGES_META: [
+        { id: '1_prep', label: '准备上下文' },
+        { id: '2_outline_gen', label: '生成章节细纲' },
+        { id: '3_outline_review', label: '细纲评审' },
+        { id: '4_text_gen', label: '生成正文' },
+        { id: '5_word_adjust', label: '字数调整' },
+        { id: '6_review', label: '正文评审' },
+        { id: '7_revise', label: '自动修订' },
+        { id: '8_save', label: '保存到数据库' },
+        { id: '9_post', label: '后处理（弧光/伏笔/一致性）' },
+    ],
 
     showWordAdjustModal: false,
     wordAdjustPlan: null,
     wordAdjustTaskId: null,
     wordAdjustSubmitting: false,
+    wordAdjustUseCustom: false,
+    wordAdjustCustomMin: null,
+    wordAdjustCustomTarget: null,
+    wordAdjustCustomMax: null,
+    wordAdjustPctInput: 10,
 
     showReviseConfirmModal: false,
     showReplaceCharacterModal: false,
@@ -85,6 +120,10 @@ Alpine.data('novelEditor', () => ({
 
     batchGenerating: false,
     batchTask: null,
+    batchPollHandle: null,
+    batchGenerateStart: 0,
+    batchGenerateCount: 5,
+    batchGenerateGuide: '',
 
     tokenUsage: null,
     tokenUsageLoading: false,
@@ -119,6 +158,7 @@ Alpine.data('novelEditor', () => ({
 
     init() {
         const id = Alpine.store('app').currentRoute.params.id;
+        console.log('[NovelEditor] 打开项目', id);
         this.loadProject(id);
         this.loadChapters(id);
         this.loadCharacters(id);
@@ -130,6 +170,8 @@ Alpine.data('novelEditor', () => ({
         this._loadCurrentLlm();
         this._maybeShowBootstrapBanner(id);
         this._startBannerPolling(id);
+        this._rehydrateBatchTask();
+        this.refreshAllTasks();
     },
 
     async loadProject(id) {
@@ -436,7 +478,8 @@ Alpine.data('novelEditor', () => ({
     },
 
     get canRunPipeline() {
-        return !this.pipelineTask || !['pending', 'running'].includes(this.pipelineTask.status);
+        return !!this.currentChapter
+            && (!this.pipelineTask || !['pending', 'running'].includes(this.pipelineTask.status));
     },
 
     async pipelineSetupSetupModal() {
@@ -444,110 +487,353 @@ Alpine.data('novelEditor', () => ({
     },
 
     async startPipelineGuide(guide) {
+        this.showPipelineSetup = false;
+        await this.runChapterPipeline(guide);
+    },
+
+    // ─── 9 步章节生成流水线 ───
+    async runChapterPipeline(guide) {
         if (!this.currentChapter) {
             Alpine.store('app').toast('请先选择一个章节', 'warning');
             return;
         }
+        if (this.pipelinePollHandle) {
+            Alpine.store('app').toast('已有流水线正在运行，请等待完成', 'warning');
+            return;
+        }
         try {
-            const res = await fetch(`/api/chapters/generate-pipeline`, {
+            console.log('[Pipeline] 启动单章生成', { chapter: this.currentChapter.id, guide });
+            const res = await fetch('/api/chapters/generate-pipeline', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    project_id: this.projectId,
+                    project_id: this.project.id,
                     chapter_id: this.currentChapter.id,
+                    auto_revise: true,
+                    revision_threshold: 6.5,
                     guide: guide || '',
                 }),
             });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
-            this.pipelineTask = data;
+            if (!res.ok || !data.task_id) {
+                console.error('[Pipeline] 提交失败', data);
+                Alpine.store('app').toast('流水线提交失败：' + (data.detail || JSON.stringify(data)), 'error');
+                return;
+            }
+            this.pipelineTaskId = data.task_id;
+            this.pipelineTask = { id: data.task_id, status: 'pending', result: { stages: {} } };
+            this.pipelineStartTs = Date.now();
             this.showPipelineProgress = true;
-            this.showPipelineSetup = false;
-            this._startPipelinePolling(data.task_id);
+            this.pipelinePollHandle = setInterval(() => this._pollPipelineTask(), 2000);
+            this._pollPipelineTask();
+            this.refreshAllTasks();
         } catch (e) {
-            console.error('启动 pipeline 失败:', e);
+            console.error('[Pipeline] 启动失败', e);
             Alpine.store('app').toast('启动失败: ' + e.message, 'error');
         }
     },
 
-    _startPipelinePolling(taskId) {
-        if (this.pipelinePollHandle) clearInterval(this.pipelinePollHandle);
-        this.pipelinePollHandle = setInterval(async () => {
-            try {
-                const res = await fetch(`/api/tasks/${taskId}`);
-                if (!res.ok) return;
-                const task = await res.json();
-                this.pipelineTask = task;
-                if (['completed', 'failed', 'cancelled'].includes(task.status)) {
-                    clearInterval(this.pipelinePollHandle);
-                    this.pipelinePollHandle = null;
-                    if (task.status === 'completed') {
-                        await this.loadChapters(this.project.id);
-                        if (task.result?.chapter_id) {
-                            const ch = this.chapters.find(c => c.id === task.result.chapter_id);
-                            if (ch) {
-                                await this.selectChapter(ch);
-                                await this.loadPostProcessing(ch.id);
-                            }
-                        }
-                        Alpine.store('app').toast('生成完成', 'success');
-                    } else if (task.status === 'failed') {
-                        Alpine.store('app').toast('生成失败: ' + (task.error || 'unknown'), 'error');
-                    }
-                }
-            } catch (e) {
-                console.warn('Pipeline 轮询失败:', e);
+    async _pollPipelineTask() {
+        const taskId = this.pipelineTaskId || (this.pipelineTask && this.pipelineTask.id);
+        if (!taskId) return;
+        try {
+            const res = await fetch(`/api/tasks/${taskId}`);
+            if (!res.ok) return;
+            const task = await res.json();
+            this.pipelineTask = task;
+            const stages = (task.result && task.result.stages) || {};
+            const running = Object.keys(stages).find((k) => stages[k].status === 'running');
+            if (running) {
+                console.log(`[Pipeline] ${taskId} stage ${running} (${(task.result || {}).progress_pct || 0}%)`);
             }
-        }, 2000);
+            this.refreshAllTasks();
+            if (['completed', 'failed', 'cancelled'].includes(task.status)) {
+                clearInterval(this.pipelinePollHandle);
+                this.pipelinePollHandle = null;
+                console.log(`[Pipeline] ${taskId} 结束: ${task.status}`);
+                const resultStatus = (task.result || {}).status;
+                if (task.status === 'completed' && resultStatus !== 'failed') {
+                    await this.loadChapters(this.project.id);
+                    const ch = this.chapters.find((c) => c.id === (this.currentChapter && this.currentChapter.id));
+                    if (ch) await this.selectChapter(ch);
+                    if (this.currentChapter) await this.loadPostProcessing(this.currentChapter.id);
+                    Alpine.store('app').toast(`生成完成（${(task.result || {}).final_word_count || 0} 字）`, 'success');
+                } else if (task.status === 'completed' && resultStatus === 'failed') {
+                    Alpine.store('app').toast('生成失败: ' + ((task.result || {}).error || '未知错误'), 'error');
+                } else if (task.status === 'failed') {
+                    Alpine.store('app').toast('生成失败: ' + (task.error || 'unknown'), 'error');
+                }
+            }
+        } catch (e) {
+            console.warn('[Pipeline] 轮询失败:', e);
+        }
     },
 
+    closePipelinePanel(navigateToChapter) {
+        const taskDone = !this.pipelineTask
+            || ['completed', 'failed', 'cancelled'].includes(this.pipelineTask.status);
+        if (!taskDone && this.pipelinePollHandle) {
+            if (!confirm('流水线还在运行中，确认关闭此面板？（不会停止后台任务）')) return;
+        }
+        if (this.pipelinePollHandle) {
+            clearInterval(this.pipelinePollHandle);
+            this.pipelinePollHandle = null;
+        }
+        this.showPipelineProgress = false;
+        if (navigateToChapter && this.project) this.loadChapters(this.project.id);
+    },
+
+    openPipelinePanelForTask(t) {
+        this.pipelineTask = t;
+        this.pipelineTaskId = t.id;
+        this.pipelineStartTs = Date.now() - Math.floor((t.duration_s || 0) * 1000);
+        this.showPipelineProgress = true;
+        if (['pending', 'running'].includes(t.status)) {
+            if (this.pipelinePollHandle) clearInterval(this.pipelinePollHandle);
+            this.pipelinePollHandle = setInterval(() => this._pollPipelineTask(), 2000);
+        }
+    },
+
+    get pipelineStagesView() {
+        const backendStages = (this.pipelineTask && this.pipelineTask.result && this.pipelineTask.result.stages) || {};
+        const now = Date.now();
+        return this.PIPELINE_STAGES_META.map((m) => {
+            const s = backendStages[m.id] || {};
+            const startedAtMs = s.started_at ? Math.floor(s.started_at * 1000) : null;
+            let elapsed = 0;
+            let pct = 0;
+            if (s.status === 'running') {
+                if (startedAtMs) {
+                    elapsed = (now - startedAtMs) / 1000;
+                    pct = Math.min(95, (elapsed / 90) * 100);
+                } else {
+                    elapsed = (now - this.pipelineStartTs) / 1000;
+                    pct = 30;
+                }
+            } else if (s.duration_ms != null) {
+                elapsed = s.duration_ms / 1000;
+                pct = 100;
+            }
+            return {
+                id: m.id,
+                label: s.label || m.label,
+                status: s.status || 'pending',
+                duration_ms: s.duration_ms,
+                elapsed_display: Number.isFinite(elapsed) ? elapsed.toFixed(1) : '0.0',
+                elapsed_pct: pct,
+                error: s.error || null,
+                score: s.score,
+            };
+        });
+    },
+
+    get pipelineProgressPct() {
+        return (this.pipelineTask && this.pipelineTask.result && this.pipelineTask.result.progress_pct) || 0;
+    },
+
+    get pipelineStatus() {
+        const t = this.pipelineTask;
+        if (!t) return 'pending';
+        if (t.status === 'completed' && t.result && t.result.status === 'failed') return 'failed';
+        return t.status;
+    },
+
+    get pipelineFinalResult() {
+        const r = this.pipelineTask && this.pipelineTask.result;
+        if (!r) return null;
+        return {
+            final_word_count: r.final_word_count,
+            error: r.error,
+        };
+    },
+
+    get pipelineElapsedText() {
+        if (!this.pipelineStartTs) return '';
+        const e = (Date.now() - this.pipelineStartTs) / 1000;
+        return e < 60 ? e.toFixed(1) + 's' : Math.floor(e / 60) + 'm' + Math.floor(e % 60) + 's';
+    },
+
+    getStageLabel(stageId) {
+        const m = this.PIPELINE_STAGES_META.find((s) => s.id === stageId);
+        return m ? m.label : stageId;
+    },
+
+    pipelineStageIcon(status) {
+        return {
+            pending: '○',
+            running: '⏳',
+            completed: '✅',
+            failed: '❌',
+            skipped: '⏭️',
+        }[status] || '○';
+    },
+
+    // ─── 批量生成 ───
     async openBatchGenerateModal() {
+        // batchGenerateStart 为 1-based「起始章节号」：
+        //   有当前章节 → 当前章节序号 + 1（下一章）
+        //   无当前章节 → 已有章节数 + 1
+        let start;
+        if (this.currentChapter) {
+            start = this.currentChapter.order + 2;
+        } else {
+            start = this.chapters.length > 0
+                ? Math.max(...this.chapters.map((ch) => ch.order + 1)) + 1
+                : 1;
+        }
+        this.batchGenerateStart = start;
+        this.batchGenerateCount = 5;
+        this.batchGenerateGuide = '';
         this.showBatchGenerate = true;
     },
 
-    async startBatchGenerate(startChapter, count, guide) {
+    get batchStartDisplay() {
+        return Math.max(1, parseInt(this.batchGenerateStart) || 1);
+    },
+
+    get batchEndDisplay() {
+        return this.batchStartDisplay + Math.max(1, parseInt(this.batchGenerateCount) || 1) - 1;
+    },
+
+    async startBatchGenerate() {
+        if (this.batchGenerating) return;
+        const count = Math.max(1, parseInt(this.batchGenerateCount) || 1);
+        // API 的 start_chapter 是 0-based「从这一章之后开始」，故减 1
+        const apiStart = Math.max(0, this.batchStartDisplay - 1);
+        const startFrom = this.batchStartDisplay;
+        const endAt = this.batchEndDisplay;
+        if (!confirm(`确认批量生成第 ${startFrom} 章到第 ${endAt} 章（共 ${count} 章）？\n\n每章将执行完整的 9 步生成流水线，可能需要较长时间。`)) return;
         try {
+            console.log('[Batch] 提交批量生成', { start: apiStart, count, guide: this.batchGenerateGuide });
             const res = await fetch('/api/chapters/batch-generate', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     project_id: this.project.id,
-                    start_chapter: startChapter,
+                    start_chapter: apiStart,
                     count,
-                    guide: guide || '',
+                    guide: this.batchGenerateGuide || '',
                 }),
             });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
-            this.batchTask = data;
+            if (!res.ok || !data.task_id) {
+                Alpine.store('app').toast('批量生成提交失败：' + (data.detail || JSON.stringify(data)), 'error');
+                return;
+            }
+            this.batchTask = {
+                id: data.task_id,
+                status: 'pending',
+                result: { batch: true, total_chapters: count, completed_chapters: 0, chapters_status: {}, current_pipeline_stages: {} },
+            };
             this.batchGenerating = true;
             this.showBatchGenerate = false;
-            this._startBatchPolling(data.task_id);
+            try {
+                localStorage.setItem('cozywriter.batchTask', JSON.stringify({
+                    id: data.task_id, project_id: this.project.id,
+                    start_chapter: this.batchGenerateStart, count,
+                    started_at: Date.now(),
+                }));
+            } catch (_) { /* ignore */ }
+            this.startBatchPolling();
+            this.refreshAllTasks();
         } catch (e) {
-            console.error('批量生成失败:', e);
+            console.error('[Batch] 提交失败', e);
             Alpine.store('app').toast('批量生成失败: ' + e.message, 'error');
         }
     },
 
-    _startBatchPolling(taskId) {
-        const handle = setInterval(async () => {
+    startBatchPolling() {
+        if (this.batchPollHandle) clearInterval(this.batchPollHandle);
+        this.batchPollHandle = setInterval(async () => {
             try {
-                const res = await fetch(`/api/tasks/${taskId}`);
+                const res = await fetch(`/api/tasks/${this.batchTask.id}`);
                 if (!res.ok) return;
                 const task = await res.json();
                 this.batchTask = task;
+                const r = task.result || {};
+                if (r.batch) {
+                    console.log(`[Batch] ${task.status} 第${r.current_chapter_order || '?'}章 (${r.completed_chapters || 0}/${r.total_chapters || 0})`);
+                }
                 if (['completed', 'failed', 'cancelled'].includes(task.status)) {
-                    clearInterval(handle);
+                    clearInterval(this.batchPollHandle);
+                    this.batchPollHandle = null;
                     this.batchGenerating = false;
+                    try { localStorage.removeItem('cozywriter.batchTask'); } catch (_) { /* ignore */ }
+                    if (this.project) await this.loadChapters(this.project.id);
                     if (task.status === 'completed') {
-                        await this.loadChapters(this.project.id);
-                        Alpine.store('app').toast('批量生成完成', 'success');
+                        const failed = r.failed_chapters || [];
+                        if (failed.length > 0) {
+                            Alpine.store('app').toast(`批量生成完成，但第 ${failed.join(', ')} 章失败`, 'warning');
+                        } else {
+                            Alpine.store('app').toast(`批量生成完成！共 ${r.completed_chapters || r.total_chapters || 0} 章`, 'success');
+                        }
+                    } else if (task.status === 'failed') {
+                        Alpine.store('app').toast('批量生成失败：' + (task.error || '未知错误'), 'error');
                     }
+                    this.refreshAllTasks();
                 }
             } catch (e) {
-                console.warn('批量任务轮询失败:', e);
+                console.warn('[Batch] 轮询失败:', e);
             }
         }, 2000);
+    },
+
+    async _rehydrateBatchTask() {
+        try {
+            const raw = localStorage.getItem('cozywriter.batchTask');
+            if (!raw) return;
+            const saved = JSON.parse(raw);
+            if (!saved || !saved.id) { localStorage.removeItem('cozywriter.batchTask'); return; }
+            const res = await fetch(`/api/tasks/${saved.id}`);
+            if (!res.ok) { localStorage.removeItem('cozywriter.batchTask'); return; }
+            const data = await res.json();
+            if (['completed', 'failed', 'cancelled'].includes(data.status)) {
+                localStorage.removeItem('cozywriter.batchTask');
+                return;
+            }
+            console.log('[Batch] 恢复批量任务:', saved.id);
+            this.batchTask = data;
+            this.batchGenerating = true;
+            this.startBatchPolling();
+        } catch (e) {
+            console.warn('[Batch] 恢复失败:', e);
+            try { localStorage.removeItem('cozywriter.batchTask'); } catch (_) { /* ignore */ }
+        }
+    },
+
+    cancelBatchGenerate() {
+        if (this.batchPollHandle) { clearInterval(this.batchPollHandle); this.batchPollHandle = null; }
+        this.batchGenerating = false;
+        this.batchTask = null;
+        try { localStorage.removeItem('cozywriter.batchTask'); } catch (_) { /* ignore */ }
+    },
+
+    get batchProgressInfo() {
+        const r = (this.batchTask && this.batchTask.result) || {};
+        if (!r.batch) return null;
+        return {
+            total: r.total_chapters || 0,
+            completed: r.completed_chapters || 0,
+            currentIndex: r.current_chapter_index || 0,
+            currentOrder: r.current_chapter_order || 0,
+            chaptersStatus: r.chapters_status || {},
+            pipelineStages: r.current_pipeline_stages || {},
+            progressPct: r.current_pipeline_progress_pct || 0,
+        };
+    },
+
+    get batchPipelineStagesView() {
+        const info = this.batchProgressInfo;
+        if (!info) return [];
+        return this.PIPELINE_STAGES_META.map((m) => {
+            const s = info.pipelineStages[m.id] || {};
+            return {
+                id: m.id,
+                label: s.label || m.label,
+                status: s.status || 'pending',
+                duration_ms: s.duration_ms,
+            };
+        });
     },
 
     async openExportModal() {
@@ -600,7 +886,205 @@ Alpine.data('novelEditor', () => ({
     },
 
     async openTaskManager() {
+        console.log('[TaskManager] 打开任务管理');
         this.showTaskManager = true;
+        await this.refreshAllTasks();
+        if (this._taskPollHandle) clearInterval(this._taskPollHandle);
+        this._taskPollHandle = setInterval(() => {
+            if (this.showTaskManager) this.refreshAllTasks();
+        }, 3000);
+    },
+
+    async refreshAllTasks() {
+        this.allTasksLoading = true;
+        try {
+            const res = await fetch('/api/tasks/all');
+            if (!res.ok) {
+                // 后端无 /all 时回退到项目任务
+                const all = [];
+                if (this.project) {
+                    const r2 = await fetch(`/api/tasks/project/${this.project.id}`);
+                    if (r2.ok) all.push(...(await r2.json()));
+                }
+                this.allTasks = all;
+                return;
+            }
+            this.allTasks = await res.json();
+        } catch (e) {
+            console.warn('[TaskManager] 刷新任务失败:', e);
+        } finally {
+            this.allTasksLoading = false;
+        }
+    },
+
+    async terminateAllTasks() {
+        if (!confirm('确定终止所有正在运行的任务？\n这会打断 LLM 调用，可能导致部分 stage 不完整。')) return;
+        try {
+            const res = await fetch('/api/tasks/terminate-all', { method: 'POST' });
+            if (res.ok) {
+                const data = await res.json();
+                Alpine.store('app').toast(`已终止 ${data.terminated} 个任务，跳过 ${data.skipped} 个`, 'success');
+                await this.refreshAllTasks();
+            } else {
+                Alpine.store('app').toast('终止失败: HTTP ' + res.status, 'error');
+            }
+        } catch (e) {
+            Alpine.store('app').toast('终止失败: ' + e.message, 'error');
+        }
+    },
+
+    async terminateOneTask(taskId) {
+        if (!confirm('确定终止任务 ' + taskId + ' ？')) return;
+        try {
+            const res = await fetch(`/api/tasks/${taskId}/terminate`, { method: 'POST' });
+            if (res.ok) {
+                await this.refreshAllTasks();
+            } else {
+                const err = await res.json().catch(() => ({}));
+                Alpine.store('app').toast('终止失败: ' + (err.detail || res.status), 'error');
+            }
+        } catch (e) {
+            Alpine.store('app').toast('终止失败: ' + e.message, 'error');
+        }
+    },
+
+    async rerunOneBootstrapTask(task, forceAll = false) {
+        if (!task.run_id) {
+            Alpine.store('app').toast('该任务没有关联的 workflow run，无法重跑。', 'warning');
+            return;
+        }
+        const label = forceAll ? '全部 stage（包括已成功的）' : '所有 failed stage';
+        if (!confirm(`确定重新生成任务「${task.id}」吗？\n将重跑该 run 中${label}。`)) return;
+        try {
+            const res = await fetch(`/api/workflow/run/${task.run_id}/rerun-all?force_all=${forceAll}`, {
+                method: 'POST',
+            });
+            const data = await res.json();
+            if (data.status === 'submitted') {
+                const polledTask = await this._pollTask(data.task_id, {
+                    onProgress: () => this.refreshAllTasks(),
+                });
+                if (polledTask.status === 'completed' && polledTask.result) {
+                    const success = (polledTask.result.rerun_stages || []).length;
+                    const still = (polledTask.result.still_failed || []).length;
+                    Alpine.store('app').toast(`重跑完成：成功 ${success} 个 stage，仍失败 ${still} 个。`, still ? 'warning' : 'success');
+                } else {
+                    Alpine.store('app').toast('重跑失败: ' + (polledTask.error || 'unknown'), 'error');
+                }
+            } else if (data.status === 'ok') {
+                const success = (data.rerun_stages || []).length;
+                const still = (data.still_failed || []).length;
+                Alpine.store('app').toast(`重跑完成：成功 ${success} 个 stage，仍失败 ${still} 个。`, still ? 'warning' : 'success');
+            } else {
+                Alpine.store('app').toast('重跑失败: ' + (data.error || data.detail || 'unknown'), 'error');
+            }
+        } catch (e) {
+            Alpine.store('app').toast('重跑失败: ' + e.message, 'error');
+        } finally {
+            await this.refreshAllTasks();
+        }
+    },
+
+    async rerunAllBootstrapTasks(forceAll = false) {
+        const seenRunIds = new Set();
+        const uniqueRuns = [];
+        for (const t of this.allTasks) {
+            if (t.task_type !== 'bootstrap' || !t.run_id || seenRunIds.has(t.run_id)) continue;
+            if (!forceAll && !['failed', 'cancelled'].includes(t.status)) continue;
+            seenRunIds.add(t.run_id);
+            uniqueRuns.push(t);
+        }
+        if (uniqueRuns.length === 0) {
+            Alpine.store('app').toast(forceAll ? '没有可重跑的 bootstrap 项目。' : '没有需要重跑的失败项。', 'warning');
+            return;
+        }
+        const label = forceAll ? `${uniqueRuns.length} 个项目（包括已成功的 stage 也会重新生成）` : `${uniqueRuns.length} 个失败项目`;
+        if (!confirm(`确定对 ${label}按顺序重新生成吗？`)) return;
+
+        let totalSuccess = 0;
+        let totalStillFailed = 0;
+        for (const t of uniqueRuns) {
+            try {
+                const res = await fetch(`/api/workflow/run/${t.run_id}/rerun-all?force_all=${forceAll}`, {
+                    method: 'POST',
+                });
+                const data = await res.json();
+                if (data.status === 'submitted') {
+                    const task = await this._pollTask(data.task_id, {
+                        onProgress: () => this.refreshAllTasks(),
+                    });
+                    if (task.status === 'completed' && task.result) {
+                        totalSuccess += (task.result.rerun_stages || []).length;
+                        totalStillFailed += (task.result.still_failed || []).length;
+                    } else {
+                        totalStillFailed += 1;
+                    }
+                } else if (data.status === 'ok') {
+                    totalSuccess += (data.rerun_stages || []).length;
+                    totalStillFailed += (data.still_failed || []).length;
+                } else {
+                    totalStillFailed += 1;
+                }
+            } catch (e) {
+                console.error('[rerunAllBootstrapTasks] failed:', e);
+                totalStillFailed += 1;
+            }
+        }
+        Alpine.store('app').toast(`重跑完成：成功 ${totalSuccess} 个 stage，仍失败 ${totalStillFailed} 个。`, totalStillFailed ? 'warning' : 'success');
+        await this.refreshAllTasks();
+    },
+
+    get activeTaskCount() {
+        return this.allTasks.filter((t) => ['pending', 'running'].includes(t.status)).length;
+    },
+
+    get hasFailedBootstrapTasks() {
+        return this.allTasks.some(
+            (t) => t.task_type === 'bootstrap' && ['failed', 'cancelled'].includes(t.status) && t.run_id
+        );
+    },
+
+    get hasBootstrapTasks() {
+        return this.allTasks.some((t) => t.task_type === 'bootstrap' && t.run_id);
+    },
+
+    taskTypeLabel(type) {
+        return {
+            bootstrap: '引导补全',
+            chapter_pipeline: '单章流水线',
+            batch_pipeline: '批量生成',
+            chapter_revise: '章节修订',
+            word_adjust: '字数调整',
+            extend_outline: '大纲扩写',
+            review: '评审',
+            full_review: '全文评审',
+            generate: 'AI 生成',
+        }[type] || type;
+    },
+
+    taskStatusLabel(status) {
+        return {
+            pending: '等待',
+            running: '运行中',
+            completed: '完成',
+            failed: '失败',
+            cancelled: '已取消',
+        }[status] || status;
+    },
+
+    toggleTaskDetail(taskId) {
+        if (this.expandedTaskIds.includes(taskId)) {
+            this.expandedTaskIds = this.expandedTaskIds.filter((id) => id !== taskId);
+        } else {
+            this.expandedTaskIds = [...this.expandedTaskIds, taskId];
+        }
+    },
+
+    resetTaskPolling() {
+        if (this._taskPollHandle) {
+            clearInterval(this._taskPollHandle);
+            this._taskPollHandle = null;
+        }
     },
 
     async loadChapterVersions() {
@@ -652,6 +1136,8 @@ Alpine.data('novelEditor', () => ({
 
     destroy() {
         if (this.pipelinePollHandle) clearInterval(this.pipelinePollHandle);
+        if (this._taskPollHandle) clearInterval(this._taskPollHandle);
+        if (this.batchPollHandle) clearInterval(this.batchPollHandle);
         this._stopBannerPolling();
         this._stopBootstrapPolling();
     },
@@ -1092,6 +1578,449 @@ Alpine.data('novelEditor', () => ({
         if (sec < 60) return `${sec} 秒`;
         return `${Math.floor(sec / 60)} 分 ${sec % 60} 秒`;
     },
+
+    // ─── 设定文档（世界观/背景、大纲）辅助 ───
+
+    effectiveTotalChapters() {
+        if (this.project && this.project.total_chapters) return this.project.total_chapters;
+        const base = this.bootstrapData && this.bootstrapData.base;
+        if (base && base.total_chapters) return base.total_chapters;
+        return 0;
+    },
+
+    get worldCategories() {
+        const w = this.bootstrapData && this.bootstrapData.world;
+        const byCat = (w && w.entries_by_category) || {};
+        return Object.entries(byCat).map(([category, entries]) => ({ category, entries }));
+    },
+
+    get hasWorldData() {
+        return this.worldCategories.length > 0;
+    },
+
+    get preambleText() {
+        const meta = (this.bootstrapData && this.bootstrapData.project_meta) || {};
+        return meta.premise || (this.project && this.project.premise) || '';
+    },
+
+    get chapterOneLineOutlines() {
+        const o = this.bootstrapData && this.bootstrapData.outline;
+        return (o && Array.isArray(o.chapter_outlines)) ? o.chapter_outlines : [];
+    },
+
+    bootstrapAiOutlineSummary() {
+        const o = this.bootstrapData && this.bootstrapData.outline;
+        if (!o) return '';
+        const parts = [];
+        if (o.outline_text) parts.push(`概要 ${o.outline_text.length} 字`);
+        if (Array.isArray(o.plot_lines) && o.plot_lines.length) parts.push(`${o.plot_lines.length} 条剧情线`);
+        const acts = (o.structure && o.structure.acts) || [];
+        if (acts.length) parts.push(`${acts.length} 幕结构`);
+        if (o.pacing_notes) parts.push('节奏规划');
+        return parts.join(' · ');
+    },
+
+    bootstrapAiTheme() {
+        const t = this.bootstrapData && this.bootstrapData.theme;
+        return (t && (t.theme || t.tone)) ? t : null;
+    },
+
+    bootstrapAiForeshadowings() {
+        const f = this.bootstrapData && this.bootstrapData.foreshadowings;
+        if (!f || !f.by_period) return null;
+        const total = f.total || 0;
+        return total > 0 ? f : null;
+    },
+
+    async _refreshBootstrapData() {
+        if (!this.project) return;
+        try {
+            const res = await fetch(`/api/workflow/project/${this.project.id}/bootstrap-data`);
+            if (res.ok) this.bootstrapData = await res.json();
+        } catch (e) {
+            console.warn('[refreshBootstrapData] failed:', e);
+        }
+    },
+
+    // ─── 从面板重跑 bootstrap stage（世界观/大纲等）───
+
+    rerunStageBtnTitle(stageId) {
+        return '点击用 LLM 重新生成该部分设定（会覆盖现有内容）';
+    },
+
+    async rerunBootstrapStageFromPanel(stageId) {
+        if (!this.project) {
+            Alpine.store('app').toast('请先打开一个项目', 'warning');
+            return;
+        }
+        const stageLabel = {
+            'stage_1_base': '基础外推',
+            'stage_2a_theme': '主旨/基调',
+            'stage_2b_style': '文风/节奏',
+            'stage_2c_world': '世界观/背景',
+            'stage_3a_protagonist': '主角',
+            'stage_3b_antagonist': '反派',
+            'stage_3c_supporting': '配角',
+            'stage_3d_arcs': '角色弧光',
+            'stage_4a_outline': '项目大纲',
+            'stage_4a_chapter_outlines': '每章一句话大纲',
+            'stage_4b_foreshadow': '伏笔',
+        }[stageId] || stageId;
+
+        let chapterRange = '';
+        if (stageId === 'stage_4a_outline' || stageId === 'stage_4a_chapter_outlines') {
+            const total = this.project.total_chapters || 0;
+            if (total > 0) chapterRange = `\n预计重新生成第 1 章到第 ${total} 章，共计 ${total} 章。`;
+        }
+        if (!confirm(`确定重新生成「${stageLabel}」吗？将覆盖之前的结果。${chapterRange}`)) return;
+
+        const stagesToRerun = stageId === 'stage_4a_outline'
+            ? ['stage_4a_outline', 'stage_4a_chapter_outlines']
+            : [stageId];
+
+        for (const sid of stagesToRerun) {
+            this.rerunStageBusy[sid] = true;
+            try {
+                const lr = await fetch(`/api/workflow/project/${this.project.id}/latest`);
+                if (!lr.ok) {
+                    Alpine.store('app').toast('未找到 bootstrap 运行记录，请先完成设定生成。', 'warning');
+                    return;
+                }
+                const runData = await lr.json();
+                const runId = runData.run_id;
+                console.log(`[RerunStage] ${sid} @ run ${runId}`);
+                const res = await fetch(`/api/workflow/run/${runId}/rerun`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ stage_id: sid }),
+                });
+                const data = await res.json();
+                if (data.status !== 'submitted') {
+                    Alpine.store('app').toast('重跑失败: ' + (data.error || JSON.stringify(data)), 'error');
+                    return;
+                }
+                const task = await this._pollTask(data.task_id, { onProgress: () => this.refreshAllTasks() });
+                if (task.status === 'completed') {
+                    await fetch(`/api/workflow/run/${runId}/commit`, { method: 'POST' });
+                } else {
+                    Alpine.store('app').toast('重跑失败: ' + (task.error || 'unknown'), 'error');
+                    return;
+                }
+            } catch (e) {
+                Alpine.store('app').toast('重跑失败: ' + e.message, 'error');
+                return;
+            } finally {
+                this.rerunStageBusy[sid] = false;
+            }
+        }
+
+        await this._refreshBootstrapData();
+        await this.loadProject(this.project.id);
+        await this.loadChapters(this.project.id);
+        this.loadCharacters(this.project.id);
+        this.loadThemes(this.project.id);
+        this.loadForeshadowings(this.project.id);
+        Alpine.store('app').toast(`✅ ${stageLabel} 已重新生成`, 'success');
+    },
+
+    async rerunAllCharacters() {
+        if (!this.project) {
+            Alpine.store('app').toast('请先打开一个项目', 'warning');
+            return;
+        }
+        if (!confirm('确定重新生成全部角色吗？将覆盖之前的主角、反派、配角和角色弧光。')) return;
+        const stagesToRerun = ['stage_3a_protagonist', 'stage_3b_antagonist', 'stage_3c_supporting', 'stage_3d_arcs'];
+        let runId = null;
+        for (const sid of stagesToRerun) {
+            this.rerunStageBusy[sid] = true;
+            try {
+                const lr = await fetch(`/api/workflow/project/${this.project.id}/latest`);
+                if (!lr.ok) {
+                    Alpine.store('app').toast('未找到 bootstrap 运行记录。', 'warning');
+                    return;
+                }
+                const runData = await lr.json();
+                runId = runData.run_id;
+                const res = await fetch(`/api/workflow/run/${runId}/rerun`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ stage_id: sid }),
+                });
+                const data = await res.json();
+                if (data.status !== 'submitted') {
+                    Alpine.store('app').toast('重跑失败: ' + (data.error || JSON.stringify(data)), 'error');
+                    return;
+                }
+                const task = await this._pollTask(data.task_id, { onProgress: () => this.refreshAllTasks() });
+                if (task.status !== 'completed') {
+                    Alpine.store('app').toast('重跑失败: ' + (task.error || 'unknown'), 'error');
+                    return;
+                }
+            } catch (e) {
+                Alpine.store('app').toast('重跑失败: ' + e.message, 'error');
+                return;
+            } finally {
+                this.rerunStageBusy[sid] = false;
+            }
+        }
+        if (runId) {
+            await fetch(`/api/workflow/run/${runId}/commit`, { method: 'POST' });
+        }
+        await this._refreshBootstrapData();
+        await this.loadProject(this.project.id);
+        this.loadCharacters(this.project.id);
+        Alpine.store('app').toast('✅ 全部角色已重新生成', 'success');
+        if (confirm('⚠️ 角色已更新！\n\n大纲中的角色名可能与新角色不一致。\n\n是否立即重新生成大纲以保持剧情一致性？')) {
+            await this.rerunBootstrapStageFromPanel('stage_4a_outline');
+        }
+    },
+
+    // ─── 扩写 / 缩减大纲 ───
+
+    openExtendOutlineModal() {
+        if (!this.project) return;
+        this.extendOutlineOriginalTotal = this.project.total_chapters || 0;
+        this.extendOutlineGenerated = this.chapterOneLineOutlines.length;
+        this.extendOutlineExtendBy = 100;
+        this.extendOutlineNewTotal = this.extendOutlineGenerated + 100;
+        this.extendOutlineArchitecture = true;
+        this.extendOutlineBusy = false;
+        this.showExtendOutlineModal = true;
+    },
+
+    extendOutlineBtnTitle() {
+        return '基于已有大纲扩写更多章节，或缩减小说篇幅';
+    },
+
+    onExtendOutlineChange(which, rawValue) {
+        const v = parseInt(rawValue, 10);
+        if (isNaN(v)) return;
+        if (which === 'extendBy') {
+            this.extendOutlineExtendBy = v;
+            this.extendOutlineNewTotal = this.extendOutlineGenerated + v;
+        } else if (which === 'newTotal') {
+            this.extendOutlineNewTotal = Math.max(0, v);
+            this.extendOutlineExtendBy = this.extendOutlineNewTotal - this.extendOutlineGenerated;
+        }
+    },
+
+    get canSubmitExtendOutline() {
+        if (this.extendOutlineBusy) return false;
+        if (this.extendOutlineExtendBy === 0) return false;
+        if (this.extendOutlineNewTotal < 0) return false;
+        return true;
+    },
+
+    async confirmExtendOutline() {
+        if (!this.project) return;
+        const newTotal = this.extendOutlineNewTotal;
+        const generated = this.extendOutlineGenerated;
+        const diff = this.extendOutlineExtendBy;
+        if (newTotal < 0) { Alpine.store('app').toast('新目标章节总数不能 < 0', 'warning'); return; }
+        if (diff === 0) { this.showExtendOutlineModal = false; return; }
+        const isExpand = diff > 0;
+        const confirmMsg = isExpand
+            ? `确定把项目「${this.project.title}」的大纲从 ${generated} 章扩到 ${newTotal} 章吗？\n\n• 已有章节：不会修改\n• 新增章节：${diff} 章\n• 架构层（分卷/剧情线/四幕）：${this.extendOutlineArchitecture ? '同步扩写' : '保留原架构'}`
+            : `确定把项目「${this.project.title}」的大纲从 ${generated} 章缩减到 ${newTotal} 章吗？\n\n• 尾部删除 ${Math.abs(diff)} 章\n• 保留的章节（1-${newTotal}）不会修改\n• 警告：已生成的对应章节细纲/伏笔也会被清理`;
+        if (!confirm(confirmMsg)) return;
+
+        this.extendOutlineBusy = true;
+        this.showExtendOutlineModal = false;
+        try {
+            console.log('[ExtendOutline] 提交', { newTotal, isExpand });
+            const res = await fetch(
+                `/api/workflow/project/${this.project.id}/extend-outline?target_chapters=${newTotal}&extend_architecture=${this.extendOutlineArchitecture}`,
+                { method: 'POST' }
+            );
+            const data = await res.json();
+            if (data.status === 'ok' && !data.task_id) {
+                await this._afterExtendOutline(data, isExpand);
+                return;
+            }
+            if (data.status === 'submitted' && data.task_id) {
+                Alpine.store('app').toast(`大纲${isExpand ? '扩写' : '缩减'}任务已提交`, 'info');
+                this.showTaskManager = true;
+                await this.refreshAllTasks();
+                const task = await this._pollTask(data.task_id, {
+                    onProgress: () => this.refreshAllTasks(),
+                });
+                if (task.status === 'completed' && task.result) {
+                    await this._afterExtendOutline(task.result, isExpand);
+                } else if (task.status === 'failed') {
+                    Alpine.store('app').toast('操作失败: ' + (task.error || 'unknown'), 'error');
+                }
+                return;
+            }
+            Alpine.store('app').toast('操作失败: ' + (data.error || JSON.stringify(data)), 'error');
+        } catch (e) {
+            console.error('[confirmExtendOutline] failed:', e);
+            Alpine.store('app').toast('操作失败: ' + e.message, 'error');
+        } finally {
+            this.extendOutlineBusy = false;
+        }
+    },
+
+    async _afterExtendOutline(data, isExpand) {
+        if (!this.project) return;
+        if (data.status !== 'ok') {
+            Alpine.store('app').toast('操作失败: ' + (data.error || JSON.stringify(data)), 'error');
+            return;
+        }
+        const action = isExpand ? '扩写' : '缩减';
+        let msg;
+        if (isExpand) {
+            msg = `✅ 大纲${action}完成！原 ${data.old_total} 章 → 新 ${data.new_total} 章，新增 ${data.added_chapters || 0} 章`;
+        } else {
+            msg = `✅ 大纲${action}完成！原 ${data.old_total} 章 → 新 ${data.new_total} 章，删除尾部 ${data.removed_chapters || 0} 章`;
+        }
+        Alpine.store('app').toast(msg, 'success', 6000);
+        await this.loadProject(this.project.id);
+        await this._refreshBootstrapData();
+        await this.loadChapters(this.project.id);
+        console.log(`[ExtendOutline] ${action} 完成: ${data.old_total} → ${data.new_total}`);
+    },
+
+    // ─── 字数调整（独立功能，只动字数）───
+
+    openWordAdjustModal() {
+        if (!this.currentChapter || !this.currentChapter.content) {
+            Alpine.store('app').toast('当前章节没有正文内容，无法调整字数', 'warning');
+            return;
+        }
+        this.wordAdjustUseCustom = false;
+        this.wordAdjustCustomMin = this.project.word_count_min || null;
+        this.wordAdjustCustomTarget = this.project.target_word_count || null;
+        this.wordAdjustCustomMax = this.project.word_count_max || null;
+        this.wordAdjustPctInput = 10;
+        this.recalcWordAdjustPlan();
+        this.wordAdjustTaskId = null;
+        this.wordAdjustSubmitting = false;
+        this.showWordAdjustModal = true;
+    },
+
+    recalcWordAdjustPlan() {
+        if (!this.currentChapter) return;
+        const currentChars = this.currentChapter.word_count || 0;
+        let minW, maxW;
+        if (this.wordAdjustUseCustom) {
+            minW = Number(this.wordAdjustCustomMin) || this.project.word_count_min || 0;
+            maxW = Number(this.wordAdjustCustomMax) || this.project.word_count_max || 0;
+        } else {
+            minW = this.project.word_count_min || 0;
+            maxW = this.project.word_count_max || 0;
+        }
+        if (minW > maxW) [minW, maxW] = [maxW, minW];
+        // 兜底：项目未设上下限时避免把上限当 0
+        if (maxW <= 0) maxW = Math.max(currentChars, this.project.target_word_count || 3000);
+        let plan;
+        if (currentChars > maxW) {
+            plan = { action: 'compress', delta: currentChars - maxW, min: minW, max: maxW };
+        } else if (currentChars < minW) {
+            plan = { action: 'expand', delta: minW - currentChars, min: minW, max: maxW };
+        } else {
+            plan = { action: 'none', delta: 0, min: minW, max: maxW };
+        }
+        this.wordAdjustPlan = plan;
+    },
+
+    applyWordAdjustPctPreset(pct) {
+        if (!pct || pct <= 0 || pct >= 100) {
+            Alpine.store('app').toast('百分比必须在 1-99 之间', 'warning');
+            return;
+        }
+        const baseTarget = Number(this.wordAdjustCustomTarget)
+            || this.project.target_word_count || 3000;
+        const delta = Math.round(baseTarget * pct / 100);
+        this.wordAdjustUseCustom = true;
+        this.wordAdjustCustomMin = Math.max(0, baseTarget - delta);
+        this.wordAdjustCustomTarget = baseTarget;
+        this.wordAdjustCustomMax = baseTarget + delta;
+        this.wordAdjustPctInput = pct;
+        this.recalcWordAdjustPlan();
+    },
+
+    closeWordAdjustModal() {
+        if (this.wordAdjustSubmitting) {
+            Alpine.store('app').toast('调整进行中，请等待完成', 'warning');
+            return;
+        }
+        this.showWordAdjustModal = false;
+        this.wordAdjustPlan = null;
+    },
+
+    async runWordAdjust() {
+        if (!this.wordAdjustPlan || this.wordAdjustPlan.action === 'none') return;
+        if (this.wordAdjustSubmitting) return;
+        this.wordAdjustSubmitting = true;
+        try {
+            const body = { project_id: this.project.id, chapter_id: this.currentChapter.id };
+            if (this.wordAdjustUseCustom) {
+                if (this.wordAdjustCustomMin != null && this.wordAdjustCustomMin !== '') body.min_words = Number(this.wordAdjustCustomMin);
+                if (this.wordAdjustCustomMax != null && this.wordAdjustCustomMax !== '') body.max_words = Number(this.wordAdjustCustomMax);
+                if (this.wordAdjustCustomTarget != null && this.wordAdjustCustomTarget !== '') body.target_words = Number(this.wordAdjustCustomTarget);
+            }
+            console.log('[WordAdjust] 提交', body, this.wordAdjustPlan);
+            const res = await fetch('/api/chapters/adjust-word-count', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json();
+            if (!res.ok || !data.task_id) {
+                Alpine.store('app').toast('字数调整提交失败：' + (data.detail || JSON.stringify(data)), 'error');
+                this.wordAdjustSubmitting = false;
+                return;
+            }
+            this.wordAdjustTaskId = data.task_id;
+            this.showWordAdjustModal = false;
+            this.showTaskManager = true;
+            await this.refreshAllTasks();
+            if (this._taskPollHandle) clearInterval(this._taskPollHandle);
+            this._taskPollHandle = setInterval(() => {
+                this._pollWordAdjust();
+                if (this.showTaskManager) this.refreshAllTasks();
+            }, 2000);
+            this._pollWordAdjust();
+        } catch (e) {
+            Alpine.store('app').toast('字数调整请求失败: ' + e.message, 'error');
+            this.wordAdjustSubmitting = false;
+        }
+    },
+
+    async _pollWordAdjust() {
+        if (!this.wordAdjustTaskId) return;
+        try {
+            const res = await fetch(`/api/tasks/${this.wordAdjustTaskId}`);
+            if (!res.ok) return;
+            const task = await res.json();
+            if (['completed', 'failed', 'cancelled'].includes(task.status)) {
+                if (this._taskPollHandle) clearInterval(this._taskPollHandle);
+                this._taskPollHandle = null;
+                this.wordAdjustSubmitting = false;
+                if (task.status === 'completed') {
+                    const r = task.result || {};
+                    const rangeTag = r.is_custom_range ? '（自定义）' : '（项目默认）';
+                    if (r.skipped) {
+                        Alpine.store('app').toast(`当前字数（${r.current_chars}）已在区间 ${r.min_chars}~${r.max_chars} 内${rangeTag}，无需调整。`, 'info', 6000);
+                    } else {
+                        const sign = r.delta >= 0 ? '+' : '';
+                        Alpine.store('app').toast(`字数调整完成：${r.current_chars} → ${r.new_chars} 字（${sign}${r.delta}）`, 'success', 6000);
+                    }
+                    this.wordAdjustTaskId = null;
+                    await this.loadChapters(this.project.id);
+                    if (this.currentChapter) {
+                        const ch = this.chapters.find((c) => c.id === this.currentChapter.id);
+                        if (ch) await this.selectChapter(ch);
+                    }
+                } else if (task.status === 'failed') {
+                    Alpine.store('app').toast('字数调整失败：' + (task.error || '未知错误'), 'error');
+                    this.wordAdjustTaskId = null;
+                }
+            }
+        } catch (e) {
+            console.warn('[WordAdjust] 轮询失败:', e);
+        }
+    },
 }));
 }); // end alpine:init
 
@@ -1181,12 +2110,13 @@ window.registerPageTemplate?.('novel_editor', `
             <div class="sidebar-header"><span>🛠 工具</span></div>
             <div class="tool-buttons">
               <button @click="setPanel('writing')" :class="{ active: activePanel === 'writing' }">✍️ 写作</button>
-              <button @click="setPanel('outline')" :class="{ active: activePanel === 'outline' }">📋 细纲</button>
+              <button @click="setPanel('outline-plan'); outlineSubPanel = 'overview'" :class="{ active: activePanel === 'outline-plan' }">📋 大纲</button>
+              <button @click="setPanel('worldbuilding')" :class="{ active: activePanel === 'worldbuilding' }">🌍 世界观/背景</button>
               <button @click="setPanel('character')" :class="{ active: activePanel === 'character' }">👥 角色</button>
               <button @click="setPanel('theme')" :class="{ active: activePanel === 'theme' }">🎯 主题/伏笔</button>
               <button @click="setPanel('plot')" :class="{ active: activePanel === 'plot' }">📊 剧情追踪</button>
               <button @click="pipelineSetupSetupModal()" :disabled="!canRunPipeline">🚀 单章生成</button>
-              <button @click="openBatchGenerateModal()">📦 批量生成</button>
+              <button @click="openBatchGenerateModal()" :disabled="batchGenerating">📦 批量生成</button>
             </div>
           </div>
 
@@ -1275,6 +2205,9 @@ window.registerPageTemplate?.('novel_editor', `
                       <div class="writing-actions">
                         <button class="btn-primary" @click="saveChapter()" :disabled="!chapterDirty">💾 保存</button>
                         <button class="btn-secondary" @click="pipelineSetupSetupModal()" :disabled="!canRunPipeline">🚀 AI 生成</button>
+                        <button class="btn-secondary" @click="openWordAdjustModal()"
+                                :disabled="!currentChapter || !currentChapter.content"
+                                title="只调整字数（缩写或扩写），不动剧情结构">📐 调整字数</button>
                       </div>
                     </div>
                   </template>
@@ -1420,18 +2353,166 @@ window.registerPageTemplate?.('novel_editor', `
             </template>
           </div>
 
-          <!-- 细纲面板 -->
-          <div x-show="activePanel === 'outline'" class="panel-section">
-            <h3>📋 章节细纲</h3>
-            <template x-if="!currentChapter"><p class="empty-hint">请先选择章节</p></template>
-            <template x-if="currentChapter">
-              <div class="outline-panel">
-                <p>当前章节：<strong x-text="currentChapter.title"></strong></p>
-                <template x-if="chapterOutlinesMap[currentChapter.id]">
-                  <div class="outline-text" x-text="chapterOutlinesMap[currentChapter.id].key_content || '暂无核心内容'"></div>
-                </template>
-                <template x-if="!chapterOutlinesMap[currentChapter.id]"><p class="empty-hint">本章暂无细纲</p></template>
+          <!-- ═══ 项目大纲面板（总纲 + 每章一句话大纲） ═══ -->
+          <div x-show="activePanel === 'outline-plan'" class="panel-section">
+            <div class="panel-page-header">
+              <h2>📋 大纲与细纲</h2>
+              <div class="panel-header-actions">
+                <button class="btn-secondary" @click="rerunBootstrapStageFromPanel('stage_4a_outline')"
+                        :disabled="!project || rerunStageBusy['stage_4a_outline']"
+                        :title="rerunStageBtnTitle('stage_4a_outline')">
+                  <span x-show="!rerunStageBusy['stage_4a_outline']">🔄 重新生成大纲</span>
+                  <span x-show="rerunStageBusy['stage_4a_outline']">⏳ 生成中...</span>
+                </button>
+                <button class="btn-secondary" @click="openExtendOutlineModal()"
+                        :disabled="!project || extendOutlineBusy"
+                        :title="extendOutlineBtnTitle()">
+                  <span x-show="!extendOutlineBusy">📈 扩写大纲</span>
+                  <span x-show="extendOutlineBusy">⏳ 扩写中...</span>
+                </button>
               </div>
+            </div>
+
+            <div class="outline-meta">
+              <div class="meta-item">
+                <span>预设总章节</span>
+                <strong x-text="effectiveTotalChapters() ? effectiveTotalChapters() + ' 章' : '未设定'"></strong>
+              </div>
+              <div class="meta-item">
+                <span>章节字数目标</span>
+                <strong x-text="(project?.target_word_count || 0) + ' 字'"></strong>
+              </div>
+              <div class="meta-item">
+                <span>字数范围</span>
+                <strong x-text="(project?.word_count_min || 0) + '～' + (project?.word_count_max || 0) + ' 字'"></strong>
+              </div>
+              <div class="meta-item">
+                <span>已规划章节</span>
+                <strong x-text="chapterOneLineOutlines.length"></strong>
+              </div>
+            </div>
+
+            <template x-if="bootstrapData && bootstrapData.outline && (bootstrapData.outline.outline_text || (bootstrapData.outline.plot_lines || []).length)">
+              <div class="ai-preview-block">
+                <div class="ai-preview-header">
+                  <span>🤖 AI 生成大纲</span>
+                  <span class="ai-preview-hint" x-text="bootstrapAiOutlineSummary()"></span>
+                </div>
+                <template x-if="bootstrapData.outline.outline_text">
+                  <div class="outline-summary">
+                    <h4>📖 总纲 / 概要</h4>
+                    <p x-text="bootstrapData.outline.outline_text"></p>
+                  </div>
+                </template>
+                <template x-if="(bootstrapData.outline.plot_lines || []).length > 0">
+                  <div class="outline-plotlines">
+                    <h4>📋 剧情线</h4>
+                    <template x-for="(pl, idx) in bootstrapData.outline.plot_lines" :key="'pl-' + idx">
+                      <div class="plotline-card">
+                        <div class="pl-header">
+                          <strong x-text="pl.title || '未命名剧情线'"></strong>
+                          <span class="pl-range" x-text="'第' + (pl.from_chapter || '?') + '章 → 第' + (pl.to_chapter || '?') + '章'"></span>
+                        </div>
+                        <div class="pl-desc" x-text="pl.description || '暂无描述'"></div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+                <template x-if="bootstrapData.outline.structure && (bootstrapData.outline.structure.acts || []).length > 0">
+                  <div class="outline-structure">
+                    <h4>🎭 结构</h4>
+                    <div class="act-list">
+                      <template x-for="(act, idx) in bootstrapData.outline.structure.acts" :key="'act-' + idx">
+                        <div class="act-card">
+                          <div class="act-name" x-text="act.name || '未命名'"></div>
+                          <div class="act-range" x-text="'第' + (act.from_chapter || '?') + '章 → 第' + (act.to_chapter || '?') + '章'"></div>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+                <template x-if="bootstrapData.outline.pacing_notes">
+                  <div class="outline-pacing">
+                    <h4>⏱️ 节奏规划</h4>
+                    <p x-text="bootstrapData.outline.pacing_notes"></p>
+                  </div>
+                </template>
+
+                <template x-if="chapterOneLineOutlines.length > 0">
+                  <div class="outline-chapter-list">
+                    <h4>📑 每章一句话大纲
+                      <span class="outline-count" x-text="'（共 ' + chapterOneLineOutlines.length + ' 章）'"></span>
+                    </h4>
+                    <div class="chapter-outline-grid">
+                      <template x-for="(co, idx) in chapterOneLineOutlines" :key="'co-' + (co.chapter_num || idx)">
+                        <div class="chapter-outline-mini">
+                          <div class="com-head">
+                            <span class="com-num" x-text="'第' + (co.chapter_num || (idx + 1)) + '章'"></span>
+                            <span class="com-vol" x-show="co.volume_num" x-text="'第' + co.volume_num + '卷'"></span>
+                            <span class="com-pos" x-show="co.chapter_position" x-text="co.chapter_position"></span>
+                          </div>
+                          <div class="com-title" x-text="co.title || '未命名'"></div>
+                          <div class="com-content" x-text="co.key_content || '（暂无核心内容）'"></div>
+                          <template x-if="co.plot_advance">
+                            <div class="com-advance">➡️ <span x-text="co.plot_advance"></span></div>
+                          </template>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+            <template x-if="!bootstrapData || !bootstrapData.outline || (!bootstrapData.outline.outline_text && (bootstrapData.outline.plot_lines || []).length === 0)">
+              <p class="empty-hint">暂无 AI 生成的大纲（项目未跑过引导补全，或阶段失败）。可点右上角「🔄 重新生成大纲」。</p>
+            </template>
+          </div>
+
+          <!-- ═══ 世界观 / 背景面板 ═══ -->
+          <div x-show="activePanel === 'worldbuilding'" class="panel-section">
+            <div class="panel-page-header">
+              <h2>🌍 世界观 / 背景</h2>
+              <div class="panel-header-actions">
+                <button class="btn-secondary" @click="rerunBootstrapStageFromPanel('stage_2c_world')"
+                        :disabled="!project || rerunStageBusy['stage_2c_world']"
+                        :title="rerunStageBtnTitle('stage_2c_world')">
+                  <span x-show="!rerunStageBusy['stage_2c_world']">🔄 重新生成世界观</span>
+                  <span x-show="rerunStageBusy['stage_2c_world']">⏳ 生成中...</span>
+                </button>
+              </div>
+            </div>
+
+            <template x-if="preambleText">
+              <div class="outline-summary world-premise">
+                <h4>📝 小说背景</h4>
+                <p x-text="preambleText"></p>
+              </div>
+            </template>
+
+            <template x-if="hasWorldData">
+              <div>
+                <template x-for="cat in worldCategories" :key="cat.category">
+                  <div class="world-category">
+                    <h4 x-text="cat.category"></h4>
+                    <template x-for="(entry, idx) in cat.entries" :key="idx">
+                      <div class="world-entry">
+                        <strong x-text="entry.title"></strong>
+                        <p x-text="entry.content"></p>
+                        <template x-if="entry.tags && entry.tags.length">
+                          <div class="world-tags">
+                            <template x-for="tag in entry.tags" :key="tag">
+                              <span class="tag" x-text="'#' + tag"></span>
+                            </template>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+            <template x-if="!hasWorldData && !preambleText">
+              <p class="empty-hint">暂无世界观 / 背景信息。可点右上角「🔄 重新生成世界观」。</p>
             </template>
           </div>
 
@@ -1526,21 +2607,48 @@ window.registerPageTemplate?.('novel_editor', `
         </div>
       </template>
 
-      <!-- ═══ Pipeline 进度弹窗 ═══ -->
-      <template x-if="showPipelineProgress && pipelineTask">
+      <!-- ═══ Pipeline 进度弹窗（9 步） ═══ -->
+      <template x-if="showPipelineProgress">
         <div class="modal-overlay">
-          <div class="modal">
+          <div class="modal modal-wide pipeline-modal">
+            <button class="modal-close-x" @click="closePipelinePanel(false)">×</button>
             <h2>⏳ 生成进度</h2>
-            <p>任务 ID：<span x-text="pipelineTask.task_id"></span></p>
-            <p>状态：<strong x-text="pipelineTask.status"></strong></p>
-            <template x-if="pipelineTask.status === 'completed'">
-              <div class="success-state"><p>✅ 生成完成</p></div>
+            <div class="pipeline-head">
+              <span class="pipeline-task-id">任务：<code x-text="pipelineTaskId || (pipelineTask && pipelineTask.id) || '-'"></code></span>
+              <span class="status-pill" :class="'status-' + pipelineStatus" x-text="taskStatusLabel(pipelineStatus)"></span>
+              <span class="pipeline-elapsed" x-text="'已用时 ' + pipelineElapsedText"></span>
+            </div>
+            <div class="pipeline-progress">
+              <div class="progress-bar">
+                <div class="progress-fill" :style="'width: ' + pipelineProgressPct + '%'"></div>
+              </div>
+              <span x-text="pipelineProgressPct + '%'"></span>
+            </div>
+            <div class="pipeline-stages">
+              <template x-for="st in pipelineStagesView" :key="st.id">
+                <div class="pipeline-stage" :class="'stage-' + st.status">
+                  <div class="ps-main">
+                    <div class="ps-head">
+                      <span class="ps-icon" x-text="pipelineStageIcon(st.status)"></span>
+                      <span class="ps-label" x-text="st.label"></span>
+                      <span class="ps-score" x-show="st.score" x-text="'(' + (st.score ? st.score.toFixed(1) : '-') + '/100)'"></span>
+                      <span class="ps-time" x-show="st.duration_ms != null || st.status === 'running'"
+                            x-text="st.elapsed_display + 's'"></span>
+                    </div>
+                    <div class="stage-bar"><div class="stage-bar-fill" :style="'width: ' + st.elapsed_pct + '%'"></div></div>
+                    <div class="ps-error" x-show="st.error" x-text="st.error"></div>
+                  </div>
+                </div>
+              </template>
+            </div>
+            <template x-if="pipelineStatus === 'completed'">
+              <div class="pipeline-result">✅ 生成完成，本章最终 <strong x-text="(pipelineFinalResult && pipelineFinalResult.final_word_count) || 0"></strong> 字</div>
             </template>
-            <template x-if="pipelineTask.status === 'failed'">
-              <div class="error-state"><p>❌ 失败：<span x-text="pipelineTask.error || '未知错误'"></span></p></div>
+            <template x-if="pipelineStatus === 'failed'">
+              <div class="pipeline-result pipeline-failed">❌ 失败：<span x-text="(pipelineFinalResult && pipelineFinalResult.error) || (pipelineTask && pipelineTask.error) || '未知错误'"></span></div>
             </template>
             <div class="form-footer">
-              <button class="btn-secondary" @click="showPipelineProgress = false">关闭</button>
+              <button class="btn-secondary" @click="closePipelinePanel(true)">关闭</button>
             </div>
           </div>
         </div>
@@ -1552,44 +2660,208 @@ window.registerPageTemplate?.('novel_editor', `
           <div class="modal">
             <button class="modal-close-x" @click="showBatchGenerate = false">×</button>
             <h2>📦 批量生成</h2>
-            <label>起始章节序号
-              <input type="number" x-model.number="generateWordCount" min="0" placeholder="0">
+            <label>起始章节
+              <input type="number" x-model.number="batchGenerateStart" min="1" placeholder="1">
+              <span class="field-hint">从「第 <span x-text="batchStartDisplay"></span> 章」开始生成（默认 = 当前章节序号 +1）</span>
             </label>
-            <label>生成数量
-              <input type="number" x-model.number="generateWordCount" min="1" placeholder="3">
+            <label>生成数量（章）
+              <input type="number" x-model.number="batchGenerateCount" min="1" max="100" placeholder="5">
+              <span class="field-hint">将生成第 <span x-text="batchStartDisplay"></span> ~ <span x-text="batchEndDisplay"></span> 章</span>
             </label>
             <label>生成引导（可选）
-              <textarea x-model="generatePrompt" rows="3" placeholder="描述整体方向..."></textarea>
+              <textarea x-model="batchGenerateGuide" rows="3" placeholder="描述整体方向..."></textarea>
             </label>
             <div class="form-footer">
               <button class="btn-secondary" @click="showBatchGenerate = false">取消</button>
-              <button class="btn-primary" @click="startBatchGenerate(0, 3, generatePrompt)">🚀 开始批量生成</button>
+              <button class="btn-primary" @click="startBatchGenerate()">🚀 开始批量生成</button>
             </div>
           </div>
+        </div>
+      </template>
+
+      <!-- ═══ 批量生成进度（浮动，右下角） ═══ -->
+      <template x-if="batchGenerating && batchTask">
+        <div class="batch-progress-panel">
+          <header>
+            <span>📦 批量生成中</span>
+            <div>
+              <button class="btn-tiny" @click="openTaskManager()">任务</button>
+              <button class="btn-tiny" @click="cancelBatchGenerate()">隐藏</button>
+            </div>
+          </header>
+          <template x-if="batchProgressInfo">
+            <div class="bpp-body">
+              <div class="bpp-summary">
+                <span>总体进度</span>
+                <strong x-text="batchProgressInfo.completed + ' / ' + batchProgressInfo.total + ' 章'"></strong>
+              </div>
+              <div class="progress-bar"><div class="progress-fill" :style="'width: ' + (batchProgressInfo.total ? Math.round(batchProgressInfo.completed / batchProgressInfo.total * 100) : 0) + '%'"></div></div>
+              <div class="bpp-current">当前：第 <span x-text="batchProgressInfo.currentOrder || '?'"></span> 章</div>
+              <div class="pipeline-stages">
+                <template x-for="st in batchPipelineStagesView" :key="'bp-' + st.id">
+                  <div class="pipeline-stage" :class="'stage-' + st.status">
+                    <span class="ps-icon" x-text="pipelineStageIcon(st.status)"></span>
+                    <span class="ps-label" x-text="st.label"></span>
+                    <span class="ps-time" x-show="st.duration_ms != null" x-text="(st.duration_ms/1000).toFixed(1) + 's'"></span>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
         </div>
       </template>
 
       <!-- ═══ 任务管理弹窗 ═══ -->
       <template x-if="showTaskManager">
         <div class="modal-overlay" @click.self="showTaskManager = false">
-          <div class="modal modal-wide">
+          <div class="modal modal-wide modal-scrollable">
             <button class="modal-close-x" @click="showTaskManager = false">×</button>
             <h2>📋 任务管理</h2>
-            <template x-if="pipelineTask">
-              <div class="task-item">
-                <strong x-text="pipelineTask.task_id"></strong>
-                <span class="tag" x-text="pipelineTask.status"></span>
+            <div class="task-manager-toolbar">
+              <span>共 <strong x-text="allTasks.length"></strong> 个任务（运行中 <strong x-text="activeTaskCount"></strong>）</span>
+              <div>
+                <button class="btn-small" @click="refreshAllTasks()" :disabled="allTasksLoading">🔄 刷新</button>
+                <button class="btn-small btn-rerun" x-show="hasFailedBootstrapTasks" @click="rerunAllBootstrapTasks(false)">🔄 重跑失败项</button>
+                <button class="btn-small" x-show="hasBootstrapTasks" @click="rerunAllBootstrapTasks(true)">🔁 重跑全部设定</button>
+                <button class="btn-small btn-danger" @click="terminateAllTasks()">⛔ 终止全部</button>
+              </div>
+            </div>
+            <template x-if="allTasks.length === 0">
+              <p class="empty-hint">暂无任务</p>
+            </template>
+            <div class="task-list">
+              <template x-for="t in allTasks" :key="t.id">
+                <div class="task-item">
+                  <div class="task-info">
+                    <div class="task-desc">
+                      <span class="task-type-tag" x-text="taskTypeLabel(t.task_type)"></span>
+                      <span x-text="t.description || t.id"></span>
+                    </div>
+                    <div class="task-meta">
+                      <span class="task-type" x-text="t.task_type"></span>
+                      <code x-text="t.id"></code>
+                      <span x-show="t.duration_s">用时 <span x-text="t.duration_s + 's'"></span></span>
+                    </div>
+                    <template x-if="t.result && t.result.stages">
+                      <div class="task-pipeline-detail">
+                        <template x-for="sid in Object.keys(t.result.stages)" :key="'ts-' + t.id + '-' + sid">
+                          <div class="tpd-row">
+                            <span x-text="pipelineStageIcon(t.result.stages[sid].status)"></span>
+                            <span class="tpd-label" x-text="t.result.stages[sid].label || getStageLabel(sid)"></span>
+                            <span class="tpd-time" x-show="t.result.stages[sid].duration_ms != null" x-text="(t.result.stages[sid].duration_ms/1000).toFixed(1) + 's'"></span>
+                            <span class="tpd-err" x-show="t.result.stages[sid].error" x-text="t.result.stages[sid].error"></span>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+                  </div>
+                  <div class="task-status">
+                    <span class="status-pill" :class="'status-' + t.status" x-text="taskStatusLabel(t.status)"></span>
+                    <button class="btn-small btn-rerun"
+                            x-show="t.task_type === 'bootstrap' && ['failed','cancelled'].includes(t.status) && t.run_id"
+                            @click="rerunOneBootstrapTask(t)">🔄 重新生成</button>
+                    <button class="btn-small"
+                            x-show="t.task_type === 'chapter_pipeline'"
+                            @click="openPipelinePanelForTask(t)">📊 查看进度</button>
+                    <button class="btn-small" x-show="['pending','running'].includes(t.status)"
+                            @click="terminateOneTask(t.id)">⛔ 终止</button>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- ═══ 字数调整弹窗 ═══ -->
+      <template x-if="showWordAdjustModal">
+        <div class="modal-overlay" @click.self="closeWordAdjustModal()">
+          <div class="modal">
+            <button class="modal-close-x" @click="closeWordAdjustModal()">×</button>
+            <h2>📐 调整字数</h2>
+            <p>当前章节《<strong x-text="currentChapter && currentChapter.title"></strong>》当前 <strong x-text="(currentChapter && currentChapter.word_count) || 0"></strong> 字</p>
+
+            <template x-if="wordAdjustPlan">
+              <div class="word-adjust-plan">
+                <div class="wap-row">
+                  <span>项目区间</span>
+                  <strong x-text="(project?.word_count_min || 0) + ' ~ ' + (project?.word_count_max || 0) + ' 字'"></strong>
+                </div>
+                <div class="wap-row">
+                  <span>判定</span>
+                  <strong :class="'wap-' + wordAdjustPlan.action" x-text="{
+                    compress: '字数超出上限，需缩写 ' + wordAdjustPlan.delta + ' 字',
+                    expand: '字数不足下限，需扩写 ' + wordAdjustPlan.delta + ' 字',
+                    none: '已在目标区间内，无需调整'
+                  }[wordAdjustPlan.action]"></strong>
+                </div>
               </div>
             </template>
-            <template x-if="batchTask">
-              <div class="task-item">
-                <strong x-text="batchTask.task_id"></strong>
-                <span class="tag" x-text="batchTask.status"></span>
+
+            <label class="wap-toggle">
+              <input type="checkbox" x-model="wordAdjustUseCustom" @change="recalcWordAdjustPlan()">
+              使用自定义字数区间
+            </label>
+
+            <template x-if="wordAdjustUseCustom">
+              <div class="form-row">
+                <label>下限
+                  <input type="number" x-model.number="wordAdjustCustomMin" @change="recalcWordAdjustPlan()">
+                </label>
+                <label>目标
+                  <input type="number" x-model.number="wordAdjustCustomTarget" @change="recalcWordAdjustPlan()">
+                </label>
+                <label>上限
+                  <input type="number" x-model.number="wordAdjustCustomMax" @change="recalcWordAdjustPlan()">
+                </label>
               </div>
             </template>
-            <template x-if="!pipelineTask && !batchTask">
-              <p class="empty-hint">暂无运行中的任务</p>
-            </template>
+
+            <div class="wap-presets">
+              <span>按目标字数 ±：</span>
+              <button class="btn-small" @click="applyWordAdjustPctPreset(5)">5%</button>
+              <button class="btn-small" @click="applyWordAdjustPctPreset(10)">10%</button>
+              <button class="btn-small" @click="applyWordAdjustPctPreset(20)">20%</button>
+              <input type="number" class="wap-pct-input" x-model.number="wordAdjustPctInput" min="1" max="99">
+              <button class="btn-small" @click="applyWordAdjustPctPreset(wordAdjustPctInput)">应用</button>
+            </div>
+
+            <div class="form-footer">
+              <button class="btn-secondary" @click="closeWordAdjustModal()">取消</button>
+              <button class="btn-primary"
+                      :disabled="!wordAdjustPlan || wordAdjustPlan.action === 'none' || wordAdjustSubmitting"
+                      @click="runWordAdjust()">
+                <span x-show="!wordAdjustSubmitting">📐 开始调整</span>
+                <span x-show="wordAdjustSubmitting">⏳ 提交中...</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- ═══ 扩写大纲弹窗 ═══ -->
+      <template x-if="showExtendOutlineModal">
+        <div class="modal-overlay" @click.self="showExtendOutlineModal = false">
+          <div class="modal">
+            <button class="modal-close-x" @click="showExtendOutlineModal = false">×</button>
+            <h2>📈 扩写 / 缩减大纲</h2>
+            <p>已生成一句话大纲 <strong x-text="extendOutlineGenerated"></strong> 章，当前预设总章节 <strong x-text="extendOutlineOriginalTotal"></strong> 章</p>
+            <div class="wap-row">
+              <span>计划扩写（负数=缩减）</span>
+              <input type="number" :value="extendOutlineExtendBy" @change="onExtendOutlineChange('extendBy', $event.target.value)">
+            </div>
+            <div class="wap-row">
+              <span>新目标总章节</span>
+              <input type="number" :value="extendOutlineNewTotal" @change="onExtendOutlineChange('newTotal', $event.target.value)">
+            </div>
+            <label class="wap-toggle">
+              <input type="checkbox" x-model="extendOutlineArchitecture">
+              同步扩写架构层（分卷 / 剧情线 / 四幕）
+            </label>
+            <div class="form-footer">
+              <button class="btn-secondary" @click="showExtendOutlineModal = false">取消</button>
+              <button class="btn-primary" :disabled="!canSubmitExtendOutline" @click="confirmExtendOutline()">确认</button>
+            </div>
           </div>
         </div>
       </template>

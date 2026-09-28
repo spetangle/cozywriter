@@ -2902,6 +2902,7 @@ color: #92400e;
 .genre-custom-row {
   display: flex;
   gap: 6px;
+  padding-bottom: 6px;
 }
 .genre-custom-row input {
   flex: 1;
@@ -5984,3 +5985,204 @@ color: #92400e;
   cursor: pointer;
 }
 .link-btn:hover { color: var(--primary-hover); }
+/* ═══════════════════════════════════════════════════════════
+   大纲 / 世界观 / 流水线进度 / 任务管理 / 字数调整
+   （从旧版单页界面恢复的样式）
+   ═══════════════════════════════════════════════════════════ */
+
+/* ─── 面板头部带操作按钮 ─── */
+.panel-header-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+.panel-page-header .panel-header-actions { margin-left: auto; }
+
+/* ─── 世界观 / 背景 ─── */
+.world-premise { margin-bottom: 16px; }
+.world-entry {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.world-entry strong { display: block; margin-bottom: 4px; font-size: 14px; }
+.world-entry p { margin: 4px 0; line-height: 1.6; font-size: 13px; color: var(--text); }
+.world-tags { margin-top: 6px; display: flex; gap: 4px; flex-wrap: wrap; }
+
+/* ─── AI 大纲预览 ─── */
+.ai-preview-block {
+  margin-top: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: var(--surface);
+}
+.ai-preview-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-weight: 600;
+  color: #6d28d9;
+  margin-bottom: 8px;
+}
+.ai-preview-hint { font-size: 12px; color: var(--text-muted); font-weight: 400; }
+.outline-summary h4,
+.outline-plotlines h4,
+.outline-structure h4,
+.outline-pacing h4,
+.outline-chapter-list h4 {
+  font-size: 13px;
+  color: #6d28d9;
+  margin: 10px 0 6px;
+}
+.outline-summary p,
+.outline-pacing p {
+  line-height: 1.7;
+  font-size: 13px;
+  white-space: pre-wrap;
+  color: var(--text);
+}
+.outline-plotlines .plotline-card { border-left: 3px solid #8b5cf6; margin-bottom: 8px; }
+.outline-count { font-weight: 400; color: #8b5cf6; }
+
+/* ─── 每章一句话大纲 ─── */
+.chapter-outline-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+.chapter-outline-mini {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--surface);
+}
+.com-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }
+.com-num { font-weight: 600; color: #6d28d9; font-size: 13px; }
+.com-vol { font-size: 10px; padding: 1px 6px; background: #f3e8ff; color: #6d28d9; border-radius: 3px; }
+.com-pos { font-size: 10px; padding: 1px 6px; background: #dbeafe; color: #1d4ed8; border-radius: 3px; margin-left: auto; }
+.com-title { font-size: 12px; font-weight: 500; color: #1e293b; margin-bottom: 4px; }
+.com-content { font-size: 12px; line-height: 1.5; color: #475569; }
+.com-advance { font-size: 11px; color: #6b7280; margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--border); }
+
+/* ─── 9 步流水线进度 ─── */
+.pipeline-modal { max-width: 560px; }
+.pipeline-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.pipeline-task-id code { font-size: 11px; }
+.pipeline-elapsed { margin-left: auto; font-variant-numeric: tabular-nums; }
+.pipeline-progress { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.pipeline-progress .progress-bar { flex: 1; height: 8px; }
+.pipeline-progress span { font-size: 12px; font-variant-numeric: tabular-nums; }
+.pipeline-stages { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.pipeline-stage {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #f8fafc;
+  border-left: 3px solid #cbd5e1;
+  transition: all .2s;
+}
+.pipeline-stage.stage-running { background: #eff6ff; border-left-color: #3b82f6; }
+.pipeline-stage.stage-completed { background: #f0fdf4; border-left-color: #10b981; }
+.pipeline-stage.stage-failed { background: #fef2f2; border-left-color: #ef4444; }
+.pipeline-stage.stage-skipped { background: #f1f5f9; border-left-color: #94a3b8; opacity: .6; }
+.ps-main { flex: 1; min-width: 0; }
+.ps-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.ps-icon { width: 16px; text-align: center; }
+.ps-label { flex: 1; font-weight: 500; color: var(--text); }
+.ps-score { font-size: 12px; color: #10b981; font-weight: 600; }
+.ps-time { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.ps-error { font-size: 11px; color: #b91c1c; margin-top: 4px; word-break: break-word; }
+.stage-bar { margin-top: 5px; height: 4px; background: #e2e8f0; border-radius: 2px; overflow: hidden; }
+.stage-bar-fill { height: 100%; background: #3b82f6; transition: width .3s; }
+.pipeline-stage.stage-completed .stage-bar-fill { background: #10b981; }
+.pipeline-result {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: #f0fdf4;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #065f46;
+}
+.pipeline-result.pipeline-failed { background: #fef2f2; color: #b91c1c; }
+
+/* ─── 批量生成进度（浮动） ─── */
+.batch-progress-panel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: #f8fafc;
+  border-radius: 12px 12px 0 0;
+  font-weight: 600;
+}
+.batch-progress-panel header .btn-tiny { margin-left: 6px; }
+.bpp-body { padding: 12px 14px; }
+.bpp-summary { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px; }
+.bpp-body .progress-bar { height: 8px; }
+.bpp-current { margin: 8px 0; font-size: 12px; color: var(--text-muted); }
+.bpp-body .pipeline-stages { max-height: 30vh; }
+.bpp-body .pipeline-stage { padding: 5px 8px; }
+.bpp-body .pipeline-stage .ps-head { font-size: 12px; }
+
+/* ─── 任务管理 ─── */
+.task-manager-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 0 12px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+.task-manager-toolbar > div { display: flex; gap: 6px; flex-wrap: wrap; }
+.task-list { max-height: 60vh; overflow-y: auto; }
+.btn-rerun { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
+.task-item { align-items: flex-start; }
+.task-item .task-info { min-width: 0; }
+.task-type-tag {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: #ede9fe;
+  color: #6d28d9;
+  margin-right: 6px;
+}
+.task-pipeline-detail { margin-top: 8px; padding: 8px 10px; background: var(--bg); border-radius: 6px; }
+.tpd-row { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 2px 0; }
+.tpd-row .tpd-label { flex: 1; color: var(--text); }
+.tpd-time { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.tpd-err { color: #b91c1c; font-size: 11px; }
+
+/* ─── 字数调整 ─── */
+.word-adjust-plan {
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 10px 0;
+}
+.wap-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 0; font-size: 13px; }
+.wap-row > span { color: var(--text-muted); }
+.wap-row input { padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; width: 120px; }
+.wap-compress { color: #dc2626; }
+.wap-expand { color: #2563eb; }
+.wap-none { color: #059669; }
+.wap-toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 10px 0; }
+.wap-presets { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 10px 0; font-size: 12px; color: var(--text-muted); }
+.wap-pct-input { width: 64px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; font-size: 12px; }
+
+/* ─── 表单提示文字（占一行） ─── */
+.field-hint { display: block; width: 100%; margin-top: 4px; font-size: 12px; color: var(--text-muted); font-weight: 400; }
