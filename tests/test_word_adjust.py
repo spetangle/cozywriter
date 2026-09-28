@@ -82,16 +82,41 @@ def main():
     from llm.factory import LLMFactory
     check("工厂已注册 opencode", "opencode" in LLMFactory._providers)
     import llm.opencode_provider as op
-    check("opencode 默认模型存在", op.OpencodeProvider.DEFAULT_MODEL == "big-pickle")
-    check("opencode 默认关闭", getattr(settings, "opencode_enabled", None) is False)
+    check("opencode 默认模型为 deepseek-v4.1-flash",
+          op.OpencodeProvider.DEFAULT_MODEL == "deepseek-v4.1-flash")
+    check("opencode 默认使用 zen/go/v1",
+          op.OpencodeProvider.DEFAULT_BASE_URL == "https://opencode.ai/zen/go/v1")
+    check("opencode 默认关闭（无 DB key 且未开 env）",
+          getattr(settings, "opencode_enabled", None) is False)
+    # 明确构造“既无 DB key、env 也未开启”的场景，验证工厂拒绝创建。
+    from storage.database import SessionLocal as _Session
+    from storage.models.provider import Provider as _Provider
+    from storage.models import Base as _Base
+    from storage.database import engine as _engine0
+    _Base.metadata.create_all(bind=_engine0)
+    _db = _Session()
+    guarded = False
     try:
-        LLMFactory.create(provider="opencode", db=None)
-        ok = False
-    except ValueError as e:
-        ok = "未启用" in str(e)
-    except Exception:
-        ok = False
-    check("未开启时拒绝创建 opencode", ok)
+        row = _db.query(_Provider).filter_by(id="opencode").first()
+        if row and row.api_key:
+            row.api_key = ""
+            _db.commit()
+        env_on = bool(getattr(settings, "opencode_enabled", False))
+        if env_on:
+            check("opencode 已由 env 显式启用（跳过拒绝断言）", True)
+            guarded = True
+        else:
+            try:
+                LLMFactory.create(provider="opencode", db=_db)
+                rejected = False
+            except ValueError:
+                rejected = True
+            except Exception:
+                rejected = False
+            check("无 key 且未开启时拒绝创建 opencode", rejected)
+            guarded = True
+    finally:
+        _db.close()
 
     print("\n[5] opencode provider 注册到服务商与模型列表")
     from fastapi.testclient import TestClient
@@ -103,8 +128,9 @@ def main():
     prov_ids = [p["id"] for p in client.get("/api/providers").json()]
     check("服务商列表包含 opencode", "opencode" in prov_ids, str(prov_ids))
     body = client.post("/api/providers/list-models", json={"provider_id": "opencode"}).json()
-    check("未启用时返回内置模型", body.get("ok") is True and body.get("fallback") is True, str(body)[:160])
-    check("内置模型含 big-pickle", any(m["id"] == "big-pickle" for m in body.get("models", [])))
+    check("无 key 时返回内置模型", body.get("ok") is True and body.get("fallback") is True, str(body)[:160])
+    check("内置模型含 deepseek-v4.1-flash",
+          any(m["id"] == "deepseek-v4.1-flash" for m in body.get("models", [])))
 
     print("\n" + ("ALL PASS" if not _failures else f"{len(_failures)} FAILED: {_failures}"))
     return 1 if _failures else 0

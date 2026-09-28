@@ -25,6 +25,8 @@ Windows 用 `run.bat` / `run.ps1`，Python 为 `.venv\Scripts\python.exe`。
 .venv/bin/python tests/test_script_bootstrap.py    # 剧本 planner / locked / commit / JSON 兜底
 .venv/bin/python tests/test_migrate_project_ids.py # int→hex 项目 ID 迁移（保留列/外键）
 .venv/bin/python tests/test_system_smoke.py        # 系统级 API 冒烟（项目/章节/剧本/导出等）
+.venv/bin/python tests/test_word_adjust.py          # 字数收敛 / opencode provider
+.venv/bin/python tests/test_outline_normalize.py    # 大纲章节号字段归一化
 node tests/test_spa_components.js                  # SPA 模板 / 组件装配
 ```
 

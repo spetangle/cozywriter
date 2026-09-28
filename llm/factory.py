@@ -56,12 +56,6 @@ class LLMFactory:
 
             provider_key = (provider or settings.default_llm_provider or "").strip().lower()
 
-            # opencode 仅在用户显式开启时可用
-            if provider_key == "opencode" and not getattr(settings, "opencode_enabled", False):
-                raise ValueError(
-                    "opencode provider 未启用。请在 .env 中设置 OPENCODE_ENABLED=true 后重启。"
-                )
-
             config_kwargs = {}
             if _db is not None and provider_key:
                 from storage.models.provider import Provider
@@ -74,6 +68,17 @@ class LLMFactory:
                         config_kwargs["base_url"] = p.base_url
                     if p.model:
                         config_kwargs["model"] = p.model
+
+            # opencode 需显式开启：DB 里配好 api_key 即视为已开启，
+            # 也兼容 .env 的 OPENCODE_ENABLED（用于无 DB 配置的场景）。
+            if provider_key == "opencode":
+                db_ready = bool(config_kwargs.get("api_key"))
+                env_enabled = bool(getattr(settings, "opencode_enabled", False))
+                if not (db_ready or env_enabled):
+                    raise ValueError(
+                        "opencode provider 未启用。请在“全局设置 → 服务商”里为 opencode 配置 API Key，"
+                        "或在 .env 中设置 OPENCODE_ENABLED=true 后重启。"
+                    )
 
             config_kwargs.update(kwargs)
 

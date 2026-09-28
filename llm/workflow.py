@@ -1400,6 +1400,36 @@ def _build_chapter_body_status_hint(project_id: int, db) -> str:
 MAX_CHAPTERS_PER_BATCH = 100
 
 
+def _normalize_chapter_outlines(items) -> list[dict]:
+    """归一化 LLM 返回的章节大纲列表。
+
+    不同模型对章节号字段命名不一致：chapter_num / chapter_number / chapter /
+    chapter_no / num / number / index 都出现过。这里统一成 `chapter_num`，
+    否则续写结果会被判定为"新增 0 章"，反复重试后大纲仍然不足量。
+    """
+    normalized: list[dict] = []
+    for c in items or []:
+        if not isinstance(c, dict):
+            continue
+        num = None
+        for key in ("chapter_num", "chapter_number", "chapter", "chapter_no",
+                    "num", "number", "index", "chapter_index"):
+            value = c.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                num = int(value)
+                break
+            except (TypeError, ValueError):
+                continue
+        if num is None:
+            logger.warning(f"[stage_4a_outline] 大纲缺少章节号，跳过: {str(c)[:120]}")
+            continue
+        c["chapter_num"] = num
+        normalized.append(c)
+    return normalized
+
+
 def _continue_chapter_outlines_if_needed(
     first_result: dict,
     locked: dict,
@@ -1442,7 +1472,8 @@ def _continue_chapter_outlines_if_needed(
     total = int(target_total or locked.get("total_chapters") or 0)
     if not total or total <= 0:
         return first_result
-    chapter_outlines = list(first_result.get("chapter_outlines") or [])
+    chapter_outlines = _normalize_chapter_outlines(first_result.get("chapter_outlines") or [])
+    first_result["chapter_outlines"] = chapter_outlines
 
     # extend 模式:已有章节不动,只算"新增"
     if mode == "extend":
@@ -1586,9 +1617,8 @@ def _continue_chapter_outlines_if_needed(
                 )
                 break
 
-            for c in new_outlines:
-                if "chapter" in c and "chapter_num" not in c:
-                    c["chapter_num"] = c["chapter"]
+            # 归一化章节编号字段（chapter_num / chapter_number / chapter / ...）
+            new_outlines = _normalize_chapter_outlines(new_outlines)
 
             # extend 模式 + starting_chapter → 重新构思模式
             #    LLM 重新生成 [starting_chapter, target_total],会 OVERWRITE 已有大纲

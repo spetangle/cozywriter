@@ -1,40 +1,51 @@
-"""OpenCode Provider
+"""OpenCode Go Provider
 
-OpenCode 提供 Anthropic Messages API 兼容接口，可直接复用 anthropic SDK。
-仅在用户显式开启 OpenCode Go 时可用（见 config.opencode_enabled）。
+OpenCode Go 提供 OpenAI 兼容的 Chat Completions 接口：
+    base_url = https://opencode.ai/zen/go/v1
+需要：
+- API Key（OPENCODE_API_KEY，形如 oc_sk_...）
+- 会话头 x-opencode-session / x-opencode-client / x-opencode-caller，
+  否则网关会返回 MissingSessionID
+
+注意：OpenCode Go 上多为推理模型（如 deepseek-v4.1-flash），
+reasoning 内容会占用 max_tokens。这里把 max_tokens 下限抬高，
+并优先取 content；若只有 reasoning，则回退使用 reasoning 文本。
 
 配置（.env）：
-- OPENCODE_API_KEY     API Key
-- OPENCODE_BASE_URL    默认 https://opencode.ai/anthropic
-- OPENCODE_MODEL       默认 big-pickle
 - OPENCODE_ENABLED     是否启用（true/false，默认 false）
+- OPENCODE_API_KEY     API Key
+- OPENCODE_BASE_URL    默认 https://opencode.ai/zen/go/v1
+- OPENCODE_MODEL       默认 deepseek-v4.1-flash
 """
 import time
+import uuid
 
 from llm.base import LLMProvider
 from config import settings
 from logger import logger, log_llm_payload
-from llm.usage_tracker import record_llm_usage, extract_usage_from_anthropic_response
+from llm.usage_tracker import record_llm_usage, extract_usage_from_openai_response
 
 try:
-    import anthropic
-except ImportError:  # pragma: no cover - 依赖缺失时给出清晰错误
-    anthropic = None
+    from openai import OpenAI
+except ImportError:  # pragma: no cover
+    OpenAI = None
 
 
 class OpencodeProvider(LLMProvider):
-    DEFAULT_BASE_URL = "https://opencode.ai/anthropic"
-    DEFAULT_MODEL = "big-pickle"
-    CONTEXT_WINDOW = 200_000
+    DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
+    DEFAULT_MODEL = "deepseek-v4.1-flash"
+    CONTEXT_WINDOW = 256_000
+    # 推理模型会先消耗 reasoning tokens，给足预算避免 content 为空。
+    MIN_MAX_TOKENS = 4096
 
     SUPPORTED_MODELS = [
-        "big-pickle",
-        "claude-sonnet-4-5",
-        "claude-opus-4-1",
-        "gpt-5",
-        "gpt-5-mini",
-        "gemini-2.5-pro",
+        "deepseek-v4.1-flash",
+        "deepseek-v4-flash",
+        "deepseek-v4.1",
+        "minimax-m2.7",
         "qwen3-coder",
+        "gpt-5",
+        "claude-sonnet-4-5",
     ]
 
     def __init__(
@@ -43,9 +54,9 @@ class OpencodeProvider(LLMProvider):
         model: str | None = None,
         base_url: str | None = None,
     ):
-        if anthropic is None:
+        if OpenAI is None:
             raise RuntimeError(
-                "opencode provider 需要 anthropic SDK，请先安装：pip install anthropic"
+                "opencode provider 需要 openai SDK，请先安装：pip install openai"
             )
 
         self.api_key = api_key or getattr(settings, "opencode_api_key", "") or ""
@@ -56,6 +67,8 @@ class OpencodeProvider(LLMProvider):
             or self.DEFAULT_BASE_URL
         ).rstrip("/")
         self._client = None
+        # 复用同一个 session id，便于网关按会话路由/计费
+        self.session_id = f"ses_{uuid.uuid4().hex[:24]}"
 
     @property
     def provider_name(self) -> str:
@@ -63,16 +76,18 @@ class OpencodeProvider(LLMProvider):
 
     def _get_client(self):
         if self._client is None:
-            self._client = anthropic.Anthropic(
+            self._client = OpenAI(
                 api_key=self.api_key,
                 base_url=self.base_url,
                 timeout=600.0,
                 max_retries=2,
+                default_headers={
+                    "x-opencode-session": self.session_id,
+                    "x-opencode-client": "cozywriter",
+                    "x-opencode-caller": "cozywriter",
+                },
             )
         return self._client
-
-    def _recommended_max_tokens(self) -> int:
-        return 131072
 
     def generate(
         self,
@@ -81,57 +96,67 @@ class OpencodeProvider(LLMProvider):
         **kwargs,
     ) -> str:
         client = self._get_client()
-        max_tokens = kwargs.get("max_tokens") or self._recommended_max_tokens()
-        temperature = kwargs.get("temperature", 1.0)
-        top_p = kwargs.get("top_p")
+        requested = kwargs.get("max_tokens") or self.MIN_MAX_TOKENS
+        max_tokens = max(int(requested), self.MIN_MAX_TOKENS)
+        temperature = kwargs.get("temperature", 0.7)
         task_type = kwargs.get("task_type", "generate")
         llm_call_id = kwargs.get("llm_call_id")
         task_id = kwargs.get("task_id")
         project_id = kwargs.get("project_id")
-        messages = [{"role": "user", "content": prompt}]
+        use_json = kwargs.get("use_json")
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
 
         prompt_preview = prompt if len(prompt) <= 500 else prompt[:500] + "..."
         logger.info(
             f"[LLM:opencode] → {self.model} max_tokens={max_tokens} "
-            f"base={self.base_url} task={task_type} "
+            f"base={self.base_url} task={task_type} json={use_json} "
             f"prompt_chars={len(prompt)} prompt={prompt_preview!r}"
         )
 
         usage_recorded = False
         t0 = time.time()
         try:
-            create_kwargs: dict = {
+            api_kwargs = {
                 "model": self.model,
+                "messages": messages,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
-                "messages": messages,
             }
-            if top_p is not None:
-                create_kwargs["top_p"] = top_p
-            if system_prompt:
-                create_kwargs["system"] = system_prompt
+            if use_json:
+                api_kwargs["response_format"] = {"type": "json_object"}
 
-            response = client.messages.create(**create_kwargs)
+            response = client.chat.completions.create(**api_kwargs)
+            duration_ms = (time.time() - t0) * 1000
 
-            parts = []
-            for block in (response.content or []):
-                if getattr(block, "type", None) == "text":
-                    parts.append(getattr(block, "text", "") or "")
+            choice = response.choices[0] if response.choices else None
+            message = getattr(choice, "message", None) if choice else None
+            text = (getattr(message, "content", None) or "") if message else ""
+            reasoning = (getattr(message, "reasoning_content", None) or "") if message else ""
+            finish_reason = getattr(choice, "finish_reason", None) if choice else None
 
-            if not parts:
-                block_types = [getattr(b, "type", "?") for b in (response.content or [])]
+            # 推理模型可能把 max_tokens 全用在 reasoning 上，content 为空。
+            # 这里回退到 reasoning 文本，避免整条链路拿到空响应。
+            if not text.strip() and reasoning.strip():
+                logger.warning(
+                    f"[LLM:opencode] content 为空，回退使用 reasoning 文本 "
+                    f"(finish_reason={finish_reason}, reasoning_chars={len(reasoning)})"
+                )
+                text = reasoning
+
+            if not text.strip():
                 raise RuntimeError(
-                    f"OpenCode 返回无 text 块（可能 thinking 占满 max_tokens）。"
-                    f"块类型: {block_types}, stop_reason: {getattr(response, 'stop_reason', '?')}"
+                    f"OpenCode 返回空响应（finish_reason={finish_reason}）。"
+                    f"若为推理模型，请增大 max_tokens（当前 {max_tokens}）。"
                 )
 
-            text = "".join(parts)
-            duration_ms = (time.time() - t0) * 1000
             response_preview = text if len(text) <= 300 else text[:300] + "..."
             logger.info(
                 f"[LLM:opencode] ← {self.model} ok duration={duration_ms:.0f}ms "
-                f"chars={len(text)} stop_reason={getattr(response, 'stop_reason', '?')} "
-                f"response={response_preview!r}"
+                f"chars={len(text)} finish={finish_reason} response={response_preview!r}"
             )
             log_llm_payload(
                 provider=self.provider_name,
@@ -143,13 +168,13 @@ class OpencodeProvider(LLMProvider):
                 duration_ms=duration_ms,
                 success=True,
                 extra={
-                    "stop_reason": getattr(response, "stop_reason", None),
-                    "content_blocks": [
-                        getattr(b, "type", "?") for b in (response.content or [])
-                    ],
+                    "finish_reason": finish_reason,
+                    "reasoning_chars": len(reasoning),
+                    "usage": response.usage.model_dump() if response.usage else None,
                 },
             )
-            usage = extract_usage_from_anthropic_response(response)
+            usage = extract_usage_from_openai_response(response)
+            usage.pop("total_tokens", None)
             record_llm_usage(
                 provider=self.provider_name, model=self.model, task_type=task_type,
                 duration_ms=duration_ms, success=True, project_id=project_id,
@@ -157,37 +182,6 @@ class OpencodeProvider(LLMProvider):
             )
             usage_recorded = True
             return text
-        except anthropic.AuthenticationError as e:
-            logger.error(f"[LLM:opencode] 401 鉴权失败: {e}")
-            raise RuntimeError(
-                "OpenCode 鉴权失败 (401)。请检查 .env 中 OPENCODE_API_KEY 是否正确。"
-            ) from e
-        except anthropic.PermissionDeniedError as e:
-            logger.error(f"[LLM:opencode] 403 模型无权访问: {self.model} ({e})")
-            raise RuntimeError(
-                f"OpenCode 403: 无权访问模型 '{self.model}'，请确认模型名与账户权限。"
-            ) from e
-        except anthropic.NotFoundError as e:
-            logger.error(f"[LLM:opencode] 404 模型/URL 错误: {self.model} @ {self.base_url} ({e})")
-            raise RuntimeError(
-                f"OpenCode 404: 模型 '{self.model}' 不存在或 base_url '{self.base_url}' 错误。"
-            ) from e
-        except anthropic.RateLimitError as e:
-            logger.warning(f"[LLM:opencode] 429 限流: {e}")
-            raise RuntimeError("OpenCode 触发限流 (429)，请稍后重试。") from e
-        except anthropic.APIStatusError as e:
-            logger.error(
-                f"[LLM:opencode] ← {self.model} API 错误 status={e.status_code} body={e.body}"
-            )
-            raise RuntimeError(
-                f"OpenCode API 错误 (status={e.status_code}): {e.message or e.body}"
-            ) from e
-        except anthropic.APIConnectionError as e:
-            logger.error(
-                f"[LLM:opencode] 网络异常 duration={(time.time()-t0)*1000:.0f}ms err={e}",
-                exc_info=True,
-            )
-            raise RuntimeError(f"OpenCode 网络请求失败（{self.base_url}）: {e}") from e
         except Exception as e:
             duration_ms = (time.time() - t0) * 1000
             logger.error(
@@ -223,5 +217,4 @@ class OpencodeProvider(LLMProvider):
         return self.CONTEXT_WINDOW
 
     def list_models(self) -> list[dict]:
-        """OpenCode 暂无稳定的模型列表接口，返回内置推荐列表。"""
         return [{"id": m, "name": m} for m in self.SUPPORTED_MODELS]

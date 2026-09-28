@@ -75,8 +75,8 @@ SEED_PROVIDERS: list[dict] = [
     {
         "id": "opencode",
         "name": "OpenCode Go",
-        "base_url": "https://opencode.ai/anthropic",
-        "model": "big-pickle",
+        "base_url": "https://opencode.ai/zen/go/v1",
+        "model": "deepseek-v4.1-flash",
     },
 ]
 
