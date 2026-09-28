@@ -34,7 +34,19 @@ fi
 
 if [ ! -x ".venv/bin/python" ]; then
     echo "       创建虚拟环境（Python $PY_VERSION）..."
-    python3 -m venv .venv
+    if ! python3 -m venv .venv 2>/tmp/cozywriter_venv_err.log; then
+        echo "" >&2
+        echo "[ERROR] 创建虚拟环境失败：系统 python3 可能缺少 venv/ensurepip 模块。" >&2
+        echo "        解决方式（任选其一）：" >&2
+        echo "          1) Ubuntu/Debian: sudo apt install -y python3-venv python3-pip" >&2
+        echo "          2) 使用 uv:      uv venv .venv && uv pip install -r requirements.txt" >&2
+        echo "          3) 手动创建后重跑本脚本" >&2
+        echo "" >&2
+        cat /tmp/cozywriter_venv_err.log >&2 || true
+        rm -f /tmp/cozywriter_venv_err.log
+        exit 1
+    fi
+    rm -f /tmp/cozywriter_venv_err.log
     echo "       完成。"
 else
     echo "       虚拟环境已就绪（Python $PY_VERSION）。"
