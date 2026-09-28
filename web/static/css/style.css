@@ -6215,3 +6215,127 @@ color: #92400e;
   font-size: inherit;
   text-decoration: underline;
 }
+
+/* ═══════════════════════════════════════════════════════════
+   角色关系图谱 / 角色成长 / 本章伏笔 / 搜索相似小说
+   ═══════════════════════════════════════════════════════════ */
+
+/* ─── 角色关系图谱 ─── */
+.relation-graph-wrap { margin-top: 12px; }
+.relation-graph {
+  width: 100%;
+  max-width: 720px;
+  height: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  display: block;
+  margin: 0 auto;
+}
+.rg-node { fill: #eef2ff; stroke: #6366f1; stroke-width: 2; }
+.rg-node.rg-protagonist { fill: #e0e7ff; stroke: #4338ca; stroke-width: 3; }
+.rg-node-label { font-size: 12px; fill: #1e293b; font-weight: 600; }
+.rg-edge-label { font-size: 11px; }
+.relation-graph-legend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.relation-graph-legend i {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+/* ─── 角色成长 ─── */
+.growth-report { display: flex; flex-direction: column; gap: 10px; }
+.growth-card {
+  border: 1px solid var(--border);
+  border-left: 4px solid #a78bfa;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+.growth-card.growth-protagonist { border-left-color: #6366f1; background: #f8faff; }
+.gc-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.gc-head strong { font-size: 14px; }
+.gc-arc { font-size: 11px; padding: 1px 8px; border-radius: 10px; background: #ede9fe; color: #6d28d9; }
+.gc-row { display: flex; gap: 8px; font-size: 13px; line-height: 1.6; margin: 2px 0; }
+.gc-label {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: #6d28d9;
+  background: #f3e8ff;
+  border-radius: 4px;
+  padding: 0 6px;
+  height: 20px;
+  line-height: 20px;
+}
+.gc-summary { margin-top: 6px; font-size: 12px; color: #6b7280; }
+.card-actions { margin-top: 8px; }
+
+/* ─── 成长记录时间线 ─── */
+.growth-history { max-height: 60vh; overflow-y: auto; }
+.growth-history-item {
+  border-left: 3px solid #a78bfa;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  background: var(--surface);
+  border-radius: 0 8px 8px 0;
+}
+.ghi-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.ghi-chapter { font-weight: 600; color: #6d28d9; font-size: 13px; }
+
+/* ─── 本章伏笔 ─── */
+.foreshadow-report { display: flex; flex-direction: column; gap: 14px; }
+.fs-section h5 { font-size: 13px; margin: 0 0 6px; color: var(--text); }
+.fs-section ul { margin: 0; padding-left: 18px; }
+.fs-section li { font-size: 13px; line-height: 1.7; margin-bottom: 4px; }
+.fs-arrow { color: var(--text-muted); }
+.fs-evidence { color: var(--text-muted); font-size: 12px; }
+.fs-plant { color: var(--text-muted); font-size: 12px; }
+
+/* ─── 搜索相似小说 ─── */
+.similar-novel-panel {
+  margin: 16px 0;
+  padding: 14px 16px;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  background: #f8faff;
+}
+.snp-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.snp-head strong { font-size: 15px; }
+.snp-hint { font-size: 12px; color: var(--text-muted); margin: 4px 0 0; max-width: 480px; line-height: 1.5; }
+.snp-error { color: #b91c1c; font-size: 13px; margin: 8px 0 0; }
+.snp-result { margin-top: 14px; }
+.snp-verdict { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.snp-verdict-badge { font-weight: 600; padding: 2px 10px; border-radius: 12px; font-size: 13px; }
+.snp-v-high_similarity { background: #fee2e2; color: #b91c1c; }
+.snp-v-some_overlap { background: #fef9c3; color: #92400e; }
+.snp-v-novel { background: #d1fae5; color: #065f46; }
+.snp-search-mode { font-size: 12px; color: var(--text-muted); }
+.snp-summary { font-size: 13px; line-height: 1.7; margin: 6px 0 12px; }
+.snp-work {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: #fff;
+}
+.snp-work-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.snp-work-meta { font-size: 12px; color: var(--text-muted); margin: 4px 0; }
+.snp-src { margin-left: 8px; background: var(--bg); padding: 1px 6px; border-radius: 4px; }
+.snp-badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; }
+.snp-high { background: #fee2e2; color: #b91c1c; }
+.snp-medium { background: #fef9c3; color: #92400e; }
+.snp-low { background: #e5e7eb; color: #4b5563; }
+.snp-reasons, .snp-diffs, .snp-suggestions ul { margin: 4px 0 0 18px; font-size: 12.5px; line-height: 1.6; }
+.snp-diffs li { color: var(--text-muted); }
+.snp-suggestions { margin-top: 10px; }
+.snp-suggestions h4 { font-size: 13px; margin: 0 0 4px; }

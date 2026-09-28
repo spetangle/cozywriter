@@ -2,7 +2,7 @@
 from storage.models.base import Base
 from storage.models.project import Project
 from storage.models.chapter import Chapter, ChapterVersion
-from storage.models.character import Character, CharacterArc, CharacterRelation
+from storage.models.character import Character, CharacterArc, CharacterRelation, CharacterGrowth
 from storage.models.world import WorldEntry
 from storage.models.outline import OutlineNode
 from storage.models.theme import Theme, Foreshadowing

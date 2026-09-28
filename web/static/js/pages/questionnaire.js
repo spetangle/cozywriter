@@ -38,6 +38,11 @@ Alpine.data('questionnaire', () => ({
     selectedMultiOptions: [],
     building: false,
 
+    // ─── 搜索相似小说 ───
+    similarSearching: false,
+    similarResult: null,
+    similarError: '',
+
     init() {
         this.loadGenres();
         this.loadPool();
@@ -441,6 +446,30 @@ Alpine.data('questionnaire', () => ({
         this.backToPool();
     },
 
+    async searchSimilarNovels() {
+        if (!this.q.id || this.similarSearching) return;
+        this.similarSearching = true;
+        this.similarError = '';
+        try {
+            const res = await fetch(`/api/questionnaires/${this.q.id}/search-similar`, {
+                method: 'POST',
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || data.status !== 'ok') {
+                this.similarError = (data.result && data.result.error) || data.detail || `HTTP ${res.status}`;
+                Alpine.store('app').toast('搜索相似小说失败: ' + this.similarError, 'error');
+                return;
+            }
+            this.similarResult = data.result || {};
+            Alpine.store('app').toast('相似小说分析完成', 'success');
+        } catch (e) {
+            this.similarError = e.message;
+            Alpine.store('app').toast('搜索失败: ' + e.message, 'error');
+        } finally {
+            this.similarSearching = false;
+        }
+    },
+
     async buildProject() {
         if (!this.q.id || this.building) return;
         this.building = true;
@@ -666,6 +695,74 @@ window.registerPageTemplate?.('questionnaire', `
                 </div>
               </div>
             </div>
+
+            <!-- 搜索相似小说（可选） -->
+            <div class="similar-novel-panel">
+              <div class="snp-head">
+                <div>
+                  <strong>🔍 搜索相似小说</strong>
+                  <p class="snp-hint">把上面的汇总信息交给 LLM，检索市面上是否有相近作品，并给出差异化建议。
+                    <span x-show="!similarResult">（未配置联网搜索 API 时，结果基于模型已有知识）</span>
+                  </p>
+                </div>
+                <button class="btn-secondary" @click="searchSimilarNovels()" :disabled="similarSearching">
+                  <span x-show="!similarSearching">🔍 搜索相似小说</span>
+                  <span x-show="similarSearching">⏳ 分析中（约 30~60 秒）...</span>
+                </button>
+              </div>
+
+              <p class="snp-error" x-show="similarError" x-text="similarError"></p>
+
+              <template x-if="similarResult">
+                <div class="snp-result">
+                  <div class="snp-verdict">
+                    <span class="snp-verdict-badge" :class="'snp-v-' + similarResult.verdict" x-text="{
+                      high_similarity: '⚠️ 高度相似',
+                      some_overlap: '🔶 部分重合',
+                      novel: '✅ 较为新颖'
+                    }[similarResult.verdict] || similarResult.verdict"></span>
+                    <span class="snp-search-mode" x-text="similarResult.search_used ? '已联网检索' : '基于模型知识'"></span>
+                  </div>
+                  <p class="snp-summary" x-text="similarResult.summary"></p>
+
+                  <template x-if="(similarResult.similar_works || []).length === 0">
+                    <p class="empty-hint">未发现明显相似的作品 🎉</p>
+                  </template>
+                  <template x-for="(w, i) in (similarResult.similar_works || [])" :key="'sw-' + i">
+                    <div class="snp-work">
+                      <div class="snp-work-head">
+                        <strong x-text="w.title || '未命名'"></strong>
+                        <span class="snp-badge" :class="'snp-' + (w.similarity || 'low')"
+                              x-text="({ high: '高度相似', medium: '中度相似', low: '轻微相似' }[w.similarity] || w.similarity)"></span>
+                      </div>
+                      <div class="snp-work-meta">
+                        <span x-text="w.author || '未知'"></span> ·
+                        <span x-text="w.year || '未知'"></span>
+                        <span class="snp-src" x-show="w.source === 'model_knowledge'">模型知识</span>
+                      </div>
+                      <template x-if="(w.reasons || []).length">
+                        <ul class="snp-reasons">
+                          <template x-for="(r, ri) in w.reasons" :key="'r' + i + '-' + ri"><li x-text="r"></li></template>
+                        </ul>
+                      </template>
+                      <template x-if="(w.differences || []).length">
+                        <ul class="snp-diffs">
+                          <template x-for="(d, di) in w.differences" :key="'d' + i + '-' + di"><li x-text="'差异：' + d"></li></template>
+                        </ul>
+                      </template>
+                    </div>
+                  </template>
+
+                  <template x-if="(similarResult.suggestions || []).length">
+                    <div class="snp-suggestions">
+                      <h4>💡 差异化建议</h4>
+                      <ul><template x-for="(s, si) in similarResult.suggestions" :key="'s' + si"><li x-text="s"></li></template></ul>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+
             <div class="step-q-nav">
               <button class="btn-secondary step-q-nav-btn" @click="prevStep()">← 返回修改</button>
               <button class="btn-primary step-q-nav-btn" @click="buildProject()" :disabled="building">

@@ -3,7 +3,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from storage.database import get_db
-from storage.models import Chapter, ChapterVersion, Project
+from storage.models import (
+    Chapter, ChapterVersion, Project, Foreshadowing, Character, CharacterGrowth,
+)
 import re
 from logger import logger
 
@@ -259,6 +261,135 @@ async def get_project_latest_post_processing(
         if len(result) >= limit:
             break
     return {"project_id": project_id, "items": result}
+
+
+def _serialize_foreshadowing(f: Foreshadowing) -> dict:
+    return {
+        "id": f.id,
+        "title": f.title,
+        "content": f.content or "",
+        "cycle": f.cycle or "",
+        "importance": f.importance or "medium",
+        "status": f.status or "active",
+        "plant_order": f.plant_order or 0,
+        "plant_chapter_id": f.plant_chapter_id,
+        "resolve_chapter_id": f.resolve_chapter_id,
+        "connection_to_mainline": f.connection_to_mainline or "",
+    }
+
+
+@router.get("/projects/{project_id}/chapters/{chapter_id}/foreshadowings")
+async def get_chapter_foreshadowings(
+    project_id: str, chapter_id: int, db: Session = Depends(get_db)
+):
+    """本章相关伏笔：本章埋设 / 回收 / 状态变化，以及仍未回收的相关伏笔。"""
+    chapter = _verify_chapter(chapter_id, project_id, db)
+    post = (chapter.fingerprint or {}).get("post_processing") or {}
+    updates = post.get("foreshadow_updates") or []
+
+    all_f = (
+        db.query(Foreshadowing)
+        .filter(Foreshadowing.project_id == project_id)
+        .order_by(Foreshadowing.plant_order)
+        .all()
+    )
+    resolved_here = [f for f in all_f if f.resolve_chapter_id == chapter.id]
+    resolved_ids = {f.id for f in resolved_here}
+    planted_here = [f for f in all_f if (f.plant_order or 0) == chapter.order]
+    active_pending = [
+        f for f in all_f
+        if (f.status or "active") in ("active", "planted")
+        and (f.plant_order or 0) <= chapter.order
+        and f.id not in resolved_ids
+    ]
+    return {
+        "chapter_id": chapter.id,
+        "order": chapter.order,
+        "title": chapter.title,
+        "updates": updates,
+        "planted_here": [_serialize_foreshadowing(f) for f in planted_here],
+        "resolved_here": [_serialize_foreshadowing(f) for f in resolved_here],
+        "active_pending": [_serialize_foreshadowing(f) for f in active_pending],
+    }
+
+
+def _serialize_growth(g: CharacterGrowth, character: Character | None) -> dict:
+    return {
+        "id": g.id,
+        "character_id": g.character_id,
+        "character_name": character.name if character else "",
+        "character_role": (character.role if character else "") or "",
+        "chapter_id": g.chapter_id,
+        "chapter_order": g.chapter_order or 0,
+        "chapter_title": g.chapter_title or "",
+        "status_after": g.status_after or "",
+        "gains": g.gains or "",
+        "summary": g.summary or "",
+        "arc_type": g.arc_type or "",
+        "is_protagonist": bool(g.is_protagonist),
+        "source": g.source or "auto",
+        "created_at": g.created_at,
+    }
+
+
+@router.get("/projects/{project_id}/chapters/{chapter_id}/character-growth")
+async def get_chapter_character_growth(
+    project_id: str, chapter_id: int, db: Session = Depends(get_db)
+):
+    """本章角色成长：本章出场角色的状态 / 收获（至少包含主角）。
+
+    优先读 character_growths 表；老章节未落表时回退到 fingerprint.post_processing。
+    """
+    chapter = _verify_chapter(chapter_id, project_id, db)
+    rows = (
+        db.query(CharacterGrowth)
+        .filter(
+            CharacterGrowth.project_id == project_id,
+            CharacterGrowth.chapter_id == chapter_id,
+        )
+        .all()
+    )
+    rows.sort(key=lambda r: (not r.is_protagonist, r.id))
+    char_cache: dict[int, Character | None] = {}
+    items = []
+    for g in rows:
+        if g.character_id not in char_cache:
+            char_cache[g.character_id] = (
+                db.query(Character).filter(Character.id == g.character_id).first()
+            )
+        items.append(_serialize_growth(g, char_cache[g.character_id]))
+
+    # 兜底：老章节没有 growth 表记录时，用后处理弧光更新拼一个
+    if not items:
+        post = (chapter.fingerprint or {}).get("post_processing") or {}
+        for a in post.get("arc_updates") or []:
+            cname = a.get("character") or a.get("character_name") or ""
+            char = db.query(Character).filter(
+                Character.project_id == project_id, Character.name == cname
+            ).first()
+            items.append({
+                "id": None,
+                "character_id": char.id if char else None,
+                "character_name": cname,
+                "character_role": (char.role if char else "") or "",
+                "chapter_id": chapter.id,
+                "chapter_order": chapter.order,
+                "chapter_title": chapter.title,
+                "status_after": a.get("new_state", ""),
+                "gains": "",
+                "summary": "",
+                "arc_type": "",
+                "is_protagonist": bool(char and "主角" in (char.role or "")),
+                "source": "fingerprint",
+                "created_at": None,
+            })
+
+    return {
+        "chapter_id": chapter.id,
+        "order": chapter.order,
+        "title": chapter.title,
+        "items": items,
+    }
 
 
 @router.put("/projects/{project_id}/chapters/{chapter_id}", response_model=ChapterResponse)

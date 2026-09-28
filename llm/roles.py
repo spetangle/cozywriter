@@ -901,6 +901,14 @@ POST_CHAPTER_SYSTEM = """你是小说剧情推演系统。根据刚写完的章�
       "identity": "身份", "personality": "性格",
       "first_appearance_note": "首次登场描述（1 句）"
     }}
+  ],
+  "character_growths": [
+    {{
+      "character_name": "本章出场且有变化/收获的角色名（主角必列，若其出场）",
+      "status": "本章结束时的状态（1-2 句）",
+      "gains": "本章的收获/变化：能力、认知、情感、关系或处境（1-2 句）",
+      "summary": "一句话成长小结（不超过 30 字）"
+    }}
   ]
 }}
 
@@ -908,6 +916,8 @@ POST_CHAPTER_SYSTEM = """你是小说剧情推演系统。根据刚写完的章�
 - 不更新未出场的角色
 - strength_delta 累加到当前值
 - 关系变化需与正文证据一致
+- character_growths 只写本章实际出场且有推进的角色；主角若出场必须有
+- 成长记录用于回看角色成长曲线，措辞要具体、可比较，不要空话
 """
 ROLE_POST_CHAPTER = Role(
     name="post_chapter",
@@ -1086,6 +1096,52 @@ ROLE_CHAPTER_DIRECTOR = Role(
 # Role 注册表
 # ═══════════════════════════════════════════════════════════════
 
+# 9.11 相似小说检索分析（问卷汇总页「搜索相似小说」）
+SIMILAR_NOVEL_SYSTEM = """你是资深网文 / 出版市场分析师。
+
+【待分析的小说信息】
+{novel_info}
+
+【联网搜索到的候选作品】
+{search_results}
+
+【任务】
+判断市面上是否已有与上述小说高度相似的作品，并给出可执行的差异化建议。
+
+返回 JSON：
+{{
+  "verdict": "high_similarity | some_overlap | novel",
+  "summary": "总体判断（2-3 句）",
+  "similar_works": [
+    {{
+      "title": "作品名",
+      "author": "作者 / 来源（未知写『未知』）",
+      "year": "年份（未知写『未知』）",
+      "similarity": "high | medium | low",
+      "reasons": ["相似点 1", "相似点 2"],
+      "differences": ["差异点 1"],
+      "source": "search | model_knowledge"
+    }}
+  ],
+  "suggestions": ["如何做出差异化 1", "如何做出差异化 2"]
+}}
+
+【硬性规则】
+1. 只能基于事实；不确定就写「不确定」，严禁编造不存在的作品或作者
+2. 若【联网搜索到的候选作品】为「（无联网结果）」，则只能基于模型已有知识作答，
+   并将相似作品的 source 标为 "model_knowledge"
+3. 若确实没有相近作品，verdict 用 "novel"，similar_works 可为空数组
+4. 全部使用中文
+"""
+ROLE_SIMILAR_NOVEL_ANALYST = Role(
+    name="similar_novel_analyst",
+    system_prompt=SIMILAR_NOVEL_SYSTEM,
+    user_prompt_template="分析相似小说：",
+    max_tokens=4096,
+    temperature=0.4,
+)
+
+
 ROLES = {
     "writing": ROLE_WRITING,
     "polish": ROLE_POLISH,
@@ -1107,6 +1163,7 @@ ROLES = {
     "golden_3_checker": ROLE_GOLDEN_3_CHECKER,
     "chapter_director": ROLE_CHAPTER_DIRECTOR,
     "event_signature_extractor": ROLE_EVENT_SIG_EXTRACTOR,
+    "similar_novel_analyst": ROLE_SIMILAR_NOVEL_ANALYST,
 }
 
 

@@ -18,6 +18,9 @@ class SystemSetting(Base):
     KEY_RAG_ONLINE_BASE_URL = "rag_online_base_url"
     KEY_RAG_ONLINE_API_KEY = "rag_online_api_key"
     KEY_RAG_ONLINE_MODEL = "rag_online_model"
+    # 联网搜索（可选）：tavily | serper
+    KEY_SEARCH_PROVIDER = "search_provider"
+    KEY_SEARCH_API_KEY = "search_api_key"
 
     @classmethod
     def get(cls, db, key: str, default: str = "") -> str:

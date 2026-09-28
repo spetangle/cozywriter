@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from storage.database import get_db
-from storage.models import Character, Project
+from storage.models import Character, Project, CharacterGrowth
 from rag.knowledge_base import KnowledgeBase
 from rag.embedder import LocalEmbedder
 from datetime import datetime
@@ -337,3 +337,70 @@ async def get_character_references(project_id: str, character_id: str, db: Sessi
     references["total_count"] = len(references["chapters"]) + len(references["plot_points"]) + len(references["foreshadows"])
     
     return references
+
+
+@router.get("/{character_id}/growth")
+async def get_character_growth(project_id: str, character_id: int, db: Session = Depends(get_db)):
+    """角色的成长时间线（按章节顺序）。"""
+    character = db.query(Character).filter(
+        Character.id == character_id, Character.project_id == project_id
+    ).first()
+    if not character:
+        raise HTTPException(status_code=404, detail="Character not found")
+
+    rows = (
+        db.query(CharacterGrowth)
+        .filter(
+            CharacterGrowth.project_id == project_id,
+            CharacterGrowth.character_id == character_id,
+        )
+        .order_by(CharacterGrowth.chapter_order, CharacterGrowth.id)
+        .all()
+    )
+    items = [{
+        "id": g.id,
+        "chapter_id": g.chapter_id,
+        "chapter_order": g.chapter_order or 0,
+        "chapter_title": g.chapter_title or "",
+        "status_after": g.status_after or "",
+        "gains": g.gains or "",
+        "summary": g.summary or "",
+        "arc_type": g.arc_type or "",
+        "is_protagonist": bool(g.is_protagonist),
+        "source": g.source or "auto",
+        "created_at": g.created_at,
+    } for g in rows]
+
+    # 兜底：从各章 fingerprint.post_processing.arc_updates 反推（老章节）
+    if not items:
+        from storage.models import Chapter
+        chapters = (
+            db.query(Chapter)
+            .filter(Chapter.project_id == project_id)
+            .order_by(Chapter.order)
+            .all()
+        )
+        for ch in chapters:
+            post = (ch.fingerprint or {}).get("post_processing") or {}
+            for a in post.get("arc_updates") or []:
+                cname = a.get("character") or a.get("character_name") or ""
+                if cname == character.name:
+                    items.append({
+                        "id": None,
+                        "chapter_id": ch.id,
+                        "chapter_order": ch.order,
+                        "chapter_title": ch.title,
+                        "status_after": a.get("new_state", ""),
+                        "gains": "",
+                        "summary": "",
+                        "arc_type": "",
+                        "is_protagonist": "主角" in (character.role or ""),
+                        "source": "fingerprint",
+                        "created_at": None,
+                    })
+    return {
+        "character_id": character.id,
+        "character_name": character.name,
+        "character_role": character.role or "",
+        "items": items,
+    }

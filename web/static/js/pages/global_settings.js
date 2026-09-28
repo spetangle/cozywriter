@@ -25,9 +25,19 @@ Alpine.data('globalSettings', () => ({
     ragTesting: false,
     ragTestResult: null,
 
+    // ─── 联网搜索（「搜索相似小说」用）───
+    searchSettings: { provider: '', api_key: '' },
+    searchHasApiKey: false,
+    searchApiKeyMasked: '',
+    searchLoading: false,
+    searchSaving: false,
+    searchTesting: false,
+    searchTestResult: null,
+
     tabs: [
         { id: 'providers', label: '服务商', icon: '🔌' },
         { id: 'rag', label: 'RAG 向量', icon: '🧠' },
+        { id: 'search', label: '联网搜索', icon: '🔍' },
         { id: 'token-usage', label: '用量统计', icon: '📊' },
         { id: 'about', label: '关于', icon: 'ℹ️' },
     ],
@@ -36,6 +46,7 @@ Alpine.data('globalSettings', () => ({
         this.loadProviders();
         this.loadGlobalTokenUsage();
         this.loadRagSettings();
+        this.loadSearchSettings();
     },
 
     async loadRagSettings() {
@@ -132,6 +143,73 @@ Alpine.data('globalSettings', () => ({
             Alpine.store('app').toast('RAG 向量库已重置，将按新模型重建', 'success');
         } catch (e) {
             Alpine.store('app').toast('重置失败: ' + e.message, 'error');
+        }
+    },
+
+    // ─── 联网搜索设置 ───
+    async loadSearchSettings() {
+        this.searchLoading = true;
+        try {
+            const res = await fetch('/api/config/search');
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            this.searchSettings.provider = data.provider || '';
+            this.searchSettings.api_key = '';
+            this.searchHasApiKey = !!data.has_api_key;
+            this.searchApiKeyMasked = data.api_key_masked || '';
+        } catch (e) {
+            console.error('加载联网搜索设置失败:', e);
+        } finally {
+            this.searchLoading = false;
+        }
+    },
+
+    async saveSearchSettings() {
+        this.searchSaving = true;
+        try {
+            const payload = { provider: this.searchSettings.provider };
+            if (this.searchSettings.api_key) payload.api_key = this.searchSettings.api_key;
+            const res = await fetch('/api/config/search', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            Alpine.store('app').toast('联网搜索设置已保存', 'success');
+            await this.loadSearchSettings();
+        } catch (e) {
+            Alpine.store('app').toast('保存失败: ' + e.message, 'error');
+        } finally {
+            this.searchSaving = false;
+        }
+    },
+
+    async clearSearchApiKey() {
+        try {
+            const res = await fetch('/api/config/search', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ api_key: '' }),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            await this.loadSearchSettings();
+            Alpine.store('app').toast('已清空搜索 API Key', 'success');
+        } catch (e) {
+            Alpine.store('app').toast('清空失败: ' + e.message, 'error');
+        }
+    },
+
+    async testSearch() {
+        this.searchTesting = true;
+        this.searchTestResult = null;
+        try {
+            const res = await fetch('/api/config/search/test', { method: 'POST' });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            this.searchTestResult = await res.json();
+        } catch (e) {
+            this.searchTestResult = { ok: false, message: e.message };
+        } finally {
+            this.searchTesting = false;
         }
     },
 
@@ -589,6 +667,48 @@ window.registerPageTemplate?.('global_settings', `
           <div class="rag-test-result" x-show="ragTestResult"
                :style="{ color: ragTestResult && ragTestResult.ok ? '#2e7d32' : '#c62828' }">
             <span x-text="ragTestResult ? (ragTestResult.ok ? '✅ ' : '❌ ') + ragTestResult.message : ''"></span>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- 联网搜索（搜索相似小说用） -->
+  <div x-show="selectedTab === 'search'" class="settings-content">
+    <div class="settings-section">
+      <h2>🔍 联网搜索</h2>
+      <p class="empty-hint">
+        用于问卷汇总页的「搜索相似小说」：把小说信息交给 LLM，并联网检索市面上是否有相近作品。
+        未配置时该功能仍可用，但结果仅基于模型已有知识（不联网）。
+      </p>
+
+      <template x-if="searchLoading"><p>⏳ 加载中...</p></template>
+      <template x-if="!searchLoading">
+        <div class="rag-settings-form">
+          <label>搜索服务
+            <select x-model="searchSettings.provider">
+              <option value="">不联网（仅用模型知识）</option>
+              <option value="tavily">Tavily</option>
+              <option value="serper">Serper（Google）</option>
+            </select>
+          </label>
+
+          <template x-if="searchSettings.provider">
+            <label>API Key
+              <input type="password" x-model="searchSettings.api_key"
+                     :placeholder="searchHasApiKey ? ('已配置：' + searchApiKeyMasked + '（留空不修改）') : '尚未配置'">
+            </label>
+          </template>
+
+          <div class="rag-actions">
+            <button class="btn-primary" @click="saveSearchSettings()" :disabled="searchSaving">💾 保存</button>
+            <button class="btn-secondary" @click="testSearch()" :disabled="searchTesting || !searchSettings.provider">🔍 测试连接</button>
+            <button class="btn-secondary" @click="clearSearchApiKey()" :disabled="!searchHasApiKey">清空 Key</button>
+          </div>
+
+          <div class="rag-test-result" x-show="searchTestResult"
+               :style="{ color: searchTestResult && searchTestResult.ok ? '#2e7d32' : '#c62828' }">
+            <span x-text="searchTestResult ? (searchTestResult.ok ? '✅ ' : '❌ ') + searchTestResult.message : ''"></span>
           </div>
         </div>
       </template>

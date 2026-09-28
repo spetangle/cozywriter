@@ -1128,3 +1128,52 @@ def _complete_with_ai(answers: dict, db, skip_novel_title: bool = False) -> dict
         except Exception as e:
             logger.error(f"[问卷] AI补全LLM调用失败: {e}")
             return _get_default_answers(missing_fields)
+
+
+# ─── 相似小说检索 ───
+
+class SimilarNovelResponse(BaseModel):
+    status: str
+    questionnaire_id: int
+    result: dict = {}
+
+
+@router.post("/{q_id}/search-similar", response_model=SimilarNovelResponse)
+def search_similar_novels(q_id: int, db: Session = Depends(get_db)):
+    # 注意：用同步 def（FastAPI 会丢到线程池），避免几十秒的 LLM/联网调用阻塞事件循环
+    """根据问卷汇总信息，让 LLM（可选联网搜索）分析市面上是否有相近小说。"""
+    q = db.query(CreativeQuestionnaire).filter(CreativeQuestionnaire.id == q_id).first()
+    if not q:
+        raise HTTPException(status_code=404, detail="Questionnaire not found")
+
+    answers = dict(q.answers or {})
+    if not answers:
+        return SimilarNovelResponse(
+            status="error", questionnaire_id=q_id,
+            result={"error": "问卷还没有任何内容，无法搜索相似小说"},
+        )
+
+    try:
+        from llm.similar_novels import analyze_similar_novels
+
+        result = analyze_similar_novels(
+            answers=answers,
+            novel_title=q.novel_title or "",
+            db=db,
+        )
+    except Exception as e:
+        logger.error(f"[SimilarNovel] 分析失败: {e}")
+        return SimilarNovelResponse(
+            status="error", questionnaire_id=q_id, result={"error": str(e)}
+        )
+
+    # 落库，方便刷新后仍能看到
+    try:
+        sug = dict(q.llm_suggestions or {})
+        sug["similar_novels"] = result
+        q.llm_suggestions = sug
+        db.commit()
+    except Exception as e:
+        logger.warning(f"[SimilarNovel] 保存结果失败（不影响返回）: {e}")
+
+    return SimilarNovelResponse(status="ok", questionnaire_id=q_id, result=result)

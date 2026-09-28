@@ -139,6 +139,20 @@ Alpine.data('novelEditor', () => ({
     chapterOutlinesMap: {},
     chapterPrepInfo: null,
 
+    // ─── 本章伏笔 / 角色成长 ───
+    chapterForeshadowings: null,
+    chapterForeshadowingsLoading: false,
+    chapterGrowth: null,
+    chapterGrowthLoading: false,
+
+    // ─── 角色关系图谱 / 成长记录 ───
+    characterRelations: [],
+    showRelationGraph: false,
+    showGrowthModal: false,
+    growthCharacter: null,
+    growthHistory: [],
+    growthLoading: false,
+
     reviewSubPanel: 'new',
     activeReviewSession: null,
     reviewResult: null,
@@ -163,6 +177,7 @@ Alpine.data('novelEditor', () => ({
         this.loadProject(id);
         this.loadChapters(id);
         this.loadCharacters(id);
+        this.loadCharacterRelations();
         this.loadThemes(id);
         this.loadForeshadowings(id);
         this.loadPlotPoints(id);
@@ -216,6 +231,8 @@ Alpine.data('novelEditor', () => ({
         // 以下异步加载，失败不影响正文显示
         this.loadChapterOutlines(chapter.id);
         this.loadPrepInfo(chapter.id);
+        this.loadChapterForeshadowings(chapter.id);
+        this.loadChapterGrowth(chapter.id);
         if (this.writingTab === 'fingerprint') {
             this.loadFingerprint(chapter.id);
         }
@@ -298,6 +315,119 @@ Alpine.data('novelEditor', () => ({
         } finally {
             this.prepInfoLoading = false;
         }
+    },
+
+    async loadChapterForeshadowings(chapterId) {
+        this.chapterForeshadowingsLoading = true;
+        this.chapterForeshadowings = null;
+        try {
+            const res = await fetch(`/api/projects/${this.projectId}/chapters/${chapterId}/foreshadowings`);
+            if (!res.ok) return;
+            this.chapterForeshadowings = await res.json();
+        } catch (e) {
+            console.warn('加载本章伏笔失败:', e);
+        } finally {
+            this.chapterForeshadowingsLoading = false;
+        }
+    },
+
+    async loadChapterGrowth(chapterId) {
+        this.chapterGrowthLoading = true;
+        this.chapterGrowth = null;
+        try {
+            const res = await fetch(`/api/projects/${this.projectId}/chapters/${chapterId}/character-growth`);
+            if (!res.ok) return;
+            this.chapterGrowth = await res.json();
+        } catch (e) {
+            console.warn('加载角色成长失败:', e);
+        } finally {
+            this.chapterGrowthLoading = false;
+        }
+    },
+
+    async loadCharacterRelations() {
+        if (!this.projectId) return;
+        try {
+            const res = await fetch(`/api/projects/${this.projectId}/character-relations`);
+            if (!res.ok) return;
+            this.characterRelations = await res.json();
+        } catch (e) {
+            console.warn('加载角色关系失败:', e);
+        }
+    },
+
+    async openGrowthModalById(characterId, name, role) {
+        if (!characterId) {
+            Alpine.store('app').toast('该角色暂无记录', 'warning');
+            return;
+        }
+        this.showGrowthModal = true;
+        this.growthCharacter = { id: characterId, name, role };
+        this.growthHistory = [];
+        this.growthLoading = true;
+        try {
+            const res = await fetch(`/api/projects/${this.projectId}/characters/${characterId}/growth`);
+            if (res.ok) {
+                const data = await res.json();
+                this.growthHistory = data.items || [];
+            }
+        } catch (e) {
+            console.warn('加载成长记录失败:', e);
+        } finally {
+            this.growthLoading = false;
+        }
+    },
+
+    // 角色关系图谱布局（主角居中，其他角色环形分布）
+    get relationGraph() {
+        const chars = this.characters || [];
+        const rels = this.characterRelations || [];
+        const width = 640;
+        const height = 520;
+        const cx = width / 2;
+        const cy = height / 2;
+        const protagonists = chars.filter((c) => (c.role || '').includes('主角'));
+        const others = chars.filter((c) => !(c.role || '').includes('主角'));
+        const nodes = [];
+        protagonists.forEach((c, i) => {
+            const n = protagonists.length;
+            nodes.push({
+                id: c.id, name: c.name, role: c.role,
+                x: cx + (n > 1 ? (i - (n - 1) / 2) * 110 : 0),
+                y: cy, protagonist: true,
+            });
+        });
+        const rOuter = Math.min(width, height) / 2 - 70;
+        others.forEach((c, i) => {
+            const ang = -Math.PI / 2 + (2 * Math.PI * i) / Math.max(1, others.length);
+            nodes.push({
+                id: c.id, name: c.name, role: c.role,
+                x: cx + rOuter * Math.cos(ang),
+                y: cy + rOuter * Math.sin(ang),
+                protagonist: false,
+            });
+        });
+        const byId = {};
+        nodes.forEach((n) => { byId[n.id] = n; });
+        const colorOf = (status) => ({
+            stable: '#10b981', developing: '#3b82f6',
+            tense: '#f59e0b', broken: '#ef4444',
+        }[status] || '#94a3b8');
+        const edges = rels
+            .filter((r) => byId[r.from_character_id] && byId[r.to_character_id])
+            .map((r) => {
+                const a = byId[r.from_character_id];
+                const b = byId[r.to_character_id];
+                return {
+                    id: r.id,
+                    x1: a.x, y1: a.y, x2: b.x, y2: b.y,
+                    mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2,
+                    label: r.relation_type || '',
+                    color: colorOf(r.status),
+                    strength: r.strength,
+                };
+            });
+        return { width, height, nodes, edges };
     },
 
     async loadFingerprint(chapterId) {
@@ -2210,6 +2340,8 @@ window.registerPageTemplate?.('novel_editor', `
                     <button :class="{ active: writingTab === 'versions' }" @click="setWritingTab('versions'); loadChapterVersions()">📦 版本</button>
                     <button :class="{ active: writingTab === 'fingerprint' }" @click="setWritingTab('fingerprint'); loadFingerprint(currentChapter.id)">🔍 LLM指纹</button>
                     <button :class="{ active: writingTab === 'status' }" @click="setWritingTab('status'); loadPostProcessing(currentChapter.id)">🔄 状态变化</button>
+                    <button :class="{ active: writingTab === 'foreshadow' }" @click="setWritingTab('foreshadow'); loadChapterForeshadowings(currentChapter.id)">🪝 伏笔</button>
+                    <button :class="{ active: writingTab === 'growth' }" @click="setWritingTab('growth'); loadChapterGrowth(currentChapter.id)">🌱 角色成长</button>
                   </div>
                 </div>
 
@@ -2399,6 +2531,99 @@ window.registerPageTemplate?.('novel_editor', `
                     </div>
                   </template>
                 </div>
+
+                <!-- 本章伏笔状态 -->
+                <div x-show="writingTab === 'foreshadow'" class="writing-tab-content writing-status-panel">
+                  <template x-if="chapterForeshadowingsLoading"><p class="loading-hint">⏳ 加载中...</p></template>
+                  <template x-if="!chapterForeshadowingsLoading">
+                    <div class="foreshadow-report">
+                      <template x-if="(chapterForeshadowings?.updates || []).length > 0">
+                        <div class="fs-section">
+                          <h5>🔄 本章状态变化</h5>
+                          <ul>
+                            <template x-for="(u, ui) in chapterForeshadowings.updates" :key="'fu-' + ui">
+                              <li>
+                                <strong x-text="u.title"></strong>
+                                <span class="fs-arrow"> → </span>
+                                <span class="tag" x-text="u.new_status"></span>
+                                <span class="fs-evidence" x-show="u.evidence" x-text="'（' + (u.evidence || '') + '）'"></span>
+                              </li>
+                            </template>
+                          </ul>
+                        </div>
+                      </template>
+
+                      <template x-if="(chapterForeshadowings?.planted_here || []).length > 0">
+                        <div class="fs-section">
+                          <h5>🌱 本章埋设</h5>
+                          <ul>
+                            <template x-for="f in chapterForeshadowings.planted_here" :key="'fp-' + f.id">
+                              <li><span class="tag" x-text="f.cycle"></span> <strong x-text="f.title"></strong>：<span x-text="f.content"></span></li>
+                            </template>
+                          </ul>
+                        </div>
+                      </template>
+
+                      <template x-if="(chapterForeshadowings?.resolved_here || []).length > 0">
+                        <div class="fs-section">
+                          <h5>✅ 本章回收</h5>
+                          <ul>
+                            <template x-for="f in chapterForeshadowings.resolved_here" :key="'fr-' + f.id">
+                              <li><span class="tag" x-text="f.cycle"></span> <strong x-text="f.title"></strong>：<span x-text="f.content"></span></li>
+                            </template>
+                          </ul>
+                        </div>
+                      </template>
+
+                      <template x-if="(chapterForeshadowings?.active_pending || []).length > 0">
+                        <div class="fs-section">
+                          <h5>⏳ 进行中（尚未回收）</h5>
+                          <ul>
+                            <template x-for="f in chapterForeshadowings.active_pending" :key="'fa-' + f.id">
+                              <li>
+                                <span class="tag" x-text="f.cycle"></span>
+                                <strong x-text="f.title"></strong>
+                                <span class="fs-plant" x-text="'（第' + ((f.plant_order || 0) + 1) + '章埋设）'"></span>
+                              </li>
+                            </template>
+                          </ul>
+                        </div>
+                      </template>
+
+                      <div class="empty-hint"
+                           x-show="!chapterForeshadowings || (
+                             (chapterForeshadowings.updates || []).length +
+                             (chapterForeshadowings.planted_here || []).length +
+                             (chapterForeshadowings.resolved_here || []).length +
+                             (chapterForeshadowings.active_pending || []).length
+                           ) === 0">本章暂无相关伏笔</div>
+                    </div>
+                  </template>
+                </div>
+
+                <!-- 本章角色成长 -->
+                <div x-show="writingTab === 'growth'" class="writing-tab-content writing-status-panel">
+                  <template x-if="chapterGrowthLoading"><p class="loading-hint">⏳ 加载中...</p></template>
+                  <template x-if="!chapterGrowthLoading">
+                    <div class="growth-report">
+                      <div class="empty-hint" x-show="!chapterGrowth || (chapterGrowth.items || []).length === 0">暂无角色成长记录（本章可能未跑后处理）</div>
+                      <template x-for="g in (chapterGrowth?.items || [])" :key="'g-' + (g.id !== null && g.id !== undefined ? g.id : g.character_name)">
+                        <div class="growth-card" :class="{ 'growth-protagonist': g.is_protagonist }">
+                          <div class="gc-head">
+                            <strong x-text="g.character_name"></strong>
+                            <span class="tag" x-text="g.character_role"></span>
+                            <span class="gc-arc" x-show="g.arc_type" x-text="g.arc_type"></span>
+                            <button class="btn-small" style="margin-left:auto"
+                                    @click="openGrowthModalById(g.character_id, g.character_name, g.character_role)">📈 成长记录</button>
+                          </div>
+                          <div class="gc-row" x-show="g.status_after"><span class="gc-label">状态</span><span x-text="g.status_after"></span></div>
+                          <div class="gc-row" x-show="g.gains"><span class="gc-label">收获</span><span x-text="g.gains"></span></div>
+                          <div class="gc-summary" x-show="g.summary" x-text="'💡 ' + g.summary"></div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
               </div>
             </template>
           </div>
@@ -2568,16 +2793,62 @@ window.registerPageTemplate?.('novel_editor', `
 
           <!-- 角色面板 -->
           <div x-show="activePanel === 'character'" class="panel-section">
-            <h3>👥 角色列表（共 <span x-text="characters.length"></span> 个）</h3>
+            <div class="panel-page-header">
+              <h3>👥 角色列表（共 <span x-text="characters.length"></span> 个）</h3>
+              <div class="panel-header-actions">
+                <button class="btn-secondary" @click="showRelationGraph = !showRelationGraph">
+                  <span x-text="showRelationGraph ? '📋 列表' : '🕸 关系图谱'"></span>
+                </button>
+              </div>
+            </div>
+
             <template x-if="characters.length === 0"><p class="empty-hint">暂无角色</p></template>
-            <div class="card-grid">
+
+            <!-- 列表视图 -->
+            <div class="card-grid" x-show="!showRelationGraph">
               <template x-for="c in characters" :key="c.id">
                 <div class="info-card">
                   <h4 x-text="c.name"></h4>
                   <span class="tag" x-text="c.role"></span>
                   <p x-text="c.description || '暂无描述'"></p>
+                  <div class="card-actions">
+                    <button class="btn-small" @click="openGrowthModalById(c.id, c.name, c.role)">📈 成长记录</button>
+                  </div>
                 </div>
               </template>
+            </div>
+
+            <!-- 关系图谱视图 -->
+            <div class="relation-graph-wrap" x-show="showRelationGraph">
+              <div class="empty-hint" x-show="characters.length === 0">暂无角色</div>
+              <template x-if="characters.length > 0">
+                <svg class="relation-graph" :viewBox="'0 0 ' + relationGraph.width + ' ' + relationGraph.height"
+                     preserveAspectRatio="xMidYMid meet">
+                  <template x-for="e in relationGraph.edges" :key="'edge-' + e.id">
+                    <g>
+                      <line :x1="e.x1" :y1="e.y1" :x2="e.x2" :y2="e.y2"
+                            :stroke="e.color" stroke-width="2" :stroke-dasharray="e.status === 'broken' ? '6 4' : '0'"></line>
+                      <text :x="e.mx" :y="e.my" class="rg-edge-label" :fill="e.color"
+                            text-anchor="middle" x-text="e.label"></text>
+                    </g>
+                  </template>
+                  <template x-for="n in relationGraph.nodes" :key="'node-' + n.id">
+                    <g>
+                      <circle :cx="n.x" :cy="n.y" :r="n.protagonist ? 30 : 24"
+                              :class="n.protagonist ? 'rg-node rg-protagonist' : 'rg-node'"></circle>
+                      <text :x="n.x" :y="n.y + 4" class="rg-node-label" text-anchor="middle" x-text="n.name"></text>
+                    </g>
+                  </template>
+                </svg>
+              </template>
+              <div class="relation-graph-legend">
+                <span><i style="background:#10b981"></i>稳定</span>
+                <span><i style="background:#3b82f6"></i>发展中</span>
+                <span><i style="background:#f59e0b"></i>紧张</span>
+                <span><i style="background:#ef4444"></i>破裂</span>
+                <span><i style="background:#6366f1"></i>主角</span>
+              </div>
+              <p class="empty-hint" x-show="relationGraph.edges.length === 0 && characters.length > 0">暂无角色关系数据（可由后处理或手动补充）</p>
             </div>
           </div>
 
@@ -2959,6 +3230,36 @@ window.registerPageTemplate?.('novel_editor', `
               <button class="btn-secondary" @click="showExportModal = false">取消</button>
               <button class="btn-primary" @click="exportChapters()">📥 导出</button>
             </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- ═══ 角色成长记录弹窗 ═══ -->
+      <template x-if="showGrowthModal">
+        <div class="modal-overlay" @click.self="showGrowthModal = false">
+          <div class="modal modal-wide modal-scrollable">
+            <button class="modal-close-x" @click="showGrowthModal = false">×</button>
+            <h2>📈 成长记录 — <span x-text="growthCharacter?.name"></span>
+              <span class="tag" x-text="growthCharacter?.role"></span>
+            </h2>
+            <template x-if="growthLoading"><p class="loading-hint">⏳ 加载中...</p></template>
+            <template x-if="!growthLoading">
+              <div class="growth-history">
+                <div class="empty-hint" x-show="growthHistory.length === 0">暂无成长记录</div>
+                <template x-for="(g, gi) in growthHistory" :key="'gh-' + gi">
+                  <div class="growth-history-item">
+                    <div class="ghi-head">
+                      <span class="ghi-chapter" x-text="'第' + ((g.chapter_order || 0) + 1) + '章'"></span>
+                      <span x-text="g.chapter_title || ''"></span>
+                      <span class="gc-arc" x-show="g.arc_type" x-text="g.arc_type"></span>
+                    </div>
+                    <div class="gc-row" x-show="g.status_after"><span class="gc-label">状态</span><span x-text="g.status_after"></span></div>
+                    <div class="gc-row" x-show="g.gains"><span class="gc-label">收获</span><span x-text="g.gains"></span></div>
+                    <div class="gc-summary" x-show="g.summary" x-text="'💡 ' + g.summary"></div>
+                  </div>
+                </template>
+              </div>
+            </template>
           </div>
         </div>
       </template>

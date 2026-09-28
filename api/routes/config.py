@@ -57,6 +57,11 @@ class RagTestRequest(BaseModel):
     model: str | None = None
 
 
+class SearchSettingsUpdate(BaseModel):
+    provider: str | None = None   # "" | "tavily" | "serper"
+    api_key: str | None = None
+
+
 def _load_env() -> dict[str, str]:
     """读取当前 .env 内容"""
     env_path = Path(".env")
@@ -324,3 +329,50 @@ async def reset_rag_collections():
         return {"status": "ok", "deleted": deleted}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"重置失败: {e}")
+
+
+# ─── 联网搜索设置（「搜索相似小说」用）───
+
+@router.get("/search")
+async def get_search_settings(db: Session = Depends(get_db)):
+    """读取联网搜索设置（api_key 只返回掩码）。"""
+    provider = SystemSetting.get(db, SystemSetting.KEY_SEARCH_PROVIDER, "") or ""
+    api_key = SystemSetting.get(db, SystemSetting.KEY_SEARCH_API_KEY, "") or ""
+    return {
+        "provider": provider,
+        "api_key_masked": _mask_key(api_key),
+        "has_api_key": bool(api_key),
+        "configured": bool(provider and api_key),
+    }
+
+
+@router.put("/search")
+async def update_search_settings(req: SearchSettingsUpdate, db: Session = Depends(get_db)):
+    """更新联网搜索设置。
+
+    - provider: "" / "tavily" / "serper"
+    - api_key 传空字符串表示清空；不传则保持不变
+    """
+    if req.provider is not None:
+        provider = req.provider.strip().lower()
+        if provider not in ("", "tavily", "serper"):
+            raise HTTPException(status_code=400, detail="provider 必须是 tavily 或 serper（或留空关闭）")
+        SystemSetting.set(db, SystemSetting.KEY_SEARCH_PROVIDER, provider)
+    if req.api_key is not None:
+        SystemSetting.set(db, SystemSetting.KEY_SEARCH_API_KEY, req.api_key.strip())
+    return {"status": "ok", "settings": await get_search_settings(db)}
+
+
+@router.post("/search/test")
+def test_search_settings(db: Session = Depends(get_db)):
+    # 同步 def：联网测试放线程池，避免阻塞事件循环
+    """用已保存的配置做一次联网搜索连通性测试。"""
+    from llm import search_tool
+    provider = SystemSetting.get(db, SystemSetting.KEY_SEARCH_PROVIDER, "") or ""
+    api_key = SystemSetting.get(db, SystemSetting.KEY_SEARCH_API_KEY, "") or ""
+    if not provider or not api_key:
+        return {"ok": False, "message": "请先选择搜索服务并填写 API Key"}
+    results = search_tool.web_search("测试 小说 相似", db=db, max_results=2)
+    if results is None:
+        return {"ok": False, "message": "搜索失败，请检查 API Key 或网络"}
+    return {"ok": True, "message": f"连接成功，返回 {len(results)} 条结果", "sample": results[:1]}

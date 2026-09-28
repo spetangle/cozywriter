@@ -83,6 +83,7 @@ class Character(Base):
 
     project = relationship("Project", back_populates="characters")
     arcs = relationship("CharacterArc", back_populates="character", cascade="all, delete-orphan")
+    growths = relationship("CharacterGrowth", back_populates="character", cascade="all, delete-orphan")
     consistency_records = relationship("ConsistencyRecord", back_populates="character")
     relations_from = relationship(
         "CharacterRelation", foreign_keys="CharacterRelation.from_character_id",
@@ -112,6 +113,30 @@ class CharacterArc(Base):
 
     project = relationship("Project", back_populates="character_arcs")
     character = relationship("Character", back_populates="arcs")
+
+
+class CharacterGrowth(Base):
+    """角色成长日志（按章记录）
+
+    每章后处理时为本章出场/有变化的角色写一条，形成可回看的成长时间线。
+    """
+    __tablename__ = "character_growths"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(String(32), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    character_id = Column(Integer, ForeignKey("characters.id", ondelete="CASCADE"), nullable=False)
+    chapter_id = Column(Integer, ForeignKey("chapters.id", ondelete="CASCADE"), nullable=True)
+    chapter_order = Column(Integer, default=0)
+    chapter_title = Column(String(255), default="")
+    status_after = Column(Text, default="")   # 本章结束时的状态
+    gains = Column(Text, default="")          # 本章的收获/变化
+    summary = Column(Text, default="")        # 一句话成长小结
+    arc_type = Column(String(30), default="")  # 成长|堕落|平线|循环
+    is_protagonist = Column(Boolean, default=False)
+    source = Column(String(20), default="auto")  # auto | manual
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    character = relationship("Character", back_populates="growths")
 
 
 class CharacterRelation(Base):

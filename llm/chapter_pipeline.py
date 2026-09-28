@@ -1652,7 +1652,8 @@ def run_post_chapter_processing(
 ) -> dict:
     """章节后处理：弧光 + 关系 + 伏笔 + 黄金3 + 一致性"""
     from storage.models import (
-        Character, CharacterArc, CharacterRelation, Foreshadowing, Chapter,
+        Character, CharacterArc, CharacterRelation, CharacterGrowth,
+        Foreshadowing, Chapter,
     )
 
     result = {
@@ -1742,6 +1743,68 @@ def run_post_chapter_processing(
                     "character": cname,
                     "new_state": arc.current_state,
                 })
+
+    # ── 角色成长日志（按章记录，供「角色成长」界面 / 成长时间线回看）──
+    try:
+        growth_list = post_data.get("character_growths") or []
+        if not growth_list:
+            # 兜底：LLM 未返回 character_growths 时，用弧光更新生成
+            growth_list = [
+                {
+                    "character_name": a.get("character"),
+                    "status": a.get("new_state", ""),
+                    "gains": "",
+                    "summary": (a.get("new_state") or "")[:30],
+                }
+                for a in result["arc_updates"]
+            ]
+        # 重跑本章时先清掉旧记录，避免重复
+        db.query(CharacterGrowth).filter(
+            CharacterGrowth.chapter_id == chapter_id
+        ).delete(synchronize_session=False)
+        recorded_ids = set()
+        for g in growth_list:
+            gname = (g.get("character_name") or "").strip()
+            target = next((c for c in chars if c.name == gname), None)
+            if not target:
+                continue
+            is_prot = "主角" in (target.role or "")
+            db.add(CharacterGrowth(
+                project_id=project_id,
+                character_id=target.id,
+                chapter_id=chapter_id,
+                chapter_order=chapter.order,
+                chapter_title=chapter.title,
+                status_after=g.get("status", "") or "",
+                gains=g.get("gains", "") or "",
+                summary=g.get("summary", "") or "",
+                arc_type=g.get("arc_type", "") or "",
+                is_protagonist=is_prot,
+                source="auto",
+            ))
+            recorded_ids.add(target.id)
+            result.setdefault("character_growths", []).append({
+                "character": target.name,
+                "summary": g.get("summary", ""),
+            })
+        # 主角兜底：确保本章至少有主角的成长记录
+        for c in chars:
+            if "主角" in (c.role or "") and c.id not in recorded_ids:
+                arc = db.query(CharacterArc).filter(CharacterArc.character_id == c.id).first()
+                db.add(CharacterGrowth(
+                    project_id=project_id,
+                    character_id=c.id,
+                    chapter_id=chapter_id,
+                    chapter_order=chapter.order,
+                    chapter_title=chapter.title,
+                    status_after=(arc.current_state if arc else "") or "",
+                    gains="",
+                    summary="本章出场（未检测到显著变化）",
+                    is_protagonist=True,
+                    source="auto",
+                ))
+    except Exception as _ge:
+        logger.warning(f"[PostChapter] 记录角色成长失败: {_ge}")
 
     # 应用关系更新
     for rel_upd in post_data.get("relation_updates", []):
@@ -2753,6 +2816,7 @@ def run_chapter_generation_pipeline(
                     "relation_updates": post_result.get("relation_updates", []),
                     "foreshadow_updates": post_result.get("foreshadow_updates", []),
                     "new_characters": post_result.get("new_characters", []),
+                    "character_growths": post_result.get("character_growths", []),
                     "notifications": post_result.get("notifications", []),
                     "consistency": post_result.get("consistency"),
                 }
