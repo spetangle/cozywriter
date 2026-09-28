@@ -75,7 +75,13 @@ class _Client:
 
 
 def _provider(outputs, use_json=True, max_tokens=100):
-    p = DeepSeekProvider(api_key="x", use_json_output=use_json)
+    # 固定走 OpenAI 兼容路径，避免 .env 的 DEEPSEEK_BASE_URL 指向 /anthropic
+    # 时被 provider 判定为 Anthropic 协议，导致 fake client 不匹配。
+    p = DeepSeekProvider(
+        api_key="x",
+        base_url=DeepSeekProvider.DEFAULT_BASE_URL,
+        use_json_output=use_json,
+    )
     client = _Client(outputs)
     p._get_client = lambda: client
     p._calls = client.chat.completions
