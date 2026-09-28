@@ -1,6 +1,6 @@
 """RAG 知识库管理"""
 from rag.vector_store import VectorStore
-from rag.embedder import LocalEmbedder
+from rag.embedder import get_embedder
 from storage.models import Character, WorldEntry, Chapter
 from typing import Optional
 import uuid
@@ -11,19 +11,40 @@ COLLECTION_WORLD = "worldbuilding"
 COLLECTION_CHAPTERS = "chapters"
 COLLECTION_CHAPTER_EVENTS = "chapter_events"
 
+ALL_COLLECTIONS = [
+    COLLECTION_CHARACTERS,
+    COLLECTION_WORLD,
+    COLLECTION_CHAPTERS,
+    COLLECTION_CHAPTER_EVENTS,
+]
+
 
 class KnowledgeBase:
     """RAG 知识库管理器"""
 
-    def __init__(self, embedder: LocalEmbedder | None = None):
+    def __init__(self, embedder=None):
         self.vector_store = VectorStore()
-        self.embedder = embedder or LocalEmbedder()
+        # 未显式传入时按系统设置选择本地 / 在线 embedding
+        self.embedder = embedder or get_embedder()
         self._ensure_collections()
 
     def _ensure_collections(self):
         """确保必要的 collection 存在"""
-        for name in [COLLECTION_CHARACTERS, COLLECTION_WORLD, COLLECTION_CHAPTERS, COLLECTION_CHAPTER_EVENTS]:
+        for name in ALL_COLLECTIONS:
             self.vector_store.get_or_create_collection(name)
+
+    @staticmethod
+    def reset_all_collections():
+        """删除全部 RAG collection（切换 embedding 模型/模式后维度不一致时用）。
+
+        下次使用时会自动重建空 collection。
+        """
+        store = VectorStore()
+        deleted = []
+        for name in ALL_COLLECTIONS:
+            store.delete_collection(name)
+            deleted.append(name)
+        return deleted
 
     # ─── Character 操作 ───
 

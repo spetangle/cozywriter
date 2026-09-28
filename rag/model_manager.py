@@ -146,6 +146,7 @@ class ModelManager:
                 ) from e
             self._model = SentenceTransformer(
                 str(self.local_dir),  # 直接传本地目录
+                device="cpu",         # 强制 CPU：避免 CUDA 初始化与 nvidia 依赖
             )
         return self._model
 

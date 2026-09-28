@@ -71,9 +71,17 @@
 
 ## Phase 7 · 新增 Provider
 
-- [x] 7.1 新增 opencode provider（Anthropic 兼容），默认关闭，需 `OPENCODE_ENABLED=true` 才可用
+- [x] 7.1 新增 opencode provider（OpenAI 兼容 OpenCode Go），DB 配 Key 后可用
 - [x] 7.2 注册到工厂 / 服务商种子 / 模型列表 / 超参预设 / init 与启动检查
 - [x] 7.3 `.env.example` 增加 OPENCODE_* 配置项
+
+## Phase 8 · RAG 增强
+
+- [x] 8.1 依赖拆分：`requirements.txt` 不再含 sentence-transformers/torch，RAG 依赖独立为 `requirements-rag.txt`
+- [x] 8.2 本地 RAG 强制 CPU（`device="cpu"`）+ CPU 一键安装脚本 `tools/install_rag_cpu.*`
+- [x] 8.3 本地 / 在线 embedding 可切换：`rag/online_embedder.py`（OpenAI 兼容），`get_embedder()` 工厂
+- [x] 8.4 设置接口与页面：`GET/PUT /api/config/rag`、`/rag/test`、`/rag/reset`；「全局设置 → RAG 向量」
+- [ ] 8.5 在线 embedding 真实连通性复测（需用户提供可用 API）
 
 ## 验证策略
 

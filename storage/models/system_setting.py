@@ -13,6 +13,11 @@ class SystemSetting(Base):
 
     # 内置的 key 常量
     KEY_DEFAULT_LLM_PROVIDER = "default_llm_provider"
+    # RAG embedding：local=本地 CPU 模型 / online=在线 embedding API
+    KEY_RAG_EMBEDDING_MODE = "rag_embedding_mode"        # "local" | "online"
+    KEY_RAG_ONLINE_BASE_URL = "rag_online_base_url"
+    KEY_RAG_ONLINE_API_KEY = "rag_online_api_key"
+    KEY_RAG_ONLINE_MODEL = "rag_online_model"
 
     @classmethod
     def get(cls, db, key: str, default: str = "") -> str:

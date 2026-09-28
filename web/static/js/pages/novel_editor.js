@@ -1112,7 +1112,7 @@ window.registerPageTemplate?.('novel_editor', `
           <span class="project-id-badge" x-show="project.id" x-text="'#' + project.id"></span>
           <span class="llm-badge" x-show="currentLlmLabel">🤖 <span x-text="currentLlmLabel"></span></span>
           <span class="llm-badge" x-show="ragEnabled === false"
-                title="未检测到本地 embedding 模型，事件去重与相似度拦截会跳过；可在设置中下载 moka-ai/m3e-base">⚠️ RAG 未启用</span>
+                title="RAG 未启用：可在「全局设置 → RAG 向量」选择本地 CPU 模型或在线 Embedding API">⚠️ RAG 未启用</span>
         </div>
         <div class="header-right">
           <button class="btn-secondary" @click="openTaskManager()" title="任务管理">📋 任务</button>

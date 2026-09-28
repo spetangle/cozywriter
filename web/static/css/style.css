@@ -5471,6 +5471,51 @@ color: #92400e;
   margin-bottom: 14px;
   color: var(--text);
 }
+
+/* RAG 向量模型设置 */
+.rag-settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 680px;
+}
+.rag-settings-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.rag-settings-form input,
+.rag-settings-form select {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--text);
+}
+.rag-online-fields,
+.rag-local-hint {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.rag-local-hint code {
+  background: rgba(127, 127, 127, 0.15);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.rag-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.rag-test-result {
+  font-size: 13px;
+  line-height: 1.6;
+}
 .section-header {
   display: flex;
   align-items: center;

@@ -38,6 +38,23 @@ class ConfigStatusResponse(BaseModel):
     # RAG（embedding 模型）是否已就绪；未就绪时事件去重/相似度拦截会跳过
     rag_enabled: bool = False
     rag_model: str = ""
+    # RAG 模式：local（本地 CPU 模型）/ online（在线 embedding API）
+    rag_mode: str = "local"
+    rag_online_configured: bool = False
+
+
+class RagSettingsUpdate(BaseModel):
+    mode: str | None = None                 # "local" | "online"
+    base_url: str | None = None
+    api_key: str | None = None
+    model: str | None = None
+
+
+class RagTestRequest(BaseModel):
+    mode: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    model: str | None = None
 
 
 def _load_env() -> dict[str, str]:
@@ -99,16 +116,25 @@ async def get_config_status(db: Session = Depends(get_db)):
         resolver = default_models.get(default_provider.lower())
         current_model = resolver(env_vars) if resolver else ""
 
-    # RAG 状态：模型文件已下载 + sentence-transformers 可导入，两者缺一都不可用
+    # RAG 状态：按当前模式判断是否可用
     rag_enabled = False
     rag_model = ""
+    rag_mode = SystemSetting.get(db, SystemSetting.KEY_RAG_EMBEDDING_MODE, "local") or "local"
+    online_base = SystemSetting.get(db, SystemSetting.KEY_RAG_ONLINE_BASE_URL, "")
+    online_key = SystemSetting.get(db, SystemSetting.KEY_RAG_ONLINE_API_KEY, "")
+    online_model = SystemSetting.get(db, SystemSetting.KEY_RAG_ONLINE_MODEL, "")
+    rag_online_configured = bool(online_key and online_model)
     try:
-        import importlib.util
-        from rag.model_manager import ModelManager
-        mgr = ModelManager()
-        rag_model = mgr.model_name
-        has_st = importlib.util.find_spec("sentence_transformers") is not None
-        rag_enabled = bool(mgr.is_model_downloaded() and has_st)
+        if rag_mode == "online":
+            rag_model = online_model or "(未配置在线 embedding 模型)"
+            rag_enabled = rag_online_configured
+        else:
+            import importlib.util
+            from rag.model_manager import ModelManager
+            mgr = ModelManager()
+            rag_model = mgr.model_name
+            has_st = importlib.util.find_spec("sentence_transformers") is not None
+            rag_enabled = bool(mgr.is_model_downloaded() and has_st)
     except Exception:
         pass
 
@@ -135,6 +161,8 @@ async def get_config_status(db: Session = Depends(get_db)):
         current_model=current_model,
         rag_enabled=rag_enabled,
         rag_model=rag_model,
+        rag_mode=rag_mode,
+        rag_online_configured=rag_online_configured,
     )
 
 
@@ -200,3 +228,99 @@ async def set_default_provider(req: SetDefaultProviderRequest, db: Session = Dep
         raise HTTPException(status_code=400, detail=f"Unknown provider: {req.provider}")
     SystemSetting.set(db, SystemSetting.KEY_DEFAULT_LLM_PROVIDER, provider)
     return {"status": "ok", "default_provider": provider}
+
+
+# ─── RAG Embedding 设置（本地 / 在线切换）────────────────
+
+def _mask_key(key: str) -> str:
+    if not key:
+        return ""
+    return key[:6] + "..." + key[-4:] if len(key) > 12 else "***"
+
+
+@router.get("/rag")
+async def get_rag_settings(db: Session = Depends(get_db)):
+    """读取 RAG embedding 设置（api_key 只返回是否已配置与掩码）"""
+    mode = SystemSetting.get(db, SystemSetting.KEY_RAG_EMBEDDING_MODE, "local") or "local"
+    base_url = SystemSetting.get(db, SystemSetting.KEY_RAG_ONLINE_BASE_URL, "")
+    api_key = SystemSetting.get(db, SystemSetting.KEY_RAG_ONLINE_API_KEY, "")
+    model = SystemSetting.get(db, SystemSetting.KEY_RAG_ONLINE_MODEL, "")
+    return {
+        "mode": mode,
+        "base_url": base_url,
+        "api_key_masked": _mask_key(api_key),
+        "has_api_key": bool(api_key),
+        "model": model,
+    }
+
+
+@router.put("/rag")
+async def update_rag_settings(req: RagSettingsUpdate, db: Session = Depends(get_db)):
+    """更新 RAG embedding 设置。
+
+    - mode: "local" | "online"
+    - api_key 传空字符串表示清空；不传则该字段保持不变
+    """
+    if req.mode is not None:
+        mode = req.mode.strip().lower()
+        if mode not in ("local", "online"):
+            raise HTTPException(status_code=400, detail="mode 必须是 local 或 online")
+        SystemSetting.set(db, SystemSetting.KEY_RAG_EMBEDDING_MODE, mode)
+    if req.base_url is not None:
+        SystemSetting.set(db, SystemSetting.KEY_RAG_ONLINE_BASE_URL, req.base_url.strip())
+    if req.model is not None:
+        SystemSetting.set(db, SystemSetting.KEY_RAG_ONLINE_MODEL, req.model.strip())
+    if req.api_key is not None:
+        SystemSetting.set(db, SystemSetting.KEY_RAG_ONLINE_API_KEY, req.api_key.strip())
+
+    return {"status": "ok", "settings": await get_rag_settings(db)}
+
+
+@router.post("/rag/test")
+async def test_rag_settings(req: RagTestRequest, db: Session = Depends(get_db)):
+    """测试 embedding 是否可用；不传字段则用已保存的值。"""
+    mode = (req.mode or SystemSetting.get(db, SystemSetting.KEY_RAG_EMBEDDING_MODE, "local") or "local").lower()
+
+    if mode == "online":
+        base_url = req.base_url if req.base_url is not None else SystemSetting.get(db, SystemSetting.KEY_RAG_ONLINE_BASE_URL, "")
+        api_key = req.api_key if req.api_key is not None else SystemSetting.get(db, SystemSetting.KEY_RAG_ONLINE_API_KEY, "")
+        model = req.model if req.model is not None else SystemSetting.get(db, SystemSetting.KEY_RAG_ONLINE_MODEL, "")
+        if not api_key or not model:
+            return {"ok": False, "mode": "online", "message": "请先填写在线 embedding 的 API Key 与模型名"}
+        try:
+            from rag.online_embedder import OnlineEmbedder
+            embedder = OnlineEmbedder(base_url=base_url, api_key=api_key, model=model)
+            info = embedder.test()
+            return {"ok": True, "mode": "online", "message": f"连接成功（维度 {info['dimension']}）", "dimension": info["dimension"], "model": model}
+        except Exception as e:
+            return {"ok": False, "mode": "online", "message": f"连接失败: {e}"}
+
+    # local
+    try:
+        import importlib.util
+        from rag.model_manager import ModelManager
+        mgr = ModelManager()
+        if importlib.util.find_spec("sentence_transformers") is None:
+            return {"ok": False, "mode": "local", "message": "未安装 sentence-transformers，请运行 tools/install_rag_cpu 脚本"}
+        if not mgr.is_model_downloaded():
+            return {"ok": False, "mode": "local", "message": "本地 embedding 模型未下载，请在模型管理里下载 moka-ai/m3e-base"}
+        from rag.embedder import LocalEmbedder
+        vec = LocalEmbedder().embed_single("CozyWriter RAG 连通性测试")
+        return {"ok": True, "mode": "local", "message": f"本地模型可用（维度 {len(vec)}）", "dimension": len(vec), "model": mgr.model_name}
+    except Exception as e:
+        return {"ok": False, "mode": "local", "message": f"本地模型不可用: {e}"}
+
+
+@router.post("/rag/reset")
+async def reset_rag_collections():
+    """清空 RAG 向量库。
+
+    切换 embedding 模式/模型后向量维度会变化，旧向量无法混用，需要重置；
+    下次写入时会自动重建空 collection。
+    """
+    try:
+        from rag.knowledge_base import KnowledgeBase
+        deleted = KnowledgeBase.reset_all_collections()
+        return {"status": "ok", "deleted": deleted}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"重置失败: {e}")

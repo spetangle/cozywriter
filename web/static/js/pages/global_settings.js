@@ -16,8 +16,18 @@ Alpine.data('globalSettings', () => ({
     globalTokenUsageLoading: false,
     selectedTab: 'providers',
 
+    // ─── RAG embedding（本地 CPU / 在线 API 切换）───
+    ragSettings: { mode: 'local', base_url: '', api_key: '', model: '' },
+    ragHasApiKey: false,
+    ragApiKeyMasked: '',
+    ragLoading: false,
+    ragSaving: false,
+    ragTesting: false,
+    ragTestResult: null,
+
     tabs: [
         { id: 'providers', label: '服务商', icon: '🔌' },
+        { id: 'rag', label: 'RAG 向量', icon: '🧠' },
         { id: 'token-usage', label: '用量统计', icon: '📊' },
         { id: 'about', label: '关于', icon: 'ℹ️' },
     ],
@@ -25,6 +35,104 @@ Alpine.data('globalSettings', () => ({
     init() {
         this.loadProviders();
         this.loadGlobalTokenUsage();
+        this.loadRagSettings();
+    },
+
+    async loadRagSettings() {
+        this.ragLoading = true;
+        try {
+            const res = await fetch('/api/config/rag');
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            this.ragSettings.mode = data.mode || 'local';
+            this.ragSettings.base_url = data.base_url || '';
+            this.ragSettings.model = data.model || '';
+            this.ragSettings.api_key = '';
+            this.ragHasApiKey = !!data.has_api_key;
+            this.ragApiKeyMasked = data.api_key_masked || '';
+        } catch (e) {
+            console.error('加载 RAG 设置失败:', e);
+        } finally {
+            this.ragLoading = false;
+        }
+    },
+
+    async saveRagSettings() {
+        this.ragSaving = true;
+        try {
+            const payload = {
+                mode: this.ragSettings.mode,
+                base_url: this.ragSettings.base_url,
+                model: this.ragSettings.model,
+            };
+            // 只在用户输入了新 key 时才更新，避免把掩码/空值写回
+            if (this.ragSettings.api_key) payload.api_key = this.ragSettings.api_key;
+            const res = await fetch('/api/config/rag', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            Alpine.store('app').toast('RAG 设置已保存', 'success');
+            await this.loadRagSettings();
+        } catch (e) {
+            Alpine.store('app').toast('保存 RAG 设置失败: ' + e.message, 'error');
+        } finally {
+            this.ragSaving = false;
+        }
+    },
+
+    async clearRagApiKey() {
+        if (!confirm('确定清空在线 embedding 的 API Key？')) return;
+        this.ragSaving = true;
+        try {
+            const res = await fetch('/api/config/rag', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ api_key: '' }),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            Alpine.store('app').toast('已清空 API Key', 'success');
+            await this.loadRagSettings();
+        } catch (e) {
+            Alpine.store('app').toast('清空失败: ' + e.message, 'error');
+        } finally {
+            this.ragSaving = false;
+        }
+    },
+
+    async testRag() {
+        this.ragTesting = true;
+        this.ragTestResult = null;
+        try {
+            const payload = {
+                mode: this.ragSettings.mode,
+                base_url: this.ragSettings.base_url,
+                model: this.ragSettings.model,
+            };
+            if (this.ragSettings.api_key) payload.api_key = this.ragSettings.api_key;
+            const res = await fetch('/api/config/rag/test', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            this.ragTestResult = await res.json();
+        } catch (e) {
+            this.ragTestResult = { ok: false, message: '请求失败: ' + e.message };
+        } finally {
+            this.ragTesting = false;
+        }
+    },
+
+    async resetRag() {
+        if (!confirm('切换 embedding 模式/模型后向量维度会变化，需要清空旧向量库。确定重置吗？')) return;
+        try {
+            const res = await fetch('/api/config/rag/reset', { method: 'POST' });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            Alpine.store('app').toast('RAG 向量库已重置，将按新模型重建', 'success');
+        } catch (e) {
+            Alpine.store('app').toast('重置失败: ' + e.message, 'error');
+        }
     },
 
     async loadProviders() {
@@ -424,6 +532,63 @@ window.registerPageTemplate?.('global_settings', `
                 <span x-show="providerSaving">⏳ 创建中...</span>
               </button>
             </div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- RAG 向量模型（本地 / 在线切换） -->
+  <div x-show="selectedTab === 'rag'" class="settings-content">
+    <div class="settings-section">
+      <h2>🧠 RAG 向量模型</h2>
+      <p class="empty-hint">
+        RAG 用于事件去重 / 相似章节检索 / 评审上下文。可选用本地 CPU 模型，或在线 embedding API。
+        切换模式或模型后向量维度会变化，需要点「重置向量库」。
+      </p>
+
+      <template x-if="ragLoading"><p>⏳ 加载中...</p></template>
+      <template x-if="!ragLoading">
+        <div class="rag-settings-form">
+          <label>模式
+            <select x-model="ragSettings.mode">
+              <option value="local">本地 CPU 模型（sentence-transformers）</option>
+              <option value="online">在线 Embedding API（OpenAI 兼容）</option>
+            </select>
+          </label>
+
+          <template x-if="ragSettings.mode === 'local'">
+            <div class="rag-local-hint">
+              <p>本地模型：<code>moka-ai/m3e-base</code>（约 400MB，CPU 运行）</p>
+              <p>依赖安装：运行 <code>tools/install_rag_cpu</code> 脚本；模型可在「模型管理」下载。</p>
+            </div>
+          </template>
+
+          <template x-if="ragSettings.mode === 'online'">
+            <div class="rag-online-fields">
+              <label>Base URL
+                <input type="text" x-model="ragSettings.base_url" placeholder="如 https://api.openai.com/v1">
+              </label>
+              <label>模型名
+                <input type="text" x-model="ragSettings.model" placeholder="如 text-embedding-3-small">
+              </label>
+              <label>API Key
+                <input type="password" x-model="ragSettings.api_key"
+                       :placeholder="ragHasApiKey ? ('已配置：' + ragApiKeyMasked + '（留空不修改）') : '尚未配置'">
+              </label>
+              <button class="btn-secondary" @click="clearRagApiKey()" :disabled="!ragHasApiKey">清空 Key</button>
+            </div>
+          </template>
+
+          <div class="rag-actions">
+            <button class="btn-primary" @click="saveRagSettings()" :disabled="ragSaving">💾 保存</button>
+            <button class="btn-secondary" @click="testRag()" :disabled="ragTesting">🔍 测试连接</button>
+            <button class="btn-secondary" @click="resetRag()">♻️ 重置向量库</button>
+          </div>
+
+          <div class="rag-test-result" x-show="ragTestResult"
+               :style="{ color: ragTestResult && ragTestResult.ok ? '#2e7d32' : '#c62828' }">
+            <span x-text="ragTestResult ? (ragTestResult.ok ? '✅ ' : '❌ ') + ragTestResult.message : ''"></span>
           </div>
         </div>
       </template>

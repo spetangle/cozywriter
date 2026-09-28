@@ -31,6 +31,8 @@ Windows 用 `run.bat` / `run.ps1`，Python 为 `.venv\Scripts\python.exe`。
 .venv/bin/python tests/test_outline_normalize.py    # 大纲章节号字段归一化
 .venv/bin/python tests/test_clear_project_data.py   # 旧库项目数据清理（保留系统配置）
 .venv/bin/python tests/test_requirements_split.py   # 核心依赖 / RAG 依赖拆分
+.venv/bin/python tests/test_rag_cpu.py             # RAG 强制 CPU / 缺库提示
+.venv/bin/python tests/test_rag_online.py          # RAG 本地/在线切换
 node tests/test_spa_components.js                  # SPA 模板 / 组件装配
 ```
 
@@ -54,7 +56,7 @@ node tests/test_spa_components.js                  # SPA 模板 / 组件装配
 - LLM 完整 prompt/response 默认写日志（`LOG_LLM_PAYLOAD=1` → `data/logs/cozywriter_YYYYMMDD.log`）。排查 LLM 问题直接 grep 该文件；勿让密钥落日志。
 - DeepSeek 某些模型 JSON 模式会返回空响应：provider 已内置降级重试，仍不稳定时在「全局设置 → 服务商」把该服务商的「JSON 输出模式」设为强制关闭。详见 `docs/deepseek_json_mode.md`。
 - 清理旧库项目数据（保留 providers/system_settings/超参/自定义题材）：`python tools/clear_project_data.py --dry-run` 预览，`--yes` 执行（自动备份到 `data/backups/`，可选 `--clear-rag`）。
-- RAG 依赖是可选的：`requirements.txt` 不含 `sentence-transformers`（会连带安装 torch / nvidia-*）；需要 RAG 时 `pip install -r requirements-rag.txt`，纯 CPU 先装 `torch --index-url https://download.pytorch.org/whl/cpu`。详见 `docs/rag_setup.md`。
+- RAG 依赖是可选的：`requirements.txt` 不含 `sentence-transformers`（会连带安装 torch / nvidia-*）；推荐用 CPU 版一键脚本 `tools/install_rag_cpu.sh`（Windows：`tools/install_rag_cpu.ps1` / `.bat`），应用加载模型时强制 `device="cpu"`。RAG 支持本地/在线切换：`GET/PUT /api/config/rag`、`POST /api/config/rag/test`、`POST /api/config/rag/reset`；前端在「全局设置 → RAG 向量」。详见 `docs/rag_setup.md`。
 - 改动 ORM 列时，除 model 外还要考虑 `migrate.py` / `storage/migrations/`，否则老库会缺列。
 - 项目文件为 UTF-8 无 BOM；PowerShell 写文件用 `UTF8Encoding($false)`。Windows 控制台默认 GBK，读中文接口先设 `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`。
 - 样式集中在 `web/static/css/style.css`（~5900 行）；新增 UI 前先 grep 复用已有类名，别另造一套。

@@ -151,14 +151,17 @@ RAG 依赖本地模型 `moka-ai/m3e-base`（约 400MB），并且需要额外安
 **核心依赖 `requirements.txt` 不包含它**，所以：
 
 - 不装：主流程写作完全正常，只是事件去重与相似度检索会跳过，项目页显示「⚠️ RAG 未启用」；
-- 要装：`pip install -r requirements-rag.txt`。
+- 本地 CPU：运行一键脚本（避免 `nvidia-*` CUDA 包）
+  ```bash
+  ./tools/install_rag_cpu.sh          # Linux / macOS
+  .\tools\install_rag_cpu.ps1         # Windows PowerShell
+  tools\install_rag_cpu.bat           # Windows CMD
+  ```
+- 在线 embedding：在「全局设置 → RAG 向量」里把模式切到“在线 Embedding API”，填 OpenAI 兼容的
+  Base URL / 模型名 / API Key（如 `https://api.openai.com/v1` + `text-embedding-3-small`）。
 
-> ⚠️ `sentence-transformers` 会连带安装 `torch`。Linux x86_64 上 `torch` 默认带 CUDA 依赖
-> （`nvidia-*` 包，体积可达数 GB）。只用 CPU 时建议先装 CPU 版 torch：
-> ```bash
-> pip install torch --index-url https://download.pytorch.org/whl/cpu
-> pip install -r requirements-rag.txt
-> ```
+> 应用加载本地模型时已强制 `device="cpu"`。
+> 切换本地/在线或更换模型后向量维度会变化，需要点「♻️ 重置向量库」重建。
 
 启用方式与离线安装见 **`docs/rag_setup.md`**。模型目录：
 
