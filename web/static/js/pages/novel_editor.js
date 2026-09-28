@@ -53,6 +53,7 @@ Alpine.data('novelEditor', () => ({
     inspirations: [],
 
     showPipelineSetup: false,
+    pipelineSetupChapter: 1,
     showBatchGenerate: false,
     showExportModal: false,
     exportFormat: 'txt',
@@ -483,11 +484,49 @@ Alpine.data('novelEditor', () => ({
     },
 
     async pipelineSetupSetupModal() {
+        // 默认目标章节 = 当前章节的下一章；无当前章节则从第 1 章开始
+        if (this.currentChapter) {
+            this.pipelineSetupChapter = this.currentChapter.order + 2;
+        } else {
+            this.pipelineSetupChapter = this.chapters.length + 1;
+        }
+        this.generatePrompt = '';
         this.showPipelineSetup = true;
     },
 
     async startPipelineGuide(guide) {
+        const target = parseInt(this.pipelineSetupChapter, 10) || 0;
+        if (target < 1) {
+            Alpine.store('app').toast('请输入有效的章节序号', 'warning');
+            return;
+        }
         this.showPipelineSetup = false;
+        const order = target - 1;
+        const existing = this.chapters.find((c) => c.order === order);
+        if (existing && (existing.content || '').trim().length > 0) {
+            if (!confirm(`第 ${target} 章《${existing.title}》已有正文（${existing.word_count || 0} 字），重新生成会覆盖它，确定继续？`)) return;
+        }
+        if (existing) {
+            await this.selectChapter(existing);
+        } else {
+            try {
+                console.log('[Pipeline] 创建章节', target);
+                const res = await fetch(`/api/projects/${this.project.id}/chapters`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title: `第${target}章`, order, project_id: this.project.id }),
+                });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const ch = await res.json();
+                this.chapters.push(ch);
+                this.chapters.sort((a, b) => a.order - b.order);
+                await this.selectChapter(ch);
+            } catch (e) {
+                console.error('[Pipeline] 创建章节失败', e);
+                Alpine.store('app').toast('创建章节失败: ' + e.message, 'error');
+                return;
+            }
+        }
         await this.runChapterPipeline(guide);
     },
 
@@ -572,10 +611,10 @@ Alpine.data('novelEditor', () => ({
     closePipelinePanel(navigateToChapter) {
         const taskDone = !this.pipelineTask
             || ['completed', 'failed', 'cancelled'].includes(this.pipelineTask.status);
-        if (!taskDone && this.pipelinePollHandle) {
-            if (!confirm('流水线还在运行中，确认关闭此面板？（不会停止后台任务）')) return;
-        }
-        if (this.pipelinePollHandle) {
+        if (!taskDone) {
+            // 后台继续跑，只隐藏面板；保持轮询，完成后自动刷新章节
+            if (!confirm('流水线还在运行中，关闭此面板？\n（后台会继续生成，完成后自动刷新章节内容）')) return;
+        } else if (this.pipelinePollHandle) {
             clearInterval(this.pipelinePollHandle);
             this.pipelinePollHandle = null;
         }
@@ -629,6 +668,16 @@ Alpine.data('novelEditor', () => ({
 
     get pipelineProgressPct() {
         return (this.pipelineTask && this.pipelineTask.result && this.pipelineTask.result.progress_pct) || 0;
+    },
+
+    get pipelineRunning() {
+        return !!this.pipelineTask && ['pending', 'running'].includes(this.pipelineTask.status);
+    },
+
+    get pipelineCurrentStageLabel() {
+        const stages = (this.pipelineTask && this.pipelineTask.result && this.pipelineTask.result.stages) || {};
+        const running = Object.keys(stages).find((k) => stages[k].status === 'running');
+        return running ? (stages[running].label || this.getStageLabel(running)) : '准备中';
     },
 
     get pipelineStatus() {
@@ -2586,7 +2635,8 @@ window.registerPageTemplate?.('novel_editor', `
           <span>📊 Token：输入 <strong x-text="tokenUsage.input_tokens || tokenUsage.prompt_tokens || 0"></strong> / 输出 <strong x-text="tokenUsage.output_tokens || tokenUsage.completion_tokens || 0"></strong></span>
         </template>
         <span x-show="batchGenerating">⏳ 批量生成中...</span>
-        <span x-show="pipelineTask && ['pending','running'].includes(pipelineTask.status)">⏳ 单章生成中...</span>
+        <button class="footer-task-btn" x-show="pipelineRunning" @click="showPipelineProgress = true"
+                x-text="'⏳ 单章生成中 ' + pipelineProgressPct + '% · ' + pipelineCurrentStageLabel"></button>
       </footer>
 
       <!-- ═══ Pipeline 单章生成弹窗 ═══ -->
@@ -2595,10 +2645,14 @@ window.registerPageTemplate?.('novel_editor', `
           <div class="modal">
             <button class="modal-close-x" @click="showPipelineSetup = false">×</button>
             <h2>🚀 单章生成</h2>
-            <p>将为当前章节《<strong x-text="currentChapter?.title"></strong>》启动生成流水线</p>
+            <label>目标章节序号
+              <input type="number" x-model.number="pipelineSetupChapter" min="1" placeholder="1">
+              <span class="field-hint">默认 = 当前章节的下一章（不存在会自动创建）</span>
+            </label>
             <label>生成引导（可选）
               <textarea x-model="generatePrompt" rows="4" placeholder="描述本章希望的方向、情节..."></textarea>
             </label>
+            <p class="field-hint">⚠️ 将执行完整 9 步流水线（细纲/正文/评审/修订/后处理），每步调用一次 LLM，通常需要 5~10 分钟，请耐心等待进度完成。</p>
             <div class="form-footer">
               <button class="btn-secondary" @click="showPipelineSetup = false">取消</button>
               <button class="btn-primary" @click="startPipelineGuide(generatePrompt)">🚀 开始生成</button>
@@ -2676,6 +2730,18 @@ window.registerPageTemplate?.('novel_editor', `
               <button class="btn-primary" @click="startBatchGenerate()">🚀 开始批量生成</button>
             </div>
           </div>
+        </div>
+      </template>
+
+      <!-- ═══ 单章生成进度（浮动，右下角；关闭弹窗后仍可见） ═══ -->
+      <template x-if="pipelineRunning && !showPipelineProgress">
+        <div class="pipeline-floating" @click="showPipelineProgress = true" title="点击查看详细进度">
+          <div class="pf-head">
+            <span>⏳ 单章生成中</span>
+            <span x-text="pipelineProgressPct + '%'"></span>
+          </div>
+          <div class="progress-bar"><div class="progress-fill" :style="'width: ' + pipelineProgressPct + '%'"></div></div>
+          <div class="pf-stage" x-text="pipelineCurrentStageLabel + ' · 已用 ' + pipelineElapsedText"></div>
         </div>
       </template>
 

@@ -6186,3 +6186,32 @@ color: #92400e;
 
 /* ─── 表单提示文字（占一行） ─── */
 .field-hint { display: block; width: 100%; margin-top: 4px; font-size: 12px; color: var(--text-muted); font-weight: 400; }
+
+/* 单章生成浮动进度（关闭弹窗后仍可见） */
+.pipeline-floating {
+  position: fixed;
+  bottom: 60px;
+  right: 20px;
+  width: 280px;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.15);
+  cursor: pointer;
+  z-index: 9999;
+  font-size: 12px;
+}
+.pipeline-floating:hover { border-color: var(--primary); }
+.pf-head { display: flex; justify-content: space-between; font-weight: 600; margin-bottom: 6px; }
+.pipeline-floating .progress-bar { height: 6px; }
+.pf-stage { margin-top: 6px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.footer-task-btn {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--primary);
+  cursor: pointer;
+  font-size: inherit;
+  text-decoration: underline;
+}
