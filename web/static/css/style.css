@@ -5614,11 +5614,14 @@ color: #92400e;
   gap: 4px;
   font-size: 13px;
 }
-.provider-edit-form input {
+.provider-edit-form input,
+.provider-edit-form select {
   padding: 7px 10px;
   border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 14px;
+  background: var(--bg);
+  color: inherit;
 }
 .model-picker {
   background: var(--surface);

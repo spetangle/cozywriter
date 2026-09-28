@@ -57,6 +57,7 @@ class LLMFactory:
             provider_key = (provider or settings.default_llm_provider or "").strip().lower()
 
             config_kwargs = {}
+            db_json_output = None
             if _db is not None and provider_key:
                 from storage.models.provider import Provider
 
@@ -68,6 +69,8 @@ class LLMFactory:
                         config_kwargs["base_url"] = p.base_url
                     if p.model:
                         config_kwargs["model"] = p.model
+                    # 每个服务商可单独覆盖 JSON 模式（NULL 表示用 provider 默认）。
+                    db_json_output = p.use_json_output
 
             # opencode 需显式开启：DB 里配好 api_key 即视为已开启，
             # 也兼容 .env 的 OPENCODE_ENABLED（用于无 DB 配置的场景）。
@@ -89,6 +92,17 @@ class LLMFactory:
                     f"Unknown provider: '{provider or settings.default_llm_provider}'. "
                     f"Available: {available}"
                 )
+
+            # 仅当 provider 构造函数支持 use_json_output 且调用方未显式指定时才透传，
+            # 避免给不支持的 provider 传入未知参数。
+            if (
+                db_json_output is not None
+                and "use_json_output" not in kwargs
+            ):
+                import inspect
+
+                if "use_json_output" in inspect.signature(provider_cls.__init__).parameters:
+                    config_kwargs["use_json_output"] = db_json_output
 
             return provider_cls(**config_kwargs)
         finally:

@@ -26,6 +26,7 @@ Windows 用 `run.bat` / `run.ps1`，Python 为 `.venv\Scripts\python.exe`。
 .venv/bin/python tests/test_migrate_project_ids.py # int→hex 项目 ID 迁移（保留列/外键）
 .venv/bin/python tests/test_system_smoke.py        # 系统级 API 冒烟（项目/章节/剧本/导出等）
 .venv/bin/python tests/test_word_adjust.py          # 字数收敛 / opencode provider
+.venv/bin/python tests/test_deepseek_json_fallback.py # DeepSeek JSON 空响应降级 / JSON 开关
 .venv/bin/python tests/test_outline_normalize.py    # 大纲章节号字段归一化
 node tests/test_spa_components.js                  # SPA 模板 / 组件装配
 ```
@@ -48,6 +49,7 @@ node tests/test_spa_components.js                  # SPA 模板 / 组件装配
 - 数据库全程同步 SQLAlchemy Session（SQLite，`check_same_thread=False`），无 async ORM。
 - 改前端 JS 后必须把 `web/index.html` 里对应脚本的 `?v=N` 版本号 +1，否则浏览器缓存不刷新。
 - LLM 完整 prompt/response 默认写日志（`LOG_LLM_PAYLOAD=1` → `data/logs/cozywriter_YYYYMMDD.log`）。排查 LLM 问题直接 grep 该文件；勿让密钥落日志。
+- DeepSeek 某些模型 JSON 模式会返回空响应：provider 已内置降级重试，仍不稳定时在「全局设置 → 服务商」把该服务商的「JSON 输出模式」设为强制关闭。详见 `docs/deepseek_json_mode.md`。
 - 改动 ORM 列时，除 model 外还要考虑 `migrate.py` / `storage/migrations/`，否则老库会缺列。
 - 项目文件为 UTF-8 无 BOM；PowerShell 写文件用 `UTF8Encoding($false)`。Windows 控制台默认 GBK，读中文接口先设 `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`。
 - 样式集中在 `web/static/css/style.css`（~5900 行）；新增 UI 前先 grep 复用已有类名，别另造一套。

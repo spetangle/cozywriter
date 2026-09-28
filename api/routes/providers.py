@@ -19,6 +19,7 @@ class ProviderCreate(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     model: str | None = None
+    use_json_output: bool | None = None
     set_as_default: bool = False
 
 
@@ -27,6 +28,8 @@ class ProviderUpdate(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     model: str | None = None
+    # 显式传 null 表示恢复“按 provider 默认”。
+    use_json_output: bool | None = None
 
 
 class SetDefaultRequest(BaseModel):
@@ -179,6 +182,7 @@ def create_provider(body: ProviderCreate, db: Session = Depends(get_db)):
         api_key=body.api_key or "",
         base_url=body.base_url or "",
         model=body.model or "",
+        use_json_output=body.use_json_output,
         is_default=False,
     )
     db.add(p)
@@ -205,6 +209,9 @@ def update_provider(provider_id: str, body: ProviderUpdate, db: Session = Depend
         p.base_url = body.base_url
     if body.model is not None:
         p.model = body.model
+    # use_json_output：显式传入（含 null）才更新，未传则保持不变。
+    if "use_json_output" in body.model_fields_set:
+        p.use_json_output = body.use_json_output
     db.commit()
     db.refresh(p)
     return p.to_dict()

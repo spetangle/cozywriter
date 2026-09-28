@@ -49,6 +49,15 @@ class DeepSeekProvider(LLMProvider):
     CONTEXT_WINDOW = 128_000
     USE_JSON_OUTPUT = True
     MIN_BALANCE_WARNING = 10.0
+    # JSON 模式返回空响应时，降级重试的 max_tokens 下限。
+    JSON_MIN_MAX_TOKENS = 512
+
+    # 降级重试时追加的强约束（部分模型/端点对 response_format 兼容性差，
+    # 去掉 response_format 后需要靠 prompt 强制输出 JSON）。
+    JSON_RETRY_HINT = (
+        "上一次回复没有返回任何内容。请只输出合法的 JSON："
+        "以 { 开头、以 } 结尾，不要输出任何解释、思考过程或 markdown 代码块。"
+    )
 
     SUPPORTED_MODELS = [
         "deepseek-chat",
@@ -247,6 +256,10 @@ class DeepSeekProvider(LLMProvider):
             f"prompt_chars={len(prompt)} prompt={prompt_preview!r}"
         )
         t0 = time.time()
+        fallback_used = False
+        first_finish_reason = None
+        first_usage = None
+        response_format_used = use_json
         try:
             kwargs_for_api = {
                 "model": self.model,
@@ -265,25 +278,46 @@ class DeepSeekProvider(LLMProvider):
             text = response.choices[0].message.content or ""
             finish_reason = response.choices[0].finish_reason
 
-            # 如果 JSON 模式返回空响应，自动降级重试一次（不用 response_format）
+            # 如果 JSON 模式返回空响应，自动降级重试一次（不用 response_format）。
+            # 重试时追加“必须输出 JSON”的强约束并抬高 max_tokens 下限，
+            # 避免去掉 schema 后模型因缺少引导而继续返回空串。
             if use_json and not text.strip():
+                first_finish_reason = finish_reason
+                first_usage = response.usage.model_dump() if response.usage else None
+                fallback_used = True
+                requested_max_tokens = kwargs_for_api.get("max_tokens") or 0
+                retry_max_tokens = max(
+                    int(requested_max_tokens), self.JSON_MIN_MAX_TOKENS
+                )
                 logger.warning(
-                    f"[LLM:deepseek] JSON模式返回空响应，降级为纯文本重试... "
-                    f"model={self.model} prompt_chars={len(prompt)}"
+                    f"[LLM:deepseek] JSON模式返回空响应，降级重试 "
+                    f"(追加 JSON 约束, max_tokens {requested_max_tokens}→{retry_max_tokens}) "
+                    f"model={self.model} finish_reason={finish_reason} "
+                    f"prompt_chars={len(prompt)}"
                 )
                 kwargs_for_api_fallback = {
                     k: v for k, v in kwargs_for_api.items()
                     if k != "response_format"
                 }
-                t1 = time.time()
+                kwargs_for_api_fallback["max_tokens"] = retry_max_tokens
+                kwargs_for_api_fallback["messages"] = messages + [
+                    {"role": "user", "content": self.JSON_RETRY_HINT}
+                ]
                 response = client.chat.completions.create(**kwargs_for_api_fallback)
                 duration_ms = (time.time() - t0) * 1000  # 累计耗时
                 text = response.choices[0].message.content or ""
                 finish_reason = response.choices[0].finish_reason
+                response_format_used = False
                 logger.info(
                     f"[LLM:deepseek] ← fallback(no-json) {self.model} duration={duration_ms:.0f}ms "
-                    f"chars={len(text)}"
+                    f"chars={len(text)} finish_reason={finish_reason}"
                 )
+                if not text.strip():
+                    logger.error(
+                        f"[LLM:deepseek] 降级重试后仍为空响应 "
+                        f"(finish_reason={finish_reason}, max_tokens={retry_max_tokens}, "
+                        f"first_finish_reason={first_finish_reason})"
+                    )
             response_preview = text if len(text) <= 300 else text[:300] + "..."
             response_preview_oneline = " ".join(response_preview.split())
             logger.info(
@@ -304,7 +338,11 @@ class DeepSeekProvider(LLMProvider):
                     "usage": (
                         response.usage.model_dump() if response.usage else None
                     ),
-                    "response_format": "json_object" if use_json else None,
+                    "response_format": "json_object" if response_format_used else None,
+                    "json_fallback": fallback_used,
+                    "first_finish_reason": first_finish_reason,
+                    "first_usage": first_usage,
+                    "empty_response": not text.strip(),
                 },
             )
             usage = extract_usage_from_openai_response(response)
@@ -358,6 +396,8 @@ class DeepSeekProvider(LLMProvider):
             f"prompt_chars={len(prompt)} prompt={prompt_preview!r}"
         )
         t0 = time.time()
+        fallback_used = False
+        first_stop_reason = None
         try:
             create_kwargs = {
                 "model": self.model,
@@ -390,6 +430,37 @@ class DeepSeekProvider(LLMProvider):
                 )
 
             text = "".join(parts)
+
+            # Anthropic 协议下 JSON 靠 prompt 约束，返回空内容时同样降级重试：
+            # 追加强约束并抬高 max_tokens 下限。
+            if use_json and not text.strip():
+                first_stop_reason = getattr(response, "stop_reason", None)
+                retry_max_tokens = max(int(max_tokens or 0), self.JSON_MIN_MAX_TOKENS)
+                logger.warning(
+                    f"[LLM:deepseek] Anthropic JSON 返回空内容，降级重试 "
+                    f"(追加 JSON 约束, max_tokens {max_tokens}→{retry_max_tokens}) "
+                    f"model={self.model} stop_reason={first_stop_reason}"
+                )
+                retry_kwargs = dict(create_kwargs)
+                retry_kwargs["max_tokens"] = retry_max_tokens
+                retry_kwargs["messages"] = list(messages) + [
+                    {"role": "user", "content": self.JSON_RETRY_HINT}
+                ]
+                response = client.messages.create(**retry_kwargs)
+                parts = [
+                    getattr(b, "text", "") or ""
+                    for b in (response.content or [])
+                    if getattr(b, "type", None) == "text"
+                ]
+                text = "".join(parts)
+                fallback_used = True
+                if not text.strip():
+                    logger.error(
+                        f"[LLM:deepseek] Anthropic JSON 降级重试后仍为空 "
+                        f"(stop_reason={getattr(response, 'stop_reason', None)}, "
+                        f"max_tokens={retry_max_tokens})"
+                    )
+
             duration_ms = (time.time() - t0) * 1000
             response_preview = text if len(text) <= 300 else text[:300] + "..."
             response_preview_oneline = " ".join(response_preview.split())
@@ -410,6 +481,9 @@ class DeepSeekProvider(LLMProvider):
                     "stop_reason": getattr(response, "stop_reason", None),
                     "input_tokens": getattr(getattr(response, "usage", None), "input_tokens", None),
                     "output_tokens": getattr(getattr(response, "usage", None), "output_tokens", None),
+                    "json_fallback": fallback_used,
+                    "first_stop_reason": first_stop_reason,
+                    "empty_response": not text.strip(),
                 },
             )
             usage = extract_usage_from_anthropic_response(response)

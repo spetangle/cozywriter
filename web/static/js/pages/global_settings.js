@@ -4,7 +4,7 @@ Alpine.data('globalSettings', () => ({
     saving: false,
     providers: [],
     editingProvider: null,
-    providerForm: { id: '', name: '', api_key: '', base_url: '', model: '' },
+    providerForm: { id: '', name: '', api_key: '', base_url: '', model: '', use_json_output: 'auto' },
     showAddProvider: false,
     providerSaving: false,
     testProviderLoading: {},
@@ -81,6 +81,8 @@ Alpine.data('globalSettings', () => ({
             api_key: '',
             base_url: provider.base_url || '',
             model: provider.model || '',
+            use_json_output: (provider.use_json_output === true) ? 'true'
+                : (provider.use_json_output === false) ? 'false' : 'auto',
         };
         this.availableModels = [];
         this.showModelPicker = false;
@@ -88,7 +90,7 @@ Alpine.data('globalSettings', () => ({
 
     cancelEditProvider() {
         this.editingProvider = null;
-        this.providerForm = { id: '', name: '', api_key: '', base_url: '', model: '' };
+        this.providerForm = { id: '', name: '', api_key: '', base_url: '', model: '', use_json_output: 'auto' };
         this.availableModels = [];
         this.showModelPicker = false;
     },
@@ -103,6 +105,9 @@ Alpine.data('globalSettings', () => ({
             if (this.providerForm.api_key) body.api_key = this.providerForm.api_key;
             if (this.providerForm.base_url !== undefined) body.base_url = this.providerForm.base_url;
             if (this.providerForm.model !== undefined) body.model = this.providerForm.model;
+            // 'auto' → null（按 provider 默认），'true'/'false' → 显式开关
+            body.use_json_output = this.providerForm.use_json_output === 'true' ? true
+                : this.providerForm.use_json_output === 'false' ? false : null;
 
             const res = await fetch(`/api/providers/${pid}`, {
                 method: 'PUT',
@@ -163,14 +168,14 @@ Alpine.data('globalSettings', () => ({
 
     startAddProvider() {
         this.showAddProvider = true;
-        this.providerForm = { id: '', name: '', api_key: '', base_url: '', model: '' };
+        this.providerForm = { id: '', name: '', api_key: '', base_url: '', model: '', use_json_output: 'auto' };
         this.availableModels = [];
         this.showModelPicker = false;
     },
 
     cancelAddProvider() {
         this.showAddProvider = false;
-        this.providerForm = { id: '', name: '', api_key: '', base_url: '', model: '' };
+        this.providerForm = { id: '', name: '', api_key: '', base_url: '', model: '', use_json_output: 'auto' };
     },
 
     async createProvider() {
@@ -343,6 +348,16 @@ window.registerPageTemplate?.('global_settings', `
                 <label>模型
                   <input type="text" x-model="providerForm.model" placeholder="模型 ID">
                 </label>
+                <label>JSON 输出模式
+                  <select x-model="providerForm.use_json_output">
+                    <option value="auto">跟随服务商默认</option>
+                    <option value="true">强制开启（response_format=json_object）</option>
+                    <option value="false">强制关闭（部分模型兼容性差时选择）</option>
+                  </select>
+                </label>
+                <p class="hint" x-show="providerForm.use_json_output === 'false'">
+                  关闭后任务仍要求 JSON，但不再传 response_format；部分 DeepSeek 模型返回空响应时可尝试此项。
+                </p>
                 <div class="form-actions">
                   <button class="btn-secondary" @click="fetchAvailableModels(true)" :disabled="loadingModels">
                     <span x-show="!loadingModels">📦 获取模型列表</span>

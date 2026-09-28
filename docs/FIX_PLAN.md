@@ -65,7 +65,7 @@
 - [x] 6.2 `run_quick_consistency_check` 按模板传参（`content` 走 user，修复一致性检查空转）
 - [x] 6.3 `adjust_word_count` 字数收敛：量化删减/补充目标、3 轮小幅修正、候选优先选入区间者
 - [x] 6.4 单章超长防护：生成阶段上限校验 + 压缩动态 `max_tokens` + 落库前最终防线
-- [ ] 6.5 DeepSeek JSON 空响应：降级提示增强、JSON 开关可配置、失败可观测
+- [x] 6.5 DeepSeek JSON 空响应：降级提示增强、JSON 开关可配置（`providers.use_json_output`）、失败可观测；见 `docs/deepseek_json_mode.md`
 - [ ] 6.6 RAG 未启用时的显式提示与文档；装好 embedding 后复测去重/一致性
 - [ ] 6.7 后处理结果（弧光/关系/伏笔）前端接线
 
