@@ -1193,6 +1193,7 @@ def _run_single_stage(stage_id: str, locked: dict, user_filled: dict,
         temperature=role.temperature,
         task_type=stage_id,  # 入 log 时按 stage 分类（stage_1_base / stage_2a_theme / ...）
         project_id=project_id,
+        use_json=True,  # 本函数所有 stage 都要求 JSON 输出
     )
 
     result = _parse_json(response)
@@ -1292,6 +1293,7 @@ def _validate_and_fix_character_names(
             temperature=role.temperature,
             task_type=f"{stage_id}_refix",
             project_id=project_id,
+            use_json=True,
         )
         fixed_result = _parse_json(response)
         logger.info(f"[Character name check] 重新生成成功({stage_id})")
@@ -1608,6 +1610,7 @@ def _continue_chapter_outlines_if_needed(
                 temperature=0.6,
                 task_type=f"stage_4a_outline_continue_{loop_idx}",
                 project_id=project_id,
+                use_json=True,
             )
             parsed = _parse_json(response)
             new_outlines = parsed.get("chapter_outlines", []) if isinstance(parsed, dict) else []
@@ -1992,6 +1995,7 @@ def extend_outline_chapters(
                 temperature=0.6,
                 task_type="extend_outline_architecture",
                 project_id=project_id,
+                use_json=True,
             )
             parsed = _parse_json(response)
             if isinstance(parsed, dict):
@@ -3066,6 +3070,7 @@ def _parse_user_filled_character(
             temperature=0.2,
             task_type="bootstrap_parse_user_character",
             project_id=project_id,
+            use_json=True,
         )
         # 复用 workflow 内部的宽松 JSON 解析
         result = _parse_json(response)

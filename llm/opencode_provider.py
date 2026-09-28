@@ -37,6 +37,8 @@ class OpencodeProvider(LLMProvider):
     CONTEXT_WINDOW = 256_000
     # 推理模型会先消耗 reasoning tokens，给足预算避免 content 为空。
     MIN_MAX_TOKENS = 4096
+    # JSON 任务失败重试时的下限（reasoning 占用后仍需留出 JSON 输出空间）。
+    JSON_MIN_MAX_TOKENS = 8192
 
     SUPPORTED_MODELS = [
         "deepseek-v4.1-flash",
@@ -97,7 +99,9 @@ class OpencodeProvider(LLMProvider):
     ) -> str:
         client = self._get_client()
         requested = kwargs.get("max_tokens") or self.MIN_MAX_TOKENS
-        max_tokens = max(int(requested), self.MIN_MAX_TOKENS)
+        # JSON 任务 + 推理模型：给更高下限，避免 reasoning 占满导致 content 为空。
+        floor = self.JSON_MIN_MAX_TOKENS if kwargs.get("use_json") else self.MIN_MAX_TOKENS
+        max_tokens = max(int(requested), floor)
         temperature = kwargs.get("temperature", 0.7)
         task_type = kwargs.get("task_type", "generate")
         llm_call_id = kwargs.get("llm_call_id")
@@ -139,13 +143,40 @@ class OpencodeProvider(LLMProvider):
             finish_reason = getattr(choice, "finish_reason", None) if choice else None
 
             # 推理模型可能把 max_tokens 全用在 reasoning 上，content 为空。
-            # 这里回退到 reasoning 文本，避免整条链路拿到空响应。
-            if not text.strip() and reasoning.strip():
+            if not text.strip() and use_json:
+                # JSON 任务绝不能把 reasoning 文本当结果返回；用更大预算 +
+                # 明确约束重试一次。
                 logger.warning(
-                    f"[LLM:opencode] content 为空，回退使用 reasoning 文本 "
-                    f"(finish_reason={finish_reason}, reasoning_chars={len(reasoning)})"
+                    f"[LLM:opencode] JSON 模式 content 为空，放大 max_tokens 重试 "
+                    f"(finish={finish_reason}, 原 max_tokens={max_tokens}, reasoning_chars={len(reasoning)})"
                 )
-                text = reasoning
+                retry_kwargs = dict(api_kwargs)
+                retry_kwargs["max_tokens"] = max(max_tokens * 2, self.JSON_MIN_MAX_TOKENS)
+                retry_kwargs["messages"] = messages + [{
+                    "role": "user",
+                    "content": "请不要输出任何思考过程，直接输出合法的 JSON（以 { 开头，以 } 结尾）。",
+                }]
+                response = client.chat.completions.create(**retry_kwargs)
+                duration_ms = (time.time() - t0) * 1000
+                choice = response.choices[0] if response.choices else None
+                message = getattr(choice, "message", None) if choice else None
+                text = (getattr(message, "content", None) or "") if message else ""
+                reasoning = (getattr(message, "reasoning_content", None) or "") if message else ""
+                finish_reason = getattr(choice, "finish_reason", None) if choice else None
+
+            if not text.strip():
+                if use_json:
+                    raise RuntimeError(
+                        f"OpenCode JSON 模式返回空响应（finish_reason={finish_reason}）。"
+                        f"该模型可能为推理模型，请增大 max_tokens。"
+                    )
+                # 非 JSON 任务：允许回退 reasoning 文本，避免整条链路拿到空响应。
+                if reasoning.strip():
+                    logger.warning(
+                        f"[LLM:opencode] content 为空，回退使用 reasoning 文本 "
+                        f"(finish_reason={finish_reason}, reasoning_chars={len(reasoning)})"
+                    )
+                    text = reasoning
 
             if not text.strip():
                 raise RuntimeError(
